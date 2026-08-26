@@ -12,7 +12,15 @@
   "type": "commonjs",
   "dependencies": {
     "@prisma/client": "^7.9.1",
-    "express": "^5.2.1"
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "google-auth-library": "^11.0.2",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.9.4",
+    "nodemailer": "^9.0.5",
+    "nodemon": "^3.1.14",
+    "resend": "^6.22.1"
   },
   "devDependencies": {
     "prisma": "^7.9.1"
