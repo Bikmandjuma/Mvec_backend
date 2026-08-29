@@ -1,0 +1,11 @@
+{
+  "price": 1450000,
+  "discountPrice": 1350000,
+  "stockQuantity": 20,
+  "status": "ACTIVE",
+  "attributes": {
+    "color": "Titanium Black",
+    "capacity": "512GB",
+    "model": "SM-S928B"
+  }
+}

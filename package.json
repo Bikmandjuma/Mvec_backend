@@ -4,7 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "nodemon -e js,json,yaml server.js",
+    "seed": "node seedAdmin.js"
   },
   "keywords": [],
   "author": "",
@@ -20,9 +22,11 @@
     "mongoose": "^9.9.4",
     "nodemailer": "^9.0.5",
     "nodemon": "^3.1.14",
-    "resend": "^6.22.1"
+    "resend": "^6.22.1",
+    "swagger-ui-express": "^5.0.1",
+    "yamljs": "^0.3.0"
   },
   "devDependencies": {
-    "prisma": "^7.9.1"
+    "prisma": "^6.12.0"
   }
 }
