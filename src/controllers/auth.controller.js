@@ -179,16 +179,20 @@ exports.googleLogin = async (req, res) => {
 };
 
 
-// Helper: Configure Nodemailer transporter
-const sendResetEmail = async (toEmail, resetUrl) => {
-  const transporter = nodemailer.createTransport({
-    service: "Gmail",
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS, // App Password from Google Account
-    },
-  });
 
+// ─── HELPER: NODEMAILER TRANSPORTER ──────────────────────────────────────────
+// Initialized outside controllers so it reuses the connection pool
+const transporter = nodemailer.createTransport({
+  service: "Gmail",
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS, // App Password generated from Google Account
+  },
+});
+
+const sendResetEmail = async (toEmail, resetUrl) => {
+console.log("EMAIL_USER:", JSON.stringify(process.env.EMAIL_USER));
+console.log("EMAIL_PASS:", JSON.stringify(process.env.EMAIL_PASS));
   await transporter.sendMail({
     from: `"MVEC Support" <${process.env.EMAIL_USER}>`,
     to: toEmail,
@@ -205,7 +209,7 @@ const sendResetEmail = async (toEmail, resetUrl) => {
 };
 
 
-// 1. FORGOT PASSWORD CONTROLLER
+// ─── 1. FORGOT PASSWORD CONTROLLER ───────────────────────────────────────────
 exports.forgotPassword = async (req, res) => {
   try {
     const { email } = req.body;
@@ -216,9 +220,13 @@ exports.forgotPassword = async (req, res) => {
 
     const user = await User.findOne({ email: email.toLowerCase() });
 
-    // Security best practice: Always return generic message to prevent account enumeration
+    // Consistent response message to prevent email enumeration
+    const genericResponse = {
+      message: "If an account exists with that email, a reset link has been sent.",
+    };
+
     if (!user) {
-      return res.status(200).json({ message: "If an account exists with that email, a reset link has been sent." });
+      return res.status(200).json(genericResponse);
     }
 
     // Block Google OAuth users from password reset
@@ -230,7 +238,6 @@ exports.forgotPassword = async (req, res) => {
 
     // Generate unhashed random token for URL
     const resetToken = crypto.randomBytes(32).toString("hex");
-    console.log("Generated Reset Token:", resetToken); // Debugging line
 
     // Hash token before saving to database (SHA-256)
     user.resetPasswordToken = crypto.createHash("sha256").update(resetToken).digest("hex");
@@ -241,16 +248,14 @@ exports.forgotPassword = async (req, res) => {
     // Construct reset link for the React frontend
     const resetUrl = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
 
-    // ─── NESTED EMAIL TRY...CATCH STARTS HERE ──────────────────────────────
+    // Send email safely
     try {
       await sendResetEmail(user.email, resetUrl);
-      return res.status(200).json({ 
-        message: "If an account exists with that email, a reset link has been sent." 
-      });
+      return res.status(200).json(genericResponse);
     } catch (emailError) {
       console.error("Nodemailer Error:", emailError.message);
       
-      // Clear the reset fields in DB so no invalid token remains if sending fails
+      // Clear reset fields in DB so no invalid token remains if sending fails
       user.resetPasswordToken = undefined;
       user.resetPasswordExpires = undefined;
       await user.save();
@@ -259,7 +264,6 @@ exports.forgotPassword = async (req, res) => {
         message: "Could not send reset email. Please try again later." 
       });
     }
-    // ─── NESTED EMAIL TRY...CATCH ENDS HERE ────────────────────────────────
 
   } catch (error) {
     console.error("Forgot Password Error:", error);
@@ -267,7 +271,8 @@ exports.forgotPassword = async (req, res) => {
   }
 };
 
-// 2. RESET PASSWORD CONTROLLER
+
+// ─── 2. RESET PASSWORD CONTROLLER ────────────────────────────────────────────
 exports.resetPassword = async (req, res) => {
   try {
     const { token } = req.params;
@@ -277,7 +282,7 @@ exports.resetPassword = async (req, res) => {
       return res.status(400).json({ message: "New password is required" });
     }
 
-    // Hash the token from the URL parameter to match DB record
+    // Hash the token from URL parameter to match DB record
     const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
 
     // Search for user with matching token that hasn't expired yet
@@ -297,13 +302,14 @@ exports.resetPassword = async (req, res) => {
 
     await user.save();
 
-    return res.status(200).json({ message: "Password reset successful! You can now log in with your new password." });
+    return res.status(200).json({ 
+      message: "Password reset successful! You can now log in with your new password." 
+    });
   } catch (error) {
     console.error("Reset Password Error:", error);
     return res.status(500).json({ message: "Internal server error" });
   }
 };
-
 
 exports.addAddress = async (req, res) => {
   try {

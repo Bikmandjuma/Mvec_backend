@@ -9,7 +9,8 @@ exports.addStaffMember = async (req, res) => {
   try {
     const { email, role, permissions } = req.body;
 
-    const store = await Store.findOne({ owner: req.user.id });
+    // Fixed query: changed 'owner' to 'vendor'
+    const store = await Store.findOne({ vendor: req.user.id });
     if (!store) {
       return res.status(404).json({ message: "You must create a store before adding staff." });
     }
@@ -19,12 +20,15 @@ exports.addStaffMember = async (req, res) => {
       return res.status(404).json({ message: "User with this email does not exist." });
     }
 
+    if (userToInvite._id.toString() === req.user.id.toString()) {
+      return res.status(400).json({ message: "You cannot add yourself as a staff member." });
+    }
+
     const existingStaff = await Staff.findOne({ store: store._id, user: userToInvite._id });
     if (existingStaff) {
       return res.status(400).json({ message: "User is already a staff member of this store." });
     }
 
-    // Default permission profiles by role if not explicitly passed
     let defaultPermissions = permissions || {};
     if (role === "CATALOG_MANAGER") {
       defaultPermissions = { canManageProducts: true, canManageOrders: false, canViewAnalytics: false, canManageSettings: false, ...permissions };
@@ -54,7 +58,8 @@ exports.addStaffMember = async (req, res) => {
 // @access  Private (Vendor Owner Only)
 exports.getStoreStaff = async (req, res) => {
   try {
-    const store = await Store.findOne({ owner: req.user.id });
+    // Fixed query: changed 'owner' to 'vendor'
+    const store = await Store.findOne({ vendor: req.user.id });
     if (!store) return res.status(404).json({ message: "Store not found." });
 
     const staffList = await Staff.find({ store: store._id }).populate("user", "Fullname email role");
@@ -72,18 +77,24 @@ exports.updateStaffMember = async (req, res) => {
     const { role, permissions, status } = req.body;
 
     const staff = await Staff.findById(req.params.id);
-    if (!staff) return res.status(404).json({ message: "Staff record not found." });
+    if (!staff)
+      return res.status(404).json({ message: "Staff record not found." });
 
     if (staff.vendorOwner.toString() !== req.user.id.toString()) {
-      return res.status(403).json({ message: "Unauthorized to modify this staff member." });
+      return res
+        .status(403)
+        .json({ message: "Unauthorized to modify this staff member." });
     }
 
     if (role) staff.role = role;
     if (status) staff.status = status;
-    if (permissions) staff.permissions = { ...staff.permissions, ...permissions };
+    if (permissions)
+      staff.permissions = { ...staff.permissions, ...permissions };
 
     await staff.save();
-    return res.status(200).json({ message: "Staff permissions updated", staff });
+    return res
+      .status(200)
+      .json({ message: "Staff permissions updated", staff });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }
@@ -95,14 +106,19 @@ exports.updateStaffMember = async (req, res) => {
 exports.removeStaffMember = async (req, res) => {
   try {
     const staff = await Staff.findById(req.params.id);
-    if (!staff) return res.status(404).json({ message: "Staff record not found." });
+    if (!staff)
+      return res.status(404).json({ message: "Staff record not found." });
 
     if (staff.vendorOwner.toString() !== req.user.id.toString()) {
-      return res.status(403).json({ message: "Unauthorized to remove this staff member." });
+      return res
+        .status(403)
+        .json({ message: "Unauthorized to remove this staff member." });
     }
 
     await staff.deleteOne();
-    return res.status(200).json({ message: "Staff member removed successfully." });
+    return res
+      .status(200)
+      .json({ message: "Staff member removed successfully." });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }
