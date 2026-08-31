@@ -13,10 +13,10 @@ const vendorBalanceSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Store",
     },
-    totalEarned: { type: Number, default: 0 },      // Total gross vendor earnings lifetime
-    commissionPaid: { type: Number, default: 0 },  // Total platform fees deducted lifetime
-    pendingBalance: { type: Number, default: 0 },  // Earnings from active/undelivered orders
-    availableBalance: { type: Number, default: 0 },// Funds available for immediate payout
+    totalEarned: { type: Number, default: 0 },      // Total gross vendor sales lifetime
+    commissionPaid: { type: Number, default: 0 },  // Total 10% platform fees deducted lifetime
+    pendingBalance: { type: Number, default: 0 },  // 90% net earnings from active/undelivered orders
+    availableBalance: { type: Number, default: 0 },// Funds available for immediate withdrawal
     withdrawnAmount: { type: Number, default: 0 }, // Total payouts completed
   },
   { timestamps: true }
@@ -38,23 +38,24 @@ const payoutSchema = new mongoose.Schema(
     amount: {
       type: Number,
       required: true,
-      min: [1000, "Minimum payout request amount is 1,000"],
+      min: [1000, "Minimum payout request amount is 1,000 RWF"],
     },
     payoutMethod: {
       type: String,
-      enum: ["BANK_TRANSFER", "MOBILE_MONEY"],
-      default: "MOBILE_MONEY",
+      enum: ["MOMO", "AIRTEL"],
+      default: "MOMO",
     },
     payoutDetails: {
       accountName: { type: String, required: true },
-      accountNumber: { type: String, required: true }, // Phone number or Bank account #
-      bankName: { type: String, default: "MTN MoMo" },
+      accountNumber: { type: String, required: true }, // MoMo phone number (e.g., 250788123456) or Bank account #
+      bankName: { type: String, default: "MTN MoMo" },  // "MTN MoMo", "Airtel Money", or Bank Name
     },
     status: {
       type: String,
-      enum: ["PENDING", "PROCESSING", "PAID", "REJECTED"],
+      enum: ["PENDING", "PROCESSING", "PAID", "REJECTED", "FAILED"],
       default: "PENDING",
     },
+    transferReference: String, // Gateway transfer reference ID
     rejectionReason: String,
     processedAt: Date,
   },

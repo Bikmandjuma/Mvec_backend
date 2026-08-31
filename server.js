@@ -34,6 +34,9 @@ app.use("/api/orders", require("./src/routes/order.routes"));
 app.use("/api/stores", require("./src/routes/store.routes"));
 app.use("/api/payouts", require("./src/routes/payout.routes"));
 app.use("/api/staff", require("./src/routes/staff.routes"));
+app.use("/api/payments", require("./src/routes/payment.routes"));
+
+// Swagger documentation route
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
 app.get("/", (req, res) => {

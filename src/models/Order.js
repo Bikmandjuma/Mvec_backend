@@ -60,8 +60,8 @@ const orderSchema = new mongoose.Schema(
     },
     paymentMethod: {
       type: String,
-      enum: ["CARD", "PAYSTACK", "STRIPE", "CASH_ON_DELIVERY"],
-      default: "CARD",
+      enum: ["MOMO", "AIRTEL", "CASH_ON_DELIVERY"],
+      default: "MOMO",
     },
     paymentReference: String,
   },

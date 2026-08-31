@@ -4,19 +4,16 @@ const {
   getVendorBalance,
   requestPayout,
   getPayoutHistory,
-  processPayout,
 } = require("../controllers/payout.controller");
 
 const { protect, authorize } = require("../middleware/auth.middleware");
 
+// Require authentication for all payout endpoints
 router.use(protect);
 
-// Vendor Financial Endpoints
+// Vendor Financial Endpoints (Automated Instant Payouts)
 router.get("/balance", authorize("vendor"), getVendorBalance);
 router.post("/request", authorize("vendor"), requestPayout);
 router.get("/history", authorize("vendor"), getPayoutHistory);
-
-// Super Admin Management
-router.patch("/admin/:id/process", authorize("super_admin"), processPayout);
 
 module.exports = router;
