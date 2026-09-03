@@ -1,4 +1,3 @@
-// src/models/Payment.js
 const mongoose = require("mongoose");
 
 const paymentSchema = new mongoose.Schema(
@@ -7,22 +6,26 @@ const paymentSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Order",
       required: true,
+      index: true,
     },
     transactionReference: {
       type: String,
+      required: true,
       unique: true,
+      index: true,
     },
     method: {
       type: String,
-      enum: ["MOMO", "AIRTEL", "MOBILE_MONEY", "CARD", "BANK_TRANSFER", "GATEWAY", "CASH_ON_DELIVERY"],
+      enum: ["MOMO", "AIRTEL", "CASH_ON_DELIVERY"],
       required: true,
     },
     phoneNumber: {
-      type: String, // Stores formatted Rwandan line (e.g., 250788123456)
+      type: String, // E.g., 250788XXXXXX or 25073XXXXXXX
     },
     provider: {
       type: String,
-      enum: ["MTN", "AIRTEL", "UNKNOWN"],
+      enum: ["MTN", "AIRTEL", "CASH"],
+      required: true,
     },
     status: {
       type: String,
@@ -45,6 +48,4 @@ const paymentSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-const Payment = mongoose.model("Payment", paymentSchema);
-
-module.exports = Payment;
+module.exports = mongoose.model("Payment", paymentSchema);

@@ -1,20 +1,20 @@
-// src/controllers/payment.controller.js
+const mongoose = require("mongoose");
 const Order = require("../models/Order");
-const PayoutLedger = require("../models/Payout");
 const Payment = require("../models/Payment");
+const PaymentWebhookLog = require("../models/PaymentWebhookLog");
 const { formatRwandanPhone } = require("../utils/momo.util");
+const pricingService = require("../services/pricing.service");
+const financialService = require("../services/financial.service");
 
-const COMMISSION_RATE = 0.10; // 10% Platform Fee
-
-// 1. Initiate MoMo Payment
-const initiateMoMoPayment = async (req, res) => {
+// 1. Initiate MoMo / Airtel Payment
+exports.initiateMoMoPayment = async (req, res) => {
   try {
     const { orderId, phoneNumber } = req.body;
 
     const phoneInfo = formatRwandanPhone(phoneNumber);
     if (!phoneInfo) {
       return res.status(400).json({
-        message: "Invalid Rwandan phone number. Must start with 078/079 (MTN) or 073 (Airtel).",
+        message: "Invalid Rwandan phone number. Must start with 078/079 (MTN) or 073/072 (Airtel).",
       });
     }
 
@@ -23,10 +23,14 @@ const initiateMoMoPayment = async (req, res) => {
       return res.status(404).json({ message: "Order not found." });
     }
 
+    if (order.paymentStatus === "PAID") {
+      return res.status(400).json({ message: "Order is already paid." });
+    }
+
     const paymentMethod = phoneInfo.provider === "MTN" ? "MOMO" : "AIRTEL";
     const transactionRef = `ORD-${order._id}-${Date.now()}`;
 
-    // Create Payment Record
+    // Create or update pending Payment record
     const payment = await Payment.create({
       parentOrder: order._id,
       transactionReference: transactionRef,
@@ -38,7 +42,6 @@ const initiateMoMoPayment = async (req, res) => {
       status: "PENDING",
     });
 
-    // Update order status reference
     order.paymentMethod = paymentMethod;
     await order.save();
 
@@ -53,53 +56,97 @@ const initiateMoMoPayment = async (req, res) => {
   }
 };
 
-// 2. Webhook Callback Handler
-const handlePaymentWebhook = async (req, res) => {
+// 2. Idempotent Webhook Handler with Escrow & Dynamic Commissioning
+exports.handlePaymentWebhook = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
     const event = req.body;
+    
+    // Paystack / MoMo Provider standard payload parsing
+    const reference = event.data?.reference || event.reference;
+    const amount = event.data?.amount || event.amount;
+    const isSuccessful = event.event === "charge.success" || event.status === "SUCCESSFUL";
 
-    if (event.event === "charge.success") {
-      const { reference, amount } = event.data;
-
-      // Find payment record by transaction reference
-      const payment = await Payment.findOne({ transactionReference: reference });
-
-      if (payment && payment.status !== "SUCCESS") {
-        payment.status = "SUCCESS";
-        payment.paidAt = new Date();
-        payment.gatewayResponse = event.data;
-        await payment.save();
-
-        // Update corresponding Order status
-        const order = await Order.findById(payment.parentOrder);
-        if (order) {
-          order.paymentStatus = "PAID";
-          order.orderStatus = "CONFIRMED";
-          await order.save();
-
-          // Financial Split (10% Platform / 90% Vendor)
-          const platformFee = Math.round(amount * COMMISSION_RATE);
-          const vendorAmount = amount - platformFee;
-
-          await PayoutLedger.create({
-            vendor: order.vendor,
-            order: order._id,
-            grossAmount: amount,
-            platformFee: platformFee,
-            netAmount: vendorAmount,
-            status: "PENDING",
-          });
-        }
-      }
+    if (!isSuccessful) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(200).json({ status: "ignored", message: "Transaction not successful" });
     }
 
-    return res.status(200).json({ status: "success" });
+    // 1. Idempotency Check: Avoid processing duplicate webhook callbacks
+    const existingLog = await PaymentWebhookLog.findOne({ externalTransactionId: reference }).session(session);
+    if (existingLog && existingLog.status === "PROCESSED") {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(200).json({ status: "success", message: "Already processed" });
+    }
+
+    // 2. Locate Payment & Order Records
+    const payment = await Payment.findOne({ transactionReference: reference }).session(session);
+    if (!payment) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(404).json({ message: "Associated payment record not found." });
+    }
+
+    const order = await Order.findById(payment.parentOrder).session(session);
+    if (!order) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(404).json({ message: "Associated order not found." });
+    }
+
+    // 3. Mark Payment & Order as PAID
+    payment.status = "SUCCESS";
+    payment.paidAt = new Date();
+    payment.gatewayResponse = event;
+    await payment.save({ session });
+
+    order.paymentStatus = "PAID";
+    order.orderStatus = "PROCESSING";
+    await order.save({ session });
+
+    // 4. Evaluate Dynamic Commission & Lock Escrow Funds per Vendor Item
+    for (const item of order.items) {
+      const snapshot = await pricingService.createItemPricingSnapshot({
+        orderId: order._id,
+        item,
+        session,
+      });
+
+      await financialService.lockPaymentInEscrow({
+        orderId: order._id,
+        vendorId: item.vendor,
+        grossAmount: snapshot.grossTotal,
+        commissionAmount: snapshot.commissionAmount,
+        session,
+      });
+    }
+
+    // 5. Create Idempotency Audit Log Entry
+    await PaymentWebhookLog.create(
+      [
+        {
+          provider: payment.provider === "MTN" ? "MTN_MOMO" : "AIRTEL_MONEY",
+          externalTransactionId: reference,
+          internalOrderId: order._id,
+          status: "PROCESSED",
+          amount: payment.amount,
+          rawPayload: event,
+        },
+      ],
+      { session }
+    );
+
+    await session.commitTransaction();
+    session.endSession();
+
+    return res.status(200).json({ status: "success", message: "Payment processed & escrow locked." });
   } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
     return res.status(500).json({ message: "Webhook processing error", error: error.message });
   }
-};
-
-module.exports = {
-  initiateMoMoPayment,
-  handlePaymentWebhook,
 };

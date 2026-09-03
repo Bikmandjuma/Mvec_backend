@@ -63,6 +63,20 @@ const orderSchema = new mongoose.Schema(
       enum: ["MOMO", "AIRTEL", "CASH_ON_DELIVERY"],
       default: "MOMO",
     },
+    // Add these fields to orderSchema if missing:
+    slaBreached: {
+      type: Boolean,
+      default: false,
+    },
+    slaBreachedAt: {
+      type: Date,
+    },
+    cancellationReason: {
+      type: String,
+    },
+    adminNotes: {
+      type: String,
+    },
     paymentReference: String,
   },
   { timestamps: true },

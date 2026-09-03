@@ -1,13 +1,12 @@
-// src/routes/payment.routes.js
 const express = require("express");
 const router = express.Router();
 const { protect } = require("../middleware/auth.middleware");
 const { initiateMoMoPayment, handlePaymentWebhook } = require("../controllers/payment.controller");
 
-// Initiate MoMo Push Notification Prompt
+// Initiate MoMo / Airtel Push Notification
 router.post("/momo/initiate", protect, initiateMoMoPayment);
 
-// Payment Gateway Webhook Callback (No protect middleware - called directly by Paystack)
+// Gateway Webhook Callback (Public endpoint verified via idempotency & reference check)
 router.post("/webhook", handlePaymentWebhook);
 
 module.exports = router;

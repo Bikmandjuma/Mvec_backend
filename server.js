@@ -15,6 +15,7 @@ const routes = require("./src/routes/auth.routes");
 const User = require("./src/models/User");
 const Category = require("./src/models/Category");
 const Product = require("./src/models/Product");
+const { initBackgroundWorkers } = require("./src/workers/slaWorker");
 
 dotenv.config();
 
@@ -43,6 +44,13 @@ app.use("/api/payouts", require("./src/routes/payout.routes"));
 app.use("/api/staff", require("./src/routes/staff.routes"));
 app.use("/api/payments", require("./src/routes/payment.routes"));
 app.use("/api/admin", require("./src/routes/admin.financial.routes"));
+app.use("/api/admin", require("./src/routes/admin.commission.routes"));
+
+// Initialize background cron tasks once DB connection is established
+mongoose.connection.once("open", () => {
+  console.log("Connected to MongoDB.");
+  initBackgroundWorkers();
+});
 
 // Swagger documentation route
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
