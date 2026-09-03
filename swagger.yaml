@@ -1,7 +1,7 @@
 openapi: 3.0.0
 info:
   title: MVEC Multi-Vendor Marketplace API
-  description: Complete OpenAPI 3.0 specification generated from existing Express routes (Auth, Cart, Orders, Payouts, Products, and Store Profiles).
+  description: Consolidated OpenAPI 3.0 specification covering Authentication, Cart, Orders, Products, Stores, Staff Management, Double-Entry Ledger, Commission Rules, Payment Webhooks, B2B Wholesale, Disputes & Arbitration, and Affiliate Marketing Engine.
   version: 1.0.0
 servers:
   - url: http://localhost:4000/api
@@ -35,7 +35,7 @@ paths:
                   example: "Password123!"
                 role:
                   type: string
-                  enum: [buyer, vendor]
+                  enum: [buyer, vendor, courier]
                   default: "buyer"
       responses:
         '201':
@@ -298,8 +298,8 @@ paths:
                   $ref: '#/components/schemas/AddressInput'
                 paymentMethod:
                   type: string
-                  enum: [CARD, PAYSTACK, STRIPE, CASH_ON_DELIVERY]
-                  default: "CARD"
+                  enum: [CARD, PAYSTACK, STRIPE, MOMO, CASH_ON_DELIVERY]
+                  default: "MOMO"
       responses:
         '201':
           description: Order created successfully
@@ -328,7 +328,7 @@ paths:
 
   /orders/vendor/status:
     patch:
-      summary: Update Order Status (Vendor & Super Admin)
+      summary: Update Order Status (Vendor & Staff Permission)
       tags: [Orders]
       security:
         - BearerAuth: []
@@ -350,9 +350,7 @@ paths:
                   enum: [PENDING, CONFIRMED, PAID, FAILED, REFUNDED]
       responses:
         '200':
-          description: Status updated (Triggers balance calculation if DELIVERED)
-        '403':
-          description: Unauthorized vendor
+          description: Status updated
 
   /orders/{id}:
     get:
@@ -372,70 +370,10 @@ paths:
         '404':
           description: Order not found
 
-  # ==========================================
-  # PAYOUT ROUTES
-  # ==========================================
-  /payouts/balance:
-    get:
-      summary: Get Vendor Financial Balance (Vendor Only)
-      tags: [Payouts]
-      security:
-        - BearerAuth: []
-      responses:
-        '200':
-          description: Vendor ledger (availableBalance, pendingBalance, totalEarned, commissionPaid)
-
-  /payouts/request:
-    post:
-      summary: Request Payout / Withdrawal (Vendor Only)
-      tags: [Payouts]
-      security:
-        - BearerAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [amount, payoutDetails]
-              properties:
-                amount:
-                  type: number
-                  example: 50000
-                payoutMethod:
-                  type: string
-                  enum: [MOBILE_MONEY, BANK_TRANSFER]
-                  default: "MOBILE_MONEY"
-                payoutDetails:
-                  type: object
-                  required: [accountName, accountNumber]
-                  properties:
-                    accountName:
-                      type: string
-                    accountNumber:
-                      type: string
-                    bankName:
-                      type: string
-      responses:
-        '201':
-          description: Payout request submitted successfully
-        '400':
-          description: Insufficient funds
-
-  /payouts/history:
-    get:
-      summary: Get Payout Request History (Vendor Only)
-      tags: [Payouts]
-      security:
-        - BearerAuth: []
-      responses:
-        '200':
-          description: Vendor payout request list
-
-  /payouts/admin/{id}/process:
+  /orders/{id}/status:
     patch:
-      summary: Approve or Reject Payout Request (Super Admin Only)
-      tags: [Payouts (Admin)]
+      summary: General Order Status Update (Admin & Vendor)
+      tags: [Orders]
       security:
         - BearerAuth: []
       parameters:
@@ -454,14 +392,25 @@ paths:
               properties:
                 status:
                   type: string
-                  enum: [PAID, REJECTED]
-                rejectionReason:
-                  type: string
       responses:
         '200':
-          description: Payout request processed
-        '400':
-          description: Terminal state guard (Cannot alter completed request)
+          description: Order status updated
+
+  /orders/{id}/deliver:
+    patch:
+      summary: Confirm Order Delivery and Trigger Escrow Payout (Super Admin & Courier)
+      tags: [Orders]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Delivery confirmed and earnings released
 
   # ==========================================
   # PRODUCT ROUTES
@@ -475,7 +424,7 @@ paths:
           description: List of active products
 
     post:
-      summary: Create Product (Vendor & Super Admin)
+      summary: Create Product (Vendor, Admin & Staff Permission)
       tags: [Products]
       security:
         - BearerAuth: []
@@ -528,7 +477,7 @@ paths:
           description: Product details
 
     put:
-      summary: Update Product (Vendor & Super Admin)
+      summary: Update Product (Vendor, Admin & Staff Permission)
       tags: [Products]
       security:
         - BearerAuth: []
@@ -549,7 +498,7 @@ paths:
           description: Product updated
 
     delete:
-      summary: Delete Product (Vendor & Super Admin)
+      summary: Delete Product (Vendor, Admin & Staff Permission)
       tags: [Products]
       security:
         - BearerAuth: []
@@ -628,8 +577,569 @@ paths:
         '200':
           description: Store updated successfully
 
+  # ==========================================
+  # STORE STAFF MANAGEMENT ROUTES
+  # ==========================================
+  /staff:
+    get:
+      summary: Get Vendor Store Staff Members
+      tags: [Store Staff]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: List of assigned store staff
+
+    post:
+      summary: Add New Store Staff Member
+      tags: [Store Staff]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, permissions]
+              properties:
+                email:
+                  type: string
+                permissions:
+                  type: object
+                  properties:
+                    canManageOrders:
+                      type: boolean
+                    canManageProducts:
+                      type: boolean
+      responses:
+        '201':
+          description: Staff member assigned successfully
+
+  /staff/{id}:
+    put:
+      summary: Update Staff Member Permissions
+      tags: [Store Staff]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                permissions:
+                  type: object
+      responses:
+        '200':
+          description: Permissions updated
+
+    delete:
+      summary: Remove Staff Member
+      tags: [Store Staff]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Staff member removed
+
+  # ==========================================
+  # PAYMENT & WEBHOOK ROUTES
+  # ==========================================
+  /payments/momo/initiate:
+    post:
+      summary: Initiate MoMo / Airtel Push Payment
+      tags: [Payments]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [orderId, phoneNumber, amount]
+              properties:
+                orderId:
+                  type: string
+                phoneNumber:
+                  type: string
+                  example: "+250788123456"
+                amount:
+                  type: number
+                  example: 15000
+      responses:
+        '200':
+          description: Payment push notification initiated
+
+  /payments/webhook:
+    post:
+      summary: Payment Gateway Callback Webhook (Idempotent)
+      tags: [Payments]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transactionRef, status]
+              properties:
+                transactionRef:
+                  type: string
+                status:
+                  type: string
+                  enum: [SUCCESSFUL, FAILED]
+      responses:
+        '200':
+          description: Webhook processed successfully
+
+  # ==========================================
+  # VENDOR PAYOUT ROUTES
+  # ==========================================
+  /payouts/balance:
+    get:
+      summary: Get Vendor Financial Balance (Vendor Only)
+      tags: [Payouts]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Vendor ledger balance object
+
+  /payouts/request:
+    post:
+      summary: Request Payout / Withdrawal (Vendor Only)
+      tags: [Payouts]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, payoutDetails]
+              properties:
+                amount:
+                  type: number
+                  example: 50000
+                payoutMethod:
+                  type: string
+                  enum: [MOBILE_MONEY, BANK_TRANSFER]
+                payoutDetails:
+                  type: object
+                  properties:
+                    accountName:
+                      type: string
+                    accountNumber:
+                      type: string
+      responses:
+        '201':
+          description: Payout requested
+
+  /payouts/history:
+    get:
+      summary: Get Payout Request History (Vendor Only)
+      tags: [Payouts]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: History of vendor payouts
+
+  # ==========================================
+  # COMMISSION MANAGEMENT (SUPER ADMIN)
+  # ==========================================
+  /commissions:
+    get:
+      summary: Fetch Commission Rules (Super Admin Only)
+      tags: [Commissions (Admin)]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: List of category/vendor commission rules
+
+    post:
+      summary: Create Commission Rule (Super Admin Only)
+      tags: [Commissions (Admin)]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [percentage]
+              properties:
+                category:
+                  type: string
+                vendor:
+                  type: string
+                percentage:
+                  type: number
+                  example: 10
+                fixedFee:
+                  type: number
+                  example: 500
+      responses:
+        '201':
+          description: Commission rule created
+
+  /commissions/{id}/toggle:
+    patch:
+      summary: Toggle Active Status of Commission Rule (Super Admin Only)
+      tags: [Commissions (Admin)]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Status toggled
+
+  # ==========================================
+  # FINANCIAL LEDGER & ESCROW (SUPER ADMIN)
+  # ==========================================
+  /financial/ledger:
+    get:
+      summary: Get Double-Entry Ledger Entries (Super Admin Only)
+      tags: [Financial Ledger (Admin)]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Audit ledger entries list
+
+  /financial/settlements/{id}/hold:
+    patch:
+      summary: Place Administrative Hold on Vendor Settlement (Super Admin Only)
+      tags: [Financial Ledger (Admin)]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Administrative hold applied
+
+  /financial/settlements/{id}/release:
+    post:
+      summary: Manually Release Escrow Settlement (Super Admin Only)
+      tags: [Financial Ledger (Admin)]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Escrow funds manually released
+
+  # ==========================================
+  # B2B WHOLESALE ROUTES
+  # ==========================================
+  /wholesale/orders:
+    post:
+      summary: Create B2B Wholesale Order (MOQ Enforced)
+      tags: [Wholesale B2B]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [supplierId, items]
+              properties:
+                supplierId:
+                  type: string
+                items:
+                  type: array
+                  items:
+                    type: object
+                    required: [product, productName, unitPrice, quantity, moq]
+                    properties:
+                      product:
+                        type: string
+                      productName:
+                        type: string
+                      unitPrice:
+                        type: number
+                      quantity:
+                        type: integer
+                      moq:
+                        type: integer
+      responses:
+        '201':
+          description: Wholesale order created
+        '400':
+          description: MOQ validation failure
+
+  /wholesale/orders/{orderId}/hold-escrow:
+    post:
+      summary: Lock B2B Wholesale Order Funds in Escrow
+      tags: [Wholesale B2B]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: orderId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Escrow locked successfully
+
+  /wholesale/orders/{orderId}/confirm-receipt:
+    post:
+      summary: Confirm Physical Receipt & Release Escrow Funds to Supplier
+      tags: [Wholesale B2B]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: orderId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                otp:
+                  type: string
+      responses:
+        '200':
+          description: Receipt confirmed and escrow released
+
+  # ==========================================
+  # DISPUTE & ARBITRATION ROUTES
+  # ==========================================
+  /disputes:
+    post:
+      summary: Open a Dispute Case for an Order
+      tags: [Disputes]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [orderId, reason, description]
+              properties:
+                orderId:
+                  type: string
+                reason:
+                  type: string
+                  enum: [ITEM_NOT_RECEIVED, DAMAGED_GOODS, WRONG_ITEM, INCOMPLETE_ORDER, SLA_BREACH, OTHER]
+                description:
+                  type: string
+                disputedAmount:
+                  type: number
+      responses:
+        '201':
+          description: Dispute opened successfully
+
+  /disputes/{disputeId}/evidence:
+    post:
+      summary: Attach Evidence Files or Chat to Dispute Case
+      tags: [Disputes]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: disputeId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message:
+                  type: string
+                attachments:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      fileUrl:
+                        type: string
+                      fileType:
+                        type: string
+      responses:
+        '201':
+          description: Evidence attached
+
+  /disputes/{disputeId}/arbitrate:
+    post:
+      summary: Execute Binding Admin Dispute Arbitration (Super Admin Only)
+      tags: [Disputes]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: disputeId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision:
+                  type: string
+                  enum: [REFUND_BUYER, RELEASE_TO_VENDOR, SPLIT_SETTLEMENT]
+                buyerRefundAmount:
+                  type: number
+                vendorReleaseAmount:
+                  type: number
+                notes:
+                  type: string
+      responses:
+        '200':
+          description: Arbitration decision executed
+
+  # ==========================================
+  # AFFILIATE MARKETING ROUTES
+  # ==========================================
+  /affiliates/links:
+    post:
+      summary: Generate Affiliate Referral Code Link
+      tags: [Affiliates]
+      security:
+        - BearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                productId:
+                  type: string
+      responses:
+        '201':
+          description: Referral link generated
+
+  /affiliates/track/{code}:
+    get:
+      summary: Track Public Click on Referral Link (Fraud Guard Protected)
+      tags: [Affiliates]
+      parameters:
+        - in: path
+          name: code
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Referral click recorded
+
+  /affiliates/payouts/request:
+    post:
+      summary: Request Affiliate Withdrawal (Minimum 10,000 RWF Enforced)
+      tags: [Affiliates]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, paymentMethod, accountDetails]
+              properties:
+                amount:
+                  type: number
+                  example: 10000
+                paymentMethod:
+                  type: string
+                  enum: [MTN_MOMO, AIRTEL_MONEY, BANK_TRANSFER]
+                accountDetails:
+                  type: object
+                  properties:
+                    phoneNumber:
+                      type: string
+                    accountName:
+                      type: string
+      responses:
+        '201':
+          description: Affiliate payout requested
+        '400':
+          description: Below 10,000 RWF minimum threshold or insufficient balance
+
+  /affiliates/payouts/{payoutId}/process:
+    post:
+      summary: Review and Approve Affiliate Withdrawal (Super Admin Only)
+      tags: [Affiliates]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: payoutId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [COMPLETED, REJECTED]
+                transactionReference:
+                  type: string
+                rejectionReason:
+                  type: string
+      responses:
+        '200':
+          description: Affiliate payout status updated
+
 # ==========================================
-# REUSABLE COMPONENTS
+# REUSABLE COMPONENTS & SCHEMAS
 # ==========================================
 components:
   securitySchemes:
@@ -677,6 +1187,9 @@ components:
         category:
           type: string
           example: "Electronics"
+        moq:
+          type: integer
+          default: 1
         status:
           type: string
           enum: [ACTIVE, INACTIVE, OUT_OF_STOCK]

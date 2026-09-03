@@ -33,7 +33,8 @@ async function getApplicableCommissionRule({ productId, vendorId, categoryId }) 
  * Calculates item totals, computes dynamic platform commission, and writes snapshot
  */
 exports.createItemPricingSnapshot = async ({ orderId, item, session }) => {
-  const { product, vendor, category, unitPrice, quantity } = item;
+  const { product, vendor, category, price, quantity } = item;
+  const unitPrice = price;
   const grossTotal = unitPrice * quantity;
 
   // 1. Evaluate applicable dynamic commission rule

@@ -11,6 +11,10 @@ const orderItemSchema = new mongoose.Schema({
     ref: "User",
     required: true,
   },
+  category: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Category",
+  },
   name: { type: String, required: true },
   price: { type: Number, required: true },
   quantity: { type: Number, required: true },

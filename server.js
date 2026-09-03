@@ -45,6 +45,9 @@ app.use("/api/staff", require("./src/routes/staff.routes"));
 app.use("/api/payments", require("./src/routes/payment.routes"));
 app.use("/api/admin", require("./src/routes/admin.financial.routes"));
 app.use("/api/admin", require("./src/routes/admin.commission.routes"));
+app.use("/api/wholesale", require("./src/routes/wholesale.routes"));
+app.use("/api/disputes", require("./src/routes/dispute.routes"));
+
 
 // Initialize background cron tasks once DB connection is established
 mongoose.connection.once("open", () => {

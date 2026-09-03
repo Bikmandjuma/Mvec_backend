@@ -83,8 +83,7 @@ exports.releaseEscrowToVendor = async ({ settlementId, session }) => {
     throw new Error("Settlement not found.");
   }
 
-  // Allow release for standard HELD or ADMIN_HOLD settlements
-  if (!["HELD", "ADMIN_HOLD"].includes(settlement.status)) {
+  if (settlement.status !== "HELD") {
     throw new Error(`Settlement is not eligible for release with status: ${settlement.status}`);
   }
 
