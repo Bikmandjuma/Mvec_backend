@@ -1,7 +1,10 @@
 const Order = require("../models/Order");
 const Cart = require("../models/Cart");
 const Product = require("../models/Product");
-const { releaseOrderEarnings } = require("./payout.controller");
+const Settlement = require("../models/Settlement");
+const LedgerEntry = require("../models/LedgerEntry");
+const VendorWallet = require("../models/VendorWallet");
+const payoutController = require("./payout.controller");
 
 // Helper function to generate unique order numbers
 const generateOrderNumber = () => {
@@ -125,9 +128,9 @@ exports.getOrderById = async (req, res) => {
     }
 
     // Verify ownership or vendor access
-    const isBuyer = order.user._id.toString() === req.user.id.toString();
-    const isVendor = order.items.some(
-      (item) => item.vendor._id.toString() === req.user.id.toString(),
+    const isBuyer = order.user && order.user._id.toString() === req.user.id.toString();
+    const isVendor = order.items && order.items.some(
+      (item) => item.vendor && item.vendor._id.toString() === req.user.id.toString(),
     );
     const isAdmin = req.user.role === "super_admin";
 
@@ -153,7 +156,7 @@ exports.getVendorOrders = async (req, res) => {
     // Filter order items to only include products belonging to this vendor
     const filteredOrders = orders.map((order) => {
       const vendorItems = order.items.filter(
-        (item) => item.vendor.toString() === req.user.id.toString(),
+        (item) => item.vendor && item.vendor.toString() === req.user.id.toString(),
       );
 
       return {
@@ -211,8 +214,8 @@ exports.updateVendorOrderStatus = async (req, res) => {
     }
 
     // Verify vendor ownership
-    const hasVendorItems = order.items.some(
-      (item) => item.vendor.toString() === req.user.id.toString(),
+    const hasVendorItems = order.items && order.items.some(
+      (item) => item.vendor && item.vendor.toString() === req.user.id.toString(),
     );
 
     if (!hasVendorItems && req.user.role !== "super_admin") {
@@ -243,9 +246,9 @@ exports.updateVendorOrderStatus = async (req, res) => {
 
     await order.save();
 
-    //Trigger payout release if order is marked as DELIVERED
+    // Trigger payout release if order is marked as DELIVERED
     if (status === "DELIVERED") {
-      await releaseOrderEarnings(order._id, req.user.id);
+      await payoutController.releaseOrderEarnings(order._id, req.user.id);
     }
 
     return res.status(200).json({
@@ -256,3 +259,175 @@ exports.updateVendorOrderStatus = async (req, res) => {
     return res.status(500).json({ message: error.message });
   }
 };
+
+// @desc    Update Order Status (e.g., PENDING -> PROCESSING -> SHIPPED -> DELIVERED)
+// @route   PATCH /api/orders/:id/status
+// @access  Private (Vendor / Admin)
+exports.updateOrderStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    const validStatuses = ["PENDING", "PROCESSING", "SHIPPED", "DELIVERED", "CANCELLED"];
+    if (!status || !validStatuses.includes(status.toUpperCase())) {
+      return res.status(400).json({ message: "Invalid order status provided." });
+    }
+
+    const order = await Order.findById(id);
+    if (!order) {
+      return res.status(404).json({ message: "Order not found." });
+    }
+
+    const updatedStatus = status.toUpperCase();
+
+    // Prevent re-processing already delivered orders
+    if (order.orderStatus === "DELIVERED") {
+      return res.status(400).json({ message: "Order has already been marked as DELIVERED." });
+    }
+
+    order.orderStatus = updatedStatus;
+    
+    if (updatedStatus === "DELIVERED") {
+      order.deliveredAt = new Date();
+      order.isDelivered = true;
+    }
+
+    await order.save();
+
+    // 🚀 EARNINGS RELEASE ENGINE
+    // If status reaches DELIVERED, release pending earnings per vendor in the order
+    if (updatedStatus === "DELIVERED") {
+      // Find all unique vendors involved in this order
+      const vendorIds = [
+        ...new Set(
+          (order.items || [])
+            .filter((item) => item.vendor)
+            .map((item) => item.vendor.toString())
+        ),
+      ];
+
+      // Release earnings for each vendor asynchronously
+      for (const vendorId of vendorIds) {
+        await payoutController.releaseOrderEarnings(order._id, vendorId);
+      }
+    }
+
+    return res.status(200).json({
+      message: `Order status successfully updated to ${updatedStatus}.`,
+      order,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+
+// @desc    Confirm Order Delivery & Release Escrow Funds
+// @route   PATCH /api/orders/:id/deliver
+// @access  Private (Admin / Delivery Agent)
+exports.confirmOrderDelivery = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const { id } = req.params;
+    const { deliveryOtp } = req.body; // Proof of delivery check
+
+    const order = await Order.findById(id).session(session);
+    if (!order) {
+      await session.abortTransaction();
+      return res.status(404).json({ message: "Order not found." });
+    }
+
+    if (order.orderStatus === "DELIVERED") {
+      await session.abortTransaction();
+      return res.status(400).json({ message: "Order is already marked as DELIVERED." });
+    }
+
+    // 1. Verify Delivery OTP if enforced
+    if (order.deliveryOtp && order.deliveryOtp !== deliveryOtp) {
+      await session.abortTransaction();
+      return res.status(400).json({ message: "Invalid delivery verification code." });
+    }
+
+    // 2. Update Order Delivery Metadata
+    order.orderStatus = "DELIVERED";
+    order.isDelivered = true;
+    order.deliveredAt = new Date();
+    await order.save({ session });
+
+    // 3. Extract unique vendor IDs involved in the order
+    const vendorIds = [
+      ...new Set(
+        order.items
+          .filter((item) => item.vendor)
+          .map((item) => item.vendor.toString())
+      ),
+    ];
+
+    // 4. Release Escrow Funds per Vendor Atomically
+    for (const vendorId of vendorIds) {
+      await releaseVendorEscrowFunds(order._id, vendorId, session);
+    }
+
+    await session.commitTransaction();
+    session.endSession();
+
+    return res.status(200).json({
+      message: "Order delivered successfully and funds released from escrow.",
+      order,
+    });
+  } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * Internal Escrow Release Helper
+ * Handles double-entry ledger transitions & wallet updates atomically
+ */
+async function releaseVendorEscrowFunds(orderId, vendorId, session) {
+  // Find held settlement record for this order & vendor
+  const settlement = await Settlement.findOne({
+    order: orderId,
+    vendor: vendorId,
+    status: "HELD",
+  }).session(session);
+
+  if (!settlement) return; // Already released or non-existent
+
+  const releaseAmount = settlement.netAmount; // Amount after platform commission
+
+  // 1. Update Settlement State
+  settlement.status = "RELEASED";
+  settlement.releasedAt = new Date();
+  await settlement.save({ session });
+
+  // 2. Update Vendor Wallet Balances (pendingBalance -> availableBalance)
+  const wallet = await VendorWallet.findOne({ vendor: vendorId }).session(session);
+  if (wallet) {
+    wallet.pendingBalance = Math.max(0, wallet.pendingBalance - releaseAmount);
+    wallet.availableBalance += releaseAmount;
+    wallet.totalEarned += releaseAmount;
+    await wallet.save({ session });
+  }
+
+  // 3. Record Double-Entry Financial Ledger Entry
+  await LedgerEntry.create(
+    [
+      {
+        referenceType: "ESCROW_RELEASE",
+        referenceId: orderId,
+        vendor: vendorId,
+        debitAccount: "ESCROW_HOLDING_ACCOUNT",
+        creditAccount: "VENDOR_PAYABLE_ACCOUNT",
+        amount: releaseAmount,
+        currency: "RWF",
+        description: `Escrow payout released for order #${orderId}`,
+      },
+    ],
+    { session }
+  );
+}

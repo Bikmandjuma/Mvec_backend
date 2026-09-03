@@ -19,7 +19,7 @@ const addressSchema = new mongoose.Schema(
     isDefaultShipping: { type: Boolean, default: false },
     isDefaultBilling: { type: Boolean, default: false },
   },
-  { _id: true }
+  { _id: true },
 );
 
 const userSchema = new mongoose.Schema(
@@ -87,17 +87,17 @@ const userSchema = new mongoose.Schema(
     resetPasswordToken: { type: String },
     resetPasswordExpires: { type: Date },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 // Pre-save validation to enforce a single default shipping/billing address
 userSchema.pre("save", function () {
   if (this.isModified("addresses")) {
     const defaultShippingCount = this.addresses.filter(
-      (addr) => addr.isDefaultShipping
+      (addr) => addr.isDefaultShipping,
     ).length;
     const defaultBillingCount = this.addresses.filter(
-      (addr) => addr.isDefaultBilling
+      (addr) => addr.isDefaultBilling,
     ).length;
 
     if (defaultShippingCount > 1) {

@@ -7,8 +7,12 @@ const { OAuth2Client } = require("google-auth-library");
 const crypto = require("crypto");
 const nodemailer = require("nodemailer");
 
-const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+// ─── HELPER: GOOGLE OAUTH CLIENT ─────────────────────────────────────────────
+const getGoogleClient = () => {
+  return new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+};
 
+// ─── REGISTER USER ───────────────────────────────────────────────────────────
 exports.registerUser = async (req, res) => {
   try {
     const { Fullname, email, password, gender, phone, role, companyName } =
@@ -16,14 +20,25 @@ exports.registerUser = async (req, res) => {
 
     if (!Fullname || !email || !password || !gender || !phone || !role) {
       return res.status(400).json({ message: "All fields are required" });
-    } else if (role == "vendor" && !companyName) {
+    } else if (role === "vendor" && !companyName) {
       return res.status(400).json({ message: "Company name is required" });
     }
 
-    // Check if the user already exists
-    const existingUser = await User.findOne({ email });
+    const normalizedEmail = email.trim().toLowerCase();
+    const normalizedPhone = phone.trim();
+
+    // Check if the user already exists by email or phone
+    const existingUser = await User.findOne({
+      $or: [{ email: normalizedEmail }, { phone: normalizedPhone }],
+    });
+
     if (existingUser) {
-      return res.status(400).json({ message: "User already exists" });
+      const isEmailMatch = existingUser.email === normalizedEmail;
+      return res.status(400).json({
+        message: isEmailMatch
+          ? "User with this email already exists"
+          : "User with this phone number already exists",
+      });
     }
 
     // Hash the password
@@ -31,27 +46,40 @@ exports.registerUser = async (req, res) => {
 
     // Create a new user
     const newUser = new User({
-      Fullname,
-      email,
+      Fullname: Fullname.trim(),
+      email: normalizedEmail,
       password: hashedPassword,
       gender,
-      phone,
+      phone: normalizedPhone,
       role,
-      companyName: role === "vendor" ? companyName : undefined, // Only set companyName if role is vendor
+      companyName: role === "vendor" ? companyName.trim() : undefined,
     });
 
     // Save the user to the database
     await newUser.save();
 
-    res
-      .status(201)
-      .json({ message: "User registered successfully", user: newUser });
+    // Return response excluding sensitive password hash
+    const userResponse = {
+      _id: newUser._id,
+      Fullname: newUser.Fullname,
+      email: newUser.email,
+      role: newUser.role,
+      phone: newUser.phone,
+      gender: newUser.gender,
+      companyName: newUser.companyName,
+    };
+
+    return res.status(201).json({
+      message: "User registered successfully",
+      user: userResponse,
+    });
   } catch (error) {
     console.error("Error registering user:", error);
-    res.status(500).json({ message: "Internal server error" });
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
 
+// ─── LOGIN USER ──────────────────────────────────────────────────────────────
 exports.loginUser = async (req, res) => {
   try {
     const { email, phone, password } = req.body;
@@ -62,21 +90,23 @@ exports.loginUser = async (req, res) => {
         .json({ message: "Email or phone and password are required" });
     }
 
-    const identifierQuery = email
-      ? { email: email.trim().toLowerCase() }
-      : { phone: phone.trim() };
+    const normalizedEmail = email ? email.trim().toLowerCase() : null;
+    const normalizedPhone = phone ? phone.trim() : null;
 
-    const user = await User.findOne({
-      $or: [identifierQuery],
-    });
+    const user = await User.findOne(
+      normalizedEmail && normalizedPhone
+        ? { $or: [{ email: normalizedEmail }, { phone: normalizedPhone }] }
+        : normalizedEmail
+        ? { email: normalizedEmail }
+        : { phone: normalizedPhone }
+    );
 
     if (!user) {
-      return res
-        .status(400)
-        .json({ message: "Invalid (email or phone) or password)" });
+      return res.status(400).json({ message: "Invalid email/phone or password" });
     }
 
-    if (!user.password || !user.phone) {
+    // Check if user is a Google-only account without password
+    if (!user.password && user.googleId) {
       return res.status(400).json({
         message:
           "This account was created using Google Sign-In. Please log in with Google.",
@@ -86,7 +116,7 @@ exports.loginUser = async (req, res) => {
     // Compare the provided password with the hashed password in the database
     const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) {
-      return res.status(400).json({ message: "Invalid email or password" });
+      return res.status(400).json({ message: "Invalid email/phone or password" });
     }
 
     // Generate a JWT token for the authenticated user
@@ -94,7 +124,7 @@ exports.loginUser = async (req, res) => {
       expiresIn: "1d",
     });
 
-    // 6. Return response excluding sensitive password hash
+    // Return response excluding sensitive password hash
     const userResponse = {
       _id: user._id,
       Fullname: user.Fullname,
@@ -102,30 +132,32 @@ exports.loginUser = async (req, res) => {
       role: user.role,
       phone: user.phone,
       gender: user.gender,
+      companyName: user.companyName,
     };
 
-    // 7. Return the response with the token
-    res.status(200).json({
+    return res.status(200).json({
       message: "Login successful",
       user: userResponse,
       token,
     });
-
   } catch (error) {
     console.error("Error logging in user:", error);
-    res.status(500).json({ message: "Internal server error" });
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
 
+// ─── GOOGLE LOGIN ────────────────────────────────────────────────────────────
 exports.googleLogin = async (req, res) => {
   try {
-    const { idToken, role } = req.body;
+    const idToken = req.body.idToken || req.body.token;
+    const { role } = req.body;
 
     if (!idToken) {
       return res.status(400).json({ message: "Token ID is required" });
     }
 
     // Verify the token with Google
+    const client = getGoogleClient();
     const ticket = await client.verifyIdToken({
       idToken: idToken,
       audience: process.env.GOOGLE_CLIENT_ID,
@@ -135,15 +167,15 @@ exports.googleLogin = async (req, res) => {
     const { email, name, sub: googleId } = payload;
 
     // Check if the user already exists
-    let user = await User.findOne({ email });
+    let user = await User.findOne({ email: email.toLowerCase() });
 
     if (!user) {
       // If the user doesn't exist, create a new user
       user = new User({
         Fullname: name,
-        email,
+        email: email.toLowerCase(),
         googleId,
-        role, // Assign the role from the request body
+        role: role || "buyer",
       });
       await user.save();
     } else if (!user.googleId) {
@@ -157,7 +189,7 @@ exports.googleLogin = async (req, res) => {
       expiresIn: "1d",
     });
 
-    // 4. Return sanitized user data
+    // Return sanitized user data
     const userResponse = {
       _id: user._id,
       Fullname: user.Fullname,
@@ -167,60 +199,105 @@ exports.googleLogin = async (req, res) => {
       gender: user.gender || null,
     };
 
-    res.status(200).json({
+    return res.status(200).json({
       message: "Login successful",
       user: userResponse,
       token,
     });
   } catch (error) {
     console.error("Error logging in with Google:", error);
-    res.status(500).json({ message: "Internal server error" });
+    return res.status(500).json({ message: "Internal server error" });
   }
 };
 
-
-
 // ─── HELPER: NODEMAILER TRANSPORTER ──────────────────────────────────────────
-// Initialized outside controllers so it reuses the connection pool
-const transporter = nodemailer.createTransport({
-  service: "Gmail",
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS, // App Password generated from Google Account
-  },
-});
+const getTransporter = () => {
+  const user = process.env.EMAIL_USER;
+  const pass = process.env.EMAIL_PASS;
+
+  if (!user || !pass) {
+    throw new Error(
+      "Email credentials are not configured. Please set EMAIL_USER and EMAIL_PASS environment variables."
+    );
+  }
+
+  // If EMAIL_HOST is provided, use custom SMTP options; otherwise fallback to Gmail service
+  if (process.env.EMAIL_HOST) {
+    return nodemailer.createTransport({
+      host: process.env.EMAIL_HOST,
+      port: Number(process.env.EMAIL_PORT) || 587,
+      secure: process.env.EMAIL_SECURE === "true" || process.env.EMAIL_PORT === "465",
+      auth: { user, pass },
+    });
+  }
+
+  return nodemailer.createTransport({
+    service: process.env.EMAIL_SERVICE || "Gmail",
+    auth: { user, pass },
+  });
+};
 
 const sendResetEmail = async (toEmail, resetUrl) => {
-console.log("EMAIL_USER:", JSON.stringify(process.env.EMAIL_USER));
-console.log("EMAIL_PASS:", JSON.stringify(process.env.EMAIL_PASS));
+  const transporter = getTransporter();
+  const fromAddress = process.env.EMAIL_FROM || process.env.EMAIL_USER;
+
   await transporter.sendMail({
-    from: `"MVEC Support" <${process.env.EMAIL_USER}>`,
+    from: `"MVEC Support" <${fromAddress}>`,
     to: toEmail,
     subject: "Password Reset Request",
+    text: `You requested a password reset for your MVEC account.\n\nPlease click the following link to reset your password (valid for 15 minutes):\n${resetUrl}\n\nIf you did not request this, please ignore this email.`,
     html: `
-      <h2>Password Reset Request</h2>
-      <p>You requested a password reset for your MVEC account. Click the button below to set a new password:</p>
-      <a href="${resetUrl}" style="background-color: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; display: inline-block; border-radius: 5px;">Reset Password</a>
-      <p>Or copy and paste this link into your browser:</p>
-      <p><a href="${resetUrl}">${resetUrl}</a></p>
-      <p><strong>Note:</strong> This link is valid for 15 minutes only. If you did not request this, please ignore this email.</p>
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          .container { font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px; }
+          .header { text-align: center; border-bottom: 1px solid #eee; padding-bottom: 15px; margin-bottom: 20px; }
+          .btn { background-color: #4CAF50; color: #ffffff !important; padding: 12px 24px; text-decoration: none; display: inline-block; border-radius: 5px; font-weight: bold; margin: 15px 0; }
+          .footer { font-size: 12px; color: #888; margin-top: 25px; border-top: 1px solid #eee; padding-top: 15px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h2>Password Reset Request</h2>
+          </div>
+          <p>Hello,</p>
+          <p>You requested a password reset for your MVEC account. Click the button below to set a new password:</p>
+          <p style="text-align: center;">
+            <a href="${resetUrl}" class="btn" style="color: #ffffff;">Reset Password</a>
+          </p>
+          <p>Or copy and paste this link into your browser:</p>
+          <p><a href="${resetUrl}">${resetUrl}</a></p>
+          <p><strong>Note:</strong> This link is valid for 15 minutes only. If you did not request this, please ignore this email.</p>
+          <div class="footer">
+            <p>&copy; ${new Date().getFullYear()} MVEC. All rights reserved.</p>
+          </div>
+        </div>
+      </body>
+      </html>
     `,
   });
 };
 
+// Export assisting functions for unit tests
+exports.getTransporter = getTransporter;
+exports.sendResetEmail = sendResetEmail;
 
 // ─── 1. FORGOT PASSWORD CONTROLLER ───────────────────────────────────────────
 exports.forgotPassword = async (req, res) => {
   try {
     const { email } = req.body;
 
-    if (!email) {
+    if (!email || typeof email !== "string" || !email.trim()) {
       return res.status(400).json({ message: "Email is required" });
     }
 
-    const user = await User.findOne({ email: email.toLowerCase() });
+    const normalizedEmail = email.trim().toLowerCase();
+    const user = await User.findOne({ email: normalizedEmail });
 
-    // Consistent response message to prevent email enumeration
+    // Consistent generic response message to prevent email enumeration
     const genericResponse = {
       message: "If an account exists with that email, a reset link has been sent.",
     };
@@ -229,7 +306,7 @@ exports.forgotPassword = async (req, res) => {
       return res.status(200).json(genericResponse);
     }
 
-    // Block Google OAuth users from password reset
+    // Block Google OAuth users without local password from password reset
     if (!user.password && user.googleId) {
       return res.status(400).json({
         message: "This account was created using Google Sign-In. Please log in with Google.",
@@ -240,50 +317,61 @@ exports.forgotPassword = async (req, res) => {
     const resetToken = crypto.randomBytes(32).toString("hex");
 
     // Hash token before saving to database (SHA-256)
-    user.resetPasswordToken = crypto.createHash("sha256").update(resetToken).digest("hex");
-    user.resetPasswordExpires = Date.now() + 15 * 60 * 1000; // 15-minute expiration
+    user.resetPasswordToken = crypto
+      .createHash("sha256")
+      .update(resetToken)
+      .digest("hex");
+    user.resetPasswordExpires = new Date(Date.now() + 15 * 60 * 1000); // 15-minute expiration
 
-    await user.save();
+    await user.save({ validateBeforeSave: false });
 
-    // Construct reset link for the React frontend
-    const resetUrl = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
+    // Construct reset link for the React frontend safely
+    const frontendUrl = (process.env.FRONTEND_URL || "http://localhost:3000").replace(/\/+$/, "");
+    const resetUrl = `${frontendUrl}/reset-password/${resetToken}`;
 
     // Send email safely
     try {
       await sendResetEmail(user.email, resetUrl);
       return res.status(200).json(genericResponse);
     } catch (emailError) {
-      console.error("Nodemailer Error:", emailError.message);
-      
+      console.error("Email Sending Error:", emailError.message);
+
       // Clear reset fields in DB so no invalid token remains if sending fails
       user.resetPasswordToken = undefined;
       user.resetPasswordExpires = undefined;
-      await user.save();
+      await user.save({ validateBeforeSave: false });
 
-      return res.status(500).json({ 
-        message: "Could not send reset email. Please try again later." 
+      return res.status(500).json({
+        message: "Could not send reset email. Please try again later.",
       });
     }
-
   } catch (error) {
     console.error("Forgot Password Error:", error);
     return res.status(500).json({ message: "Failed to process request" });
   }
 };
 
-
 // ─── 2. RESET PASSWORD CONTROLLER ────────────────────────────────────────────
 exports.resetPassword = async (req, res) => {
   try {
     const { token } = req.params;
-    const { newPassword } = req.body;
+    const newPassword = req.body.newPassword || req.body.password;
 
-    if (!newPassword) {
-      return res.status(400).json({ message: "New password is required" });
+    if (!token || typeof token !== "string" || !token.trim()) {
+      return res.status(400).json({ message: "Reset token is required" });
+    }
+
+    if (!newPassword || typeof newPassword !== "string" || newPassword.length < 6) {
+      return res.status(400).json({
+        message: "Password is required and must be at least 6 characters long",
+      });
     }
 
     // Hash the token from URL parameter to match DB record
-    const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
+    const hashedToken = crypto
+      .createHash("sha256")
+      .update(token.trim())
+      .digest("hex");
 
     // Search for user with matching token that hasn't expired yet
     const user = await User.findOne({
@@ -292,7 +380,9 @@ exports.resetPassword = async (req, res) => {
     });
 
     if (!user) {
-      return res.status(400).json({ message: "Invalid or expired reset token" });
+      return res
+        .status(400)
+        .json({ message: "Invalid or expired reset token" });
     }
 
     // Hash new password and clear token fields
@@ -302,8 +392,8 @@ exports.resetPassword = async (req, res) => {
 
     await user.save();
 
-    return res.status(200).json({ 
-      message: "Password reset successful! You can now log in with your new password." 
+    return res.status(200).json({
+      message: "Password reset successful! You can now log in with your new password.",
     });
   } catch (error) {
     console.error("Reset Password Error:", error);
@@ -311,9 +401,14 @@ exports.resetPassword = async (req, res) => {
   }
 };
 
+// ─── 3. USER ADDRESSES ───────────────────────────────────────────────────────
+// @desc    Add a new address for logged-in user
+// @route   POST /api/auth/addresses
+// @access  Private
 exports.addAddress = async (req, res) => {
   try {
-    const user = await User.findById(req.user.userId || req.user.id);
+    const userId = req.user._id || req.user.id || req.user.userId;
+    const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
@@ -371,11 +466,12 @@ exports.addAddress = async (req, res) => {
 };
 
 // @desc    Get all addresses for logged-in user
-// @route   GET /api/users/addresses
+// @route   GET /api/auth/addresses
 // @access  Private
 exports.getAddresses = async (req, res) => {
   try {
-    const user = await User.findById(req.user.userId || req.user.id).select("addresses");
+    const userId = req.user._id || req.user.id || req.user.userId;
+    const user = await User.findById(userId).select("addresses");
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
@@ -388,11 +484,12 @@ exports.getAddresses = async (req, res) => {
 };
 
 // @desc    Update an existing address
-// @route   PUT /api/users/addresses/:addressId
+// @route   PUT /api/auth/addresses/:addressId
 // @access  Private
 exports.updateAddress = async (req, res) => {
   try {
-    const user = await User.findById(req.user.userId || req.user.id);
+    const userId = req.user._id || req.user.id || req.user.userId;
+    const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
@@ -402,7 +499,7 @@ exports.updateAddress = async (req, res) => {
       return res.status(404).json({ message: "Address not found" });
     }
 
-    const { isDefaultShipping, isDefaultBilling } = req.body;
+    const { isDefaultShipping, isDefaultBilling, _id, ...updateFields } = req.body;
 
     // Handle default flag switches across other stored addresses
     if (isDefaultShipping) {
@@ -412,7 +509,13 @@ exports.updateAddress = async (req, res) => {
       user.addresses.forEach((addr) => (addr.isDefaultBilling = false));
     }
 
-    Object.assign(address, req.body);
+    Object.assign(address, updateFields);
+    if (typeof isDefaultShipping !== "undefined") {
+      address.isDefaultShipping = Boolean(isDefaultShipping);
+    }
+    if (typeof isDefaultBilling !== "undefined") {
+      address.isDefaultBilling = Boolean(isDefaultBilling);
+    }
 
     await user.save();
     return res.status(200).json({
@@ -426,11 +529,12 @@ exports.updateAddress = async (req, res) => {
 };
 
 // @desc    Delete an address
-// @route   DELETE /api/users/addresses/:addressId
+// @route   DELETE /api/auth/addresses/:addressId
 // @access  Private
 exports.deleteAddress = async (req, res) => {
   try {
-    const user = await User.findById(req.user.userId || req.user.id);
+    const userId = req.user._id || req.user.id || req.user.userId;
+    const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }

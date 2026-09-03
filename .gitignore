@@ -1,2 +1,4 @@
 node_modules
 zz
+.env
+priority_docs.md

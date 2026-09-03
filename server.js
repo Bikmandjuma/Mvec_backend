@@ -1,7 +1,9 @@
 const express = require("express");
 const mongoose = require("mongoose");
 const dotenv = require("dotenv");
-const routes = require("./src/routes/auth.routes");
+const helmet = require("helmet");
+const morgan = require("morgan");
+const cors = require("cors");
 
 // Swagger setup
 const swaggerUi = require("swagger-ui-express");
@@ -9,13 +11,15 @@ const YAML = require("yamljs");
 const swaggerDocument = YAML.load("./swagger.yaml");
 
 // Load all models into mongoose entry
+const routes = require("./src/routes/auth.routes");
 const User = require("./src/models/User");
 const Category = require("./src/models/Category");
 const Product = require("./src/models/Product");
 
 dotenv.config();
 
-mongoose.connect(process.env.MONGO_URI)
+mongoose
+  .connect(process.env.MONGO_URI)
   .then(() => {
     console.log("Connected to MongoDB");
   })
@@ -25,7 +29,10 @@ mongoose.connect(process.env.MONGO_URI)
 
 const app = express();
 
+app.use(helmet());
+app.use(cors());
 app.use(express.json());
+app.use(morgan("dev"));
 
 app.use("/api/auth", require("./src/routes/auth.routes"));
 app.use("/api/products", require("./src/routes/product.routes"));
@@ -35,6 +42,7 @@ app.use("/api/stores", require("./src/routes/store.routes"));
 app.use("/api/payouts", require("./src/routes/payout.routes"));
 app.use("/api/staff", require("./src/routes/staff.routes"));
 app.use("/api/payments", require("./src/routes/payment.routes"));
+app.use("/api/admin", require("./src/routes/admin.financial.routes"));
 
 // Swagger documentation route
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
