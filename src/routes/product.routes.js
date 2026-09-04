@@ -8,6 +8,7 @@ const {
   deleteProduct,
   getProductById,
   getProductBySlug,
+  searchProducts,
 } = require("../controllers/product.controller");
 const { checkStaffPermission } = require("../middleware/staff.middleware");
 
@@ -16,6 +17,7 @@ const { authorize } = require("../middleware/auth.middleware");
 
 // Public route for Buyers & Admin to browse products
 router.get("/", getAllProducts);
+router.get("/search", searchProducts);
 
 // Placed these above router.use(protect);
 router.get("/slug/:slug", getProductBySlug);
