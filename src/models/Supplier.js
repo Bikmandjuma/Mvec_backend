@@ -38,7 +38,7 @@ const supplierSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-supplierSchema.pre("save", async function (next) {
+supplierSchema.pre("save", async function () {
   try {
     const Supplier = mongoose.model("Supplier");
 
@@ -58,10 +58,8 @@ supplierSchema.pre("save", async function (next) {
       }
       this.slug = candidate;
     }
-
-    next();
   } catch (error) {
-    next(error);
+    console.error("Error generating slug for Supplier:", error);
   }
 });
 
