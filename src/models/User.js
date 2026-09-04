@@ -72,8 +72,8 @@ const userSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      enum: ["buyer", "vendor", "super_admin"],
-      default: "buyer", // Fixed: Matches an item in the enum list
+      enum: ["buyer", "vendor", "supplier", "affiliate", "super_admin"],
+      default: "buyer",
     },
     companyName: {
       type: String,

@@ -38,14 +38,18 @@ exports.createProduct = async (req, res) => {
   try {
     const product = new Product({
       ...req.body,
-      vendor: req.user.id, // Enforce logged-in vendor as creator
+      vendor: req.user.id,
     });
 
     await product.save();
-    return res
-      .status(201)
-      .json({ message: "Product created successfully", product });
+    return res.status(201).json({ message: "Product created successfully", product });
   } catch (error) {
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern || {})[0] || "field";
+      return res.status(409).json({
+        message: `A product with this ${field} already exists. Please choose a different ${field}.`,
+      });
+    }
     return res.status(400).json({ message: error.message });
   }
 };
@@ -64,8 +68,17 @@ exports.updateProduct = async (req, res) => {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    // 1. Ownership check using schema's `vendor` field
-    // Block admins from altering vendor stock quantity
+    // 1. Ownership check — vendor can only edit their OWN product
+    if (
+      req.user.role !== "super_admin" &&
+      product.vendor.toString() !== req.user.id.toString()
+    ) {
+      return res.status(403).json({
+        message: "Access denied. You can only update your own products.",
+      });
+    }
+
+    // 2. Admin cannot alter stock quantity on a vendor's product
     if (
       req.user.role === "super_admin" &&
       product.vendor.toString() !== req.user.id.toString() &&
@@ -84,16 +97,6 @@ exports.updateProduct = async (req, res) => {
     // Prevent changing immutable unique indexes
     delete updates.sku;
     delete updates.slug;
-
-    // ---> PLACE IT HERE <---
-    // Block admins from mutating stock quantity if they don't own the product
-    if (
-      req.user.role === "super_admin" &&
-      product.vendor.toString() !== req.user.id.toString() &&
-      updates.stockQuantity !== undefined
-    ) {
-      delete updates.stockQuantity; // Removes stockQuantity from update payload
-    }
 
     // Add before product.save() inside updateProduct
     if (updates.stockQuantity !== undefined) {
