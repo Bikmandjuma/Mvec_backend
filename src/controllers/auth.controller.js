@@ -69,9 +69,15 @@ exports.registerUser = async (req, res) => {
       companyName: newUser.companyName,
     };
 
+    // Generate JWT token so frontend can immediately log in after registration
+    const token = jwt.sign({ userId: newUser._id }, process.env.JWT_SECRET, {
+      expiresIn: "1d",
+    });
+
     return res.status(201).json({
       message: "User registered successfully",
       user: userResponse,
+      token,
     });
   } catch (error) {
     console.error("Error registering user:", error);

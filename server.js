@@ -59,7 +59,19 @@ app.use("/api/conversations", require("./src/routes/conversation.routes"));
 app.use("/api/support", require("./src/routes/support.routes"));
 app.use("/api/languages", require("./src/routes/language.routes"));
 app.use("/api/admin", require("./src/routes/adminTranslation.routes"));
+app.use("/api/vendors", require("./src/routes/vendor.routes"));
+app.use("/api/admin/vendors", require("./src/routes/admin.vendor.routes"));
+app.use("/api/affiliates", require("./src/routes/affiliate.routes"));
 
+
+// Swagger documentation route
+app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+
+app.get("/", (req, res) => {
+  res.json({
+    message: "Multi-Vendor E-Commerce API is working!",
+  });
+});
 
 // Error handling middleware
 
@@ -88,15 +100,6 @@ app.use((err, req, res, next) => {
 mongoose.connection.once("open", () => {
   console.log("Connected to MongoDB.");
   initBackgroundWorkers();
-});
-
-// Swagger documentation route
-app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
-
-app.get("/", (req, res) => {
-  res.json({
-    message: "Multi-Vendor E-Commerce API is working!",
-  });
 });
 
 const PORT = process.env.PORT || 4000;

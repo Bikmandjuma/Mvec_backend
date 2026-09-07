@@ -14,6 +14,19 @@ const { protect } = require("../middleware/auth.middleware");
 
 router.use(protect);
 
+router.get("/me", (req, res) => {
+  const userResponse = {
+    _id: req.user._id,
+    Fullname: req.user.Fullname,
+    email: req.user.email,
+    role: req.user.role,
+    phone: req.user.phone,
+    gender: req.user.gender,
+    companyName: req.user.companyName,
+  };
+  return res.status(200).json({ user: userResponse });
+});
+
 router.route("/addresses").get(auth.getAddresses).post(auth.addAddress);
 router.route("/addresses/:addressId").put(auth.updateAddress).delete(auth.deleteAddress);
 

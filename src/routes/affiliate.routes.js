@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const affiliateController = require("../controllers/affiliate.controller");
-const { protect, authorize } = require("../middleware/auth"); // Adjust middleware import path if needed
+const { protect, authorize } = require("../middleware/auth.middleware");
 
 // Generate referral link
 router.post("/links", protect, affiliateController.generateLink);
