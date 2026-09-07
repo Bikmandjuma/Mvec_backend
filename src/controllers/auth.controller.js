@@ -18,7 +18,7 @@ exports.registerUser = async (req, res) => {
     const { Fullname, email, password, gender, phone, role, companyName } =
       req.body;
 
-    if (!Fullname || !email || !password || !gender || !phone || !role) {
+    if (!Fullname || !password || !gender || !phone || !role) {
       return res.status(400).json({ message: "All fields are required" });
     } else if (role === "vendor" && !companyName) {
       return res.status(400).json({ message: "Company name is required" });
