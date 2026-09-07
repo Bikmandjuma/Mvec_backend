@@ -70,6 +70,7 @@ paths:
   /auth/google-login:
     post:
       summary: Google Social OAuth Login
+      description: Verifies a Google ID token (issued by Google Identity Services on the frontend), creates or links a user, and returns a JWT.
       tags: [Authentication]
       requestBody:
         required: true
@@ -77,13 +78,22 @@ paths:
           application/json:
             schema:
               type: object
-              required: [token]
+              required: [idToken]
               properties:
-                token:
+                idToken:
                   type: string
+                  example: "eyJhbGciOi..."
+                role:
+                  type: string
+                  enum: [buyer, vendor, supplier, affiliate]
+                  default: buyer
       responses:
         '200':
           description: Google authentication successful
+        '401':
+          description: Invalid Google ID token
+        '500':
+          description: Google client not configured or server error
 
   /auth/forgot-password:
     post:
@@ -128,6 +138,92 @@ paths:
       responses:
         '200':
           description: Password reset successful
+
+  /auth/send-otp:
+    post:
+      summary: Send Phone OTP Verification Code
+      description: Sends a 6-digit one-time code to a Rwandan phone number for phone-based registration or passwordless login.
+      tags: [Authentication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, purpose]
+              properties:
+                phone:
+                  type: string
+                  example: "0788123456"
+                purpose:
+                  type: string
+                  enum: [registration, login]
+                  example: "login"
+                email:
+                  type: string
+                  example: "user@example.com"
+      responses:
+        '200':
+          description: Verification code sent (includes devCode in development)
+        '400':
+          description: Invalid phone number or purpose
+        '429':
+          description: Too many requests — wait for the cooldown before resending
+
+  /auth/verify-otp:
+    post:
+      summary: Verify Phone OTP Code
+      description: Validates the OTP. For purpose "login" it signs the user in (passwordless). For purpose "registration" it returns a short-lived verificationToken for completing sign-up.
+      tags: [Authentication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, code, purpose]
+              properties:
+                phone:
+                  type: string
+                  example: "0788123456"
+                code:
+                  type: string
+                  example: "123456"
+                purpose:
+                  type: string
+                  enum: [registration, login]
+                  example: "login"
+                role:
+                  type: string
+                  enum: [buyer, vendor, supplier, affiliate]
+                  default: buyer
+      responses:
+        '200':
+          description: Code verified
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  verified:
+                    type: boolean
+                  verificationToken:
+                    type: string
+                    description: Only returned on purpose "registration"
+                  user:
+                    type: object
+                    description: Only returned on purpose "login"
+                  token:
+                    type: string
+                    description: Only returned on purpose "login"
+        '400':
+          description: Invalid or expired code
+        '404':
+          description: No account linked to this phone (passwordless login)
+        '429':
+          description: Too many failed attempts
 
   /auth/addresses:
     get:

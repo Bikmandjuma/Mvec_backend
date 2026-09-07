@@ -70,6 +70,10 @@ const userSchema = new mongoose.Schema(
       unique: true,
       sparse: true, // Allows multiple documents without a googleId
     },
+    email_verified: {
+      type: Boolean,
+      default: false,
+    },
     role: {
       type: String,
       enum: ["buyer", "vendor", "supplier", "affiliate", "super_admin"],

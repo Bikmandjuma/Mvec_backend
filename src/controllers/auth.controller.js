@@ -2,38 +2,121 @@ const bcrypt = require("bcryptjs");
 const mongoose = require("mongoose");
 const express = require("express");
 const User = require("../models/User");
+const Otp = require("../models/Otp");
 const jwt = require("jsonwebtoken");
 const { OAuth2Client } = require("google-auth-library");
 const crypto = require("crypto");
 const nodemailer = require("nodemailer");
+const { normalizePhone, phoneVariants, generateOtpCode, sendOtpSms } = require("../utils/sms.util");
 
 // ─── HELPER: GOOGLE OAUTH CLIENT ─────────────────────────────────────────────
 const getGoogleClient = () => {
-  return new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  if (!clientId) {
+    throw new Error(
+      "GOOGLE_CLIENT_ID is not configured. Add it to your .env file."
+    );
+  }
+  return new OAuth2Client(clientId);
 };
 
+// ─── HELPER: SIGN JWT & BUILD SANITIZED USER RESPONSE ───────────────────────
+const signToken = (userId) =>
+  jwt.sign({ userId: userId.toString() }, process.env.JWT_SECRET, {
+    expiresIn: "1d",
+  });
+
+const buildUserResponse = (u) => ({
+  _id: u._id,
+  Fullname: u.Fullname,
+  email: u.email || null,
+  role: u.role,
+  phone: u.phone || null,
+  gender: u.gender || null,
+  companyName: u.companyName || null,
+});
+
 // ─── REGISTER USER ───────────────────────────────────────────────────────────
+// Supports two flows:
+//   1. Legacy sign-up: Fullname, email, password, gender, phone, role.
+//   2. Phone-first sign-up (OTP): full profile + a `verificationToken` issued
+//      by POST /api/auth/verify-otp (purpose "registration"). email optional.
 exports.registerUser = async (req, res) => {
   try {
-    const { Fullname, email, password, gender, phone, role, companyName } =
-      req.body;
+    const {
+      Fullname,
+      email,
+      password,
+      gender,
+      phone,
+      role,
+      companyName,
+      verificationToken,
+    } = req.body;
 
-    if (!Fullname || !password || !gender || !phone || !role) {
+    if (!Fullname || !password || !gender || !role) {
       return res.status(400).json({ message: "All fields are required" });
-    } else if (role === "vendor" && !companyName) {
+    }
+
+    if (!phone && !verificationToken) {
+      return res.status(400).json({ message: "Phone number is required" });
+    }
+
+    if (role === "vendor" && !companyName) {
       return res.status(400).json({ message: "Company name is required" });
     }
 
-    const normalizedEmail = email.trim().toLowerCase();
-    const normalizedPhone = phone.trim();
+    // Validate that the phone was actually verified via OTP when supplied.
+    let verifiedPhone = null;
+    if (verificationToken) {
+      let decoded;
+      try {
+        decoded = jwt.verify(verificationToken, process.env.JWT_SECRET);
+      } catch {
+        return res.status(400).json({
+          message: "Invalid or expired phone verification. Please re-verify.",
+        });
+      }
+      if (
+        decoded.purpose !== "registration" ||
+        !normalizePhone(decoded.phone)
+      ) {
+        return res.status(400).json({
+          message: "Invalid phone verification token",
+        });
+      }
+      verifiedPhone = normalizePhone(decoded.phone);
+
+      // If a phone was also sent in the body, it must match the verified phone.
+      if (phone) {
+        const bodyPhone = normalizePhone(phone);
+        if (bodyPhone !== verifiedPhone) {
+          return res.status(400).json({
+            message: "Phone number does not match the verified phone number.",
+          });
+        }
+      }
+    } else {
+      verifiedPhone = normalizePhone(phone);
+    }
+
+    if (!verifiedPhone) {
+      return res.status(400).json({
+        message:
+          "A valid Rwandan phone number is required (e.g. 0788123456 or +250781234567)",
+      });
+    }
+
+    const normalizedEmail = email ? email.trim().toLowerCase() : undefined;
 
     // Check if the user already exists by email or phone
     const existingUser = await User.findOne({
-      $or: [{ email: normalizedEmail }, { phone: normalizedPhone }],
+      $or: [{ email: normalizedEmail }, { phone: { $in: phoneVariants(verifiedPhone) } }],
     });
 
     if (existingUser) {
-      const isEmailMatch = existingUser.email === normalizedEmail;
+      const isEmailMatch =
+        normalizedEmail && existingUser.email === normalizedEmail;
       return res.status(400).json({
         message: isEmailMatch
           ? "User with this email already exists"
@@ -50,7 +133,7 @@ exports.registerUser = async (req, res) => {
       email: normalizedEmail,
       password: hashedPassword,
       gender,
-      phone: normalizedPhone,
+      phone: verifiedPhone,
       role,
       companyName: role === "vendor" ? companyName.trim() : undefined,
     });
@@ -58,25 +141,12 @@ exports.registerUser = async (req, res) => {
     // Save the user to the database
     await newUser.save();
 
-    // Return response excluding sensitive password hash
-    const userResponse = {
-      _id: newUser._id,
-      Fullname: newUser.Fullname,
-      email: newUser.email,
-      role: newUser.role,
-      phone: newUser.phone,
-      gender: newUser.gender,
-      companyName: newUser.companyName,
-    };
-
     // Generate JWT token so frontend can immediately log in after registration
-    const token = jwt.sign({ userId: newUser._id }, process.env.JWT_SECRET, {
-      expiresIn: "1d",
-    });
+    const token = signToken(newUser._id);
 
     return res.status(201).json({
       message: "User registered successfully",
-      user: userResponse,
+      user: buildUserResponse(newUser),
       token,
     });
   } catch (error) {
@@ -97,14 +167,14 @@ exports.loginUser = async (req, res) => {
     }
 
     const normalizedEmail = email ? email.trim().toLowerCase() : null;
-    const normalizedPhone = phone ? phone.trim() : null;
+    const phoneVariantsList = phone ? phoneVariants(phone) : [];
 
     const user = await User.findOne(
-      normalizedEmail && normalizedPhone
-        ? { $or: [{ email: normalizedEmail }, { phone: normalizedPhone }] }
+      normalizedEmail && phoneVariantsList.length
+        ? { $or: [{ email: normalizedEmail }, { phone: { $in: phoneVariantsList } }] }
         : normalizedEmail
         ? { email: normalizedEmail }
-        : { phone: normalizedPhone }
+        : { phone: { $in: phoneVariantsList } }
     );
 
     if (!user) {
@@ -152,65 +222,96 @@ exports.loginUser = async (req, res) => {
   }
 };
 
-// ─── GOOGLE LOGIN ────────────────────────────────────────────────────────────
+// ─── GOOGLE SIGN-IN ──────────────────────────────────────────────────────────
+// Verifies a Google ID token (produced on the frontend by the GSI library or
+// Google Identity Services), then creates a new account, links an existing
+// email/password account, or signs the user straight in — returning a JWT.
 exports.googleLogin = async (req, res) => {
   try {
     const idToken = req.body.idToken || req.body.token;
-    const { role } = req.body;
+    const requestedRole = req.body.role;
 
-    if (!idToken) {
-      return res.status(400).json({ message: "Token ID is required" });
+    if (!idToken || typeof idToken !== "string") {
+      return res.status(400).json({ message: "Google ID token is required" });
     }
 
-    // Verify the token with Google
+    if (!process.env.GOOGLE_CLIENT_ID) {
+      return res.status(500).json({
+        message:
+          "Google Sign-In is not configured. Please set GOOGLE_CLIENT_ID in the backend environment.",
+      });
+    }
+
+    // Verify the ID token's signature, audience and expiry with Google
     const client = getGoogleClient();
     const ticket = await client.verifyIdToken({
-      idToken: idToken,
+      idToken,
       audience: process.env.GOOGLE_CLIENT_ID,
     });
 
     const payload = ticket.getPayload();
-    const { email, name, sub: googleId } = payload;
+    const { email, name, sub: googleId, email_verified } = payload;
 
-    // Check if the user already exists
-    let user = await User.findOne({ email: email.toLowerCase() });
-
-    if (!user) {
-      // If the user doesn't exist, create a new user
-      user = new User({
-        Fullname: name,
-        email: email.toLowerCase(),
-        googleId,
-        role: role || "buyer",
+    // Google guarantees verified addresses from the hosted domain UI, but we
+    // still fail closed when the profile is missing an email.
+    if (!email) {
+      return res.status(400).json({
+        message: "Your Google account has no email address we can use.",
       });
-      await user.save();
-    } else if (!user.googleId) {
-      // Link Google ID if user previously registered with email/password
-      user.googleId = googleId;
+    }
+
+    const normalizedEmail = email.toLowerCase();
+
+    // Case 1: existing user with the same Google ID → sign straight in.
+    let user = await User.findOne({ googleId });
+
+    // Case 2: existing account with this email (password-based) → link Google ID.
+    if (!user) {
+      const byEmail = await User.findOne({ email: normalizedEmail });
+      if (byEmail) {
+        byEmail.googleId = googleId;
+        await byEmail.save();
+        user = byEmail;
+      }
+    }
+
+    // Case 3: brand new Google user → create the account. Credentials that are
+    // required on the normal sign-up form (password, gender, phone) are not
+    // needed for a Google-authenticated profile.
+    if (!user) {
+      const allowedRoles = ["buyer", "vendor", "supplier", "affiliate"];
+      const role = allowedRoles.includes(requestedRole) ? requestedRole : "buyer";
+
+      user = new User({
+        Fullname: name || "Google User",
+        email: normalizedEmail,
+        googleId,
+        role,
+        email_verified: Boolean(email_verified),
+      });
       await user.save();
     }
 
-    // Generate a JWT token for the authenticated user
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, {
-      expiresIn: "1d",
-    });
-
-    // Return sanitized user data
-    const userResponse = {
-      _id: user._id,
-      Fullname: user.Fullname,
-      email: user.email,
-      role: user.role,
-      phone: user.phone || null,
-      gender: user.gender || null,
-    };
+    const token = signToken(user._id);
 
     return res.status(200).json({
-      message: "Login successful",
-      user: userResponse,
+      message: "Google sign-in successful",
+      user: buildUserResponse(user),
       token,
     });
   } catch (error) {
+    if (error.message && error.message.includes("GOOGLE_CLIENT_ID")) {
+      return res.status(500).json({ message: error.message });
+    }
+    // Google library failures on bad/expired/mismatched tokens and audience.
+    if (
+      error.message &&
+      /invalid token|wrong number of segments|audience|no pem|key id|token used too late|could not retrieve/i.test(
+        error.message,
+      )
+    ) {
+      return res.status(401).json({ message: "Invalid Google ID token" });
+    }
     console.error("Error logging in with Google:", error);
     return res.status(500).json({ message: "Internal server error" });
   }
@@ -574,5 +675,204 @@ exports.deleteAddress = async (req, res) => {
   } catch (error) {
     console.error("Error deleting address:", error);
     return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+// ─── OTP: SEND VERIFICATION CODE ────────────────────────────────────────────
+// @desc    Send a one-time verification code to a phone number via SMS
+// @route   POST /api/auth/send-otp
+// @access  Public
+// @body    { phone: "0788123456", purpose: "registration" | "login", email? }
+exports.sendOtp = async (req, res) => {
+  try {
+    const { phone, purpose, email } = req.body;
+
+    const validPurposes = ["registration", "login"];
+    if (!validPurposes.includes(purpose)) {
+      return res.status(400).json({
+        message: `purpose must be one of: ${validPurposes.join(", ")}`,
+      });
+    }
+
+    const normalizedPhone = normalizePhone(phone);
+    if (!normalizedPhone) {
+      return res.status(400).json({
+        message:
+          "A valid Rwandan phone number is required (e.g. 0788123456 or +250781234567)",
+      });
+    }
+
+    const otpTtlSeconds = Number(process.env.OTP_EXPIRY_SECONDS || 300);
+    const cooldownSeconds = Number(process.env.OTP_COOLDOWN_SECONDS || 60);
+
+    // 1. Rate-limit: block re-sends for the same phone+purpose within the cooldown.
+    const recent = await Otp.findOne({
+      phone: normalizedPhone,
+      purpose,
+      lastSentAt: { $gt: new Date(Date.now() - cooldownSeconds * 1000) },
+    });
+    if (recent) {
+      return res.status(429).json({
+        message: `Please wait ${cooldownSeconds}s before requesting a new code.`,
+      });
+    }
+
+    // 2. Generate and hash the code.
+    const code = generateOtpCode(6);
+    const codeHash = crypto
+      .createHash("sha256")
+      .update(code)
+      .digest("hex");
+
+    // 3. Invalidate any previous unconsumed codes for this phone+purpose.
+    await Otp.updateMany(
+      { phone: normalizedPhone, purpose, consumed: false },
+      { $set: { consumed: true } },
+    );
+
+    // 4. Persist a fresh record.
+    await Otp.create({
+      phone: normalizedPhone,
+      codeHash,
+      purpose,
+      email: email ? email.trim().toLowerCase() : undefined,
+      expiresAt: new Date(Date.now() + otpTtlSeconds * 1000),
+      attempts: 0,
+      lastSentAt: new Date(),
+      consumed: false,
+    });
+
+    // 5. Deliver the code (logged to console in dev; SMS provider pluggable).
+    await sendOtpSms(normalizedPhone, code, { purpose });
+
+    return res.status(200).json({
+      message: `Verification code sent to ${normalizedPhone}`,
+      // In development the code is exposed so flows can be tested end-to-end.
+      ...(process.env.NODE_ENV === "development" && { devCode: code }),
+    });
+  } catch (error) {
+    console.error("Error sending OTP:", error);
+    return res.status(500).json({ message: "Failed to send verification code" });
+  }
+};
+
+// ─── OTP: VERIFY & CONSUME CODE ─────────────────────────────────────────────
+// @desc    Validate the phone OTP code for passwordless login / registration
+// @route   POST /api/auth/verify-otp
+// @access  Public
+// @body    { phone, code, purpose, role? }
+//          - purpose "login"         → signs the user in (passwordless) with a JWT
+//          - purpose "registration"  → confirms ownership of the phone; returns a
+//                                      short-lived verificationToken that the
+//                                      sign-up flow presents along with the rest
+//                                      of the profile to /api/auth/register.
+exports.verifyOtp = async (req, res) => {
+  try {
+    const { phone, code, purpose, role } = req.body;
+
+    const validPurposes = ["registration", "login"];
+    if (!validPurposes.includes(purpose)) {
+      return res.status(400).json({
+        message: `purpose must be one of: ${validPurposes.join(", ")}`,
+      });
+    }
+
+    const normalizedPhone = normalizePhone(phone);
+    if (!normalizedPhone) {
+      return res.status(400).json({
+        message:
+          "A valid Rwandan phone number is required (e.g. 0788123456 or +250781234567)",
+      });
+    }
+
+    if (!code || typeof code !== "string" || !/^\d{6}$/.test(code.trim())) {
+      return res
+        .status(400)
+        .json({ message: "A 6-digit verification code is required" });
+    }
+
+    const codeHash = crypto
+      .createHash("sha256")
+      .update(code.trim())
+      .digest("hex");
+
+    // Look up the latest unconsumed, unexpired code for this phone+purpose
+    const otp = await Otp.findOne({
+      phone: normalizedPhone,
+      purpose,
+      consumed: false,
+      expiresAt: { $gt: Date.now() },
+    }).sort({ createdAt: -1 });
+
+    if (!otp) {
+      return res
+        .status(400)
+        .json({ message: "Invalid or expired verification code" });
+    }
+
+    const maxAttempts = Number(process.env.OTP_MAX_ATTEMPTS || 5);
+
+    // Wrong code → count the failed attempt (and lock the code when exceeded)
+    if (otp.codeHash !== codeHash) {
+      otp.attempts += 1;
+      const exhausted = otp.attempts >= maxAttempts;
+      if (exhausted) otp.consumed = true;
+      await otp.save();
+      if (exhausted) {
+        return res.status(429).json({
+          message: "Too many failed attempts. Please request a new code.",
+        });
+      }
+      return res
+        .status(400)
+        .json({ message: "Invalid or expired verification code" });
+    }
+
+    // Code matches → mark consumed (single-use)
+    otp.consumed = true;
+    await otp.save();
+
+    // ── PURPOSE: PASSWORDLESS LOGIN ─────────────────────────────────────────
+    if (purpose === "login") {
+      const user = await User.findOne({
+        phone: { $in: phoneVariants(normalizedPhone) },
+      });
+
+      if (!user) {
+        return res.status(404).json({
+          message:
+            "No account is linked to this phone number. Please register first.",
+        });
+      }
+
+      const token = signToken(user._id);
+      return res.status(200).json({
+        message: "Phone verified — you are now signed in",
+        user: buildUserResponse(user),
+        token,
+        verified: true,
+      });
+    }
+
+    // ── PURPOSE: REGISTRATION ───────────────────────────────────────────────
+    // The phone belongs to the caller. Issue a short-lived token the sign-up
+    // request must present to prove the phone was verified.
+    const allowedRoles = ["buyer", "vendor", "supplier", "affiliate"];
+    const finalRole = allowedRoles.includes(role) ? role : "buyer";
+    const verificationToken = jwt.sign(
+      { phone: normalizedPhone, purpose, role: finalRole },
+      process.env.JWT_SECRET,
+      { expiresIn: "15m" },
+    );
+
+    return res.status(200).json({
+      message: "Phone verified successfully. Complete your registration.",
+      verificationToken,
+      phone: normalizedPhone,
+      verified: true,
+    });
+  } catch (error) {
+    console.error("Error verifying OTP:", error);
+    return res.status(500).json({ message: "Failed to verify code" });
   }
 };

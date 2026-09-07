@@ -7,6 +7,10 @@ router.post("/register", auth.registerUser);
 router.post("/login", auth.loginUser);
 router.post("/google-login", auth.googleLogin);
 
+// Phone OTP verification (phone-based registration & passwordless login)
+router.post("/send-otp", auth.sendOtp);
+router.post("/verify-otp", auth.verifyOtp);
+
 router.post("/forgot-password", auth.forgotPassword);
 router.post("/reset-password/:token", auth.resetPassword);
 
