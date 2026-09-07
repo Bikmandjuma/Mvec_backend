@@ -54,6 +54,32 @@ app.use("/api/wholesale", require("./src/routes/wholesale.routes"));
 app.use("/api/disputes", require("./src/routes/dispute.routes"));
 app.use("/api/conversations", require("./src/routes/conversation.routes"));
 app.use("/api/support", require("./src/routes/support.routes"));
+app.use("/api/languages", require("./src/routes/language.routes"));
+app.use("/api/admin", require("./src/routes/adminTranslation.routes"));
+
+
+// Error handling middleware
+
+// 2. 404 Handler (Triggers when NO route above matches)
+app.use((req, res, next) => {
+  res.status(404).json({ message: `Route ${req.originalUrl} not found` });
+});
+
+// 3. Global Error Handling Middleware (MUST have 4 arguments: err, req, res, next)
+// Express identifies this as an error handler strictly because it has 4 parameters.
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  
+  const statusCode = err.statusCode || 500;
+  const message = err.message || "Internal Server Error";
+
+  res.status(statusCode).json({
+    success: false,
+    message,
+    // Show stack trace only in development environment
+    ...(process.env.NODE_ENV === "development" && { stack: err.stack }),
+  });
+});
 
 // Initialize background cron tasks once DB connection is established
 mongoose.connection.once("open", () => {
