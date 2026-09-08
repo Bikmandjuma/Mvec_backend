@@ -100,6 +100,80 @@ exports.createCheckoutOrder = async (req, res) => {
   }
 };
 
+// @desc    Direct checkout — accepts items in request body (for frontend-driven orders)
+// @route   POST /api/orders/direct-checkout
+// @access  Private (Buyer/User)
+exports.directCheckout = async (req, res) => {
+  try {
+    const { items, shippingAddress, paymentMethod = "MOMO" } = req.body;
+
+    if (!shippingAddress || !shippingAddress.street || !shippingAddress.city) {
+      return res.status(400).json({ message: "Complete shipping address is required." });
+    }
+
+    if (!items || !items.length) {
+      return res.status(400).json({ message: "At least one item is required." });
+    }
+
+    const orderItems = [];
+    let calculatedTotal = 0;
+
+    for (const item of items) {
+      let resolvedVendor = item.vendor || null;
+      let resolvedName = item.name;
+      let resolvedPrice = item.price;
+      let resolvedProduct = null;
+
+      // If a real productId (MongoDB ObjectId) is provided, look it up
+      if (item.productId) {
+        const product = await Product.findById(item.productId);
+        if (product && product.status !== "INACTIVE") {
+          resolvedProduct = product._id;
+          resolvedVendor = product.vendor;
+          resolvedName = product.name;
+          resolvedPrice = product.discountPrice || product.price;
+
+          if (product.stockQuantity < item.qty) {
+            return res.status(400).json({
+              message: `Insufficient stock for ${product.name}. Available: ${product.stockQuantity}`,
+            });
+          }
+
+          product.stockQuantity -= item.qty;
+          if (product.stockQuantity <= 0) {
+            product.stockQuantity = 0;
+            product.status = "OUT_OF_STOCK";
+          }
+          await product.save();
+        }
+      }
+
+      calculatedTotal += resolvedPrice * item.qty;
+
+      orderItems.push({
+        product: resolvedProduct,
+        vendor: resolvedVendor,
+        name: resolvedName,
+        price: resolvedPrice,
+        quantity: item.qty,
+      });
+    }
+
+    const order = await Order.create({
+      user: req.user.id,
+      orderNumber: generateOrderNumber(),
+      items: orderItems,
+      shippingAddress,
+      totalAmount: calculatedTotal,
+      paymentMethod,
+    });
+
+    return res.status(201).json({ message: "Order placed successfully", order });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
 // @desc    Get logged-in user's orders
 // @route   GET /api/orders/my-orders
 // @access  Private (Buyer/User)

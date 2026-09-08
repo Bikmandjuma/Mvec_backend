@@ -5,6 +5,31 @@ const financialService = require("./financial.service");
 const pricingService = require("./pricing.service");
 
 /**
+ * Record a webhook callback that was intentionally ignored (e.g. non-successful
+ * status). Persisting it under the external id keeps our idempotency semantics
+ * clear and avoids it ever being confused with a successful transaction.
+ */
+exports.recordIgnoredWebhook = async ({ provider, externalTransactionId, amount = 0, payload = {} }) => {
+  if (!externalTransactionId) return null;
+  try {
+    return await PaymentWebhookLog.create({
+      provider,
+      externalTransactionId,
+      internalOrderId: null,
+      status: "IGNORED",
+      amount: Number(amount) || 0,
+      currency: "RWF",
+      rawPayload: payload,
+      errorMessage: "Transaction status not SUCCESSFUL. Ignored.",
+    });
+  } catch (err) {
+    // Duplicate idempotency record — safe to swallow.
+    return null;
+  }
+};
+
+
+/**
  * Process payment callback idempotently
  */
 exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderId, amount, payload }) => {

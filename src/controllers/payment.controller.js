@@ -5,8 +5,9 @@ const PaymentWebhookLog = require("../models/PaymentWebhookLog");
 const { formatRwandanPhone } = require("../utils/momo.util");
 const pricingService = require("../services/pricing.service");
 const financialService = require("../services/financial.service");
+const momoService = require("../services/momo.service");
 
-// 1. Initiate MoMo / Airtel Payment
+// 1. Initiate MoMo / Airtel USSD Push Payment
 exports.initiateMoMoPayment = async (req, res) => {
   try {
     const { orderId, phoneNumber } = req.body;
@@ -30,7 +31,8 @@ exports.initiateMoMoPayment = async (req, res) => {
     const paymentMethod = phoneInfo.provider === "MTN" ? "MOMO" : "AIRTEL";
     const transactionRef = `ORD-${order._id}-${Date.now()}`;
 
-    // Create or update pending Payment record
+    // 1. Create a pending Payment record BEFORE pushing so the webhook can
+    //    reconcile the callback against a persisted transaction.
     const payment = await Payment.create({
       parentOrder: order._id,
       transactionReference: transactionRef,
@@ -40,16 +42,48 @@ exports.initiateMoMoPayment = async (req, res) => {
       amount: order.totalAmount,
       currency: "RWF",
       status: "PENDING",
+      gatewayResponse: { phase: "initiated" },
     });
 
     order.paymentMethod = paymentMethod;
     await order.save();
+
+    // 2. Trigger the USSD push to the buyer's phone number.
+    let gatewayReference = null;
+    let pushStatus = "PENDING";
+    try {
+      const push = await momoService.triggerUssdPush({
+        amount: order.totalAmount,
+        currency: "RWF",
+        phone: phoneInfo.formattedNumber,
+      });
+      gatewayReference = push.reference || null;
+      if (push.raw) payment.gatewayResponse = push.raw;
+      if (push.status) pushStatus = push.status;
+    } catch (pushError) {
+      // Record that we could not reach the gateway; keep the payment PENDING so
+      // a retry / reconciliation worker can pick it up later.
+      payment.gatewayResponse = { error: pushError.message };
+      payment.status = "FAILED";
+      await payment.save();
+      return res.status(502).json({
+        message: "Unable to reach the mobile money gateway. Payment not pushed.",
+        error: pushError.message,
+      });
+    }
+
+    // 3. Store the provider reference returned by the gateway.
+    if (gatewayReference) {
+      payment.gatewayReference = gatewayReference;
+    }
+    await payment.save();
 
     return res.status(200).json({
       message: `Payment prompt initiated for ${paymentMethod} (${phoneInfo.localNumber}). Please approve the USSD prompt on your phone.`,
       paymentRef: transactionRef,
       paymentId: payment._id,
       amount: order.totalAmount,
+      gatewayReference,
     });
   } catch (error) {
     return res.status(500).json({ message: "Payment initiation failed", error: error.message });

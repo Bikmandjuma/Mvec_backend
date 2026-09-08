@@ -62,6 +62,7 @@ app.use("/api/admin", require("./src/routes/adminTranslation.routes"));
 app.use("/api/vendors", require("./src/routes/vendor.routes"));
 app.use("/api/admin/vendors", require("./src/routes/admin.vendor.routes"));
 app.use("/api/affiliates", require("./src/routes/affiliate.routes"));
+app.use("/api/webhooks", require("./src/routes/webhook.routes"));
 
 
 // Swagger documentation route

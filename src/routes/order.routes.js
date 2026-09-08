@@ -3,6 +3,7 @@ const router = express.Router();
 
 const {
   createCheckoutOrder,
+  directCheckout,
   getMyOrders,
   getOrderById,
   getVendorOrders,
@@ -18,6 +19,7 @@ const { protect, authorize } = require("../middleware/auth.middleware");
 router.use(protect);
 
 router.post("/checkout", createCheckoutOrder);
+router.post("/direct-checkout", directCheckout);
 router.get("/my-orders", getMyOrders);
 router.get("/vendor/orders", authorize("vendor"), getVendorOrders);
 router.get("/:id", getOrderById);

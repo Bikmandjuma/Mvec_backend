@@ -14,6 +14,14 @@ const paymentSchema = new mongoose.Schema(
       unique: true,
       index: true,
     },
+    // Provider-generated reference returned by the gateway (used by the
+    // webhook to reconcile the callback back to this payment).
+    gatewayReference: {
+      type: String,
+      unique: true,
+      index: true,
+      sparse: true,
+    },
     method: {
       type: String,
       enum: ["MOMO", "AIRTEL", "CASH_ON_DELIVERY"],
