@@ -130,6 +130,12 @@ exports.updateCartItemQuantity = async (req, res) => {
     cart.calculateTotal();
     await cart.save();
 
+    await cart.populate({
+      path: "items.product",
+      select: "name price stockQuantity status media vendor",
+      populate: { path: "vendor", select: "Fullname companyName" },
+    });
+
     return res.status(200).json({ message: "Cart updated", cart });
   } catch (error) {
     return res.status(500).json({ message: error.message });
@@ -154,6 +160,12 @@ exports.removeFromCart = async (req, res) => {
 
     cart.calculateTotal();
     await cart.save();
+
+    await cart.populate({
+      path: "items.product",
+      select: "name price stockQuantity status media vendor",
+      populate: { path: "vendor", select: "Fullname companyName" },
+    });
 
     return res.status(200).json({ message: "Item removed from cart", cart });
   } catch (error) {

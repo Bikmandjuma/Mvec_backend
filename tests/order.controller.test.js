@@ -728,4 +728,84 @@ describe("Order Controller Unit Tests", () => {
       assert.equal(res.jsonData.message, "Invalid order status provided.");
     });
   });
+
+  // ─── 7. directCheckout ─────────────────────────────────────────────────────
+  describe("directCheckout()", () => {
+    it("should create order with dynamic items, preserved image and PENDING status", async () => {
+      const buyerId = new mongoose.Types.ObjectId().toString();
+      let createdData = null;
+      const originalCreate = Order.create;
+      Order.create = async (data) => {
+        createdData = { ...data, _id: new mongoose.Types.ObjectId() };
+        return createdData;
+      };
+
+      try {
+        const { req, res } = createMockReqRes({
+          user: { id: buyerId, role: "buyer" },
+          body: {
+            items: [
+              {
+                name: "Custom Product",
+                price: 15000,
+                qty: 2,
+                image: "https://example.com/item.png",
+              },
+            ],
+            shippingAddress: {
+              street: "KG 1 Ave",
+              city: "Kigali",
+              state: "Kigali City",
+              country: "Rwanda",
+            },
+          },
+        });
+
+        await orderController.directCheckout(req, res);
+
+        assert.equal(res.statusCode, 201);
+        assert.equal(res.jsonData.message, "Order placed successfully");
+        assert.ok(createdData);
+        assert.equal(createdData.orderStatus, "PENDING");
+        assert.equal(createdData.paymentStatus, "PENDING");
+        assert.equal(createdData.items[0].name, "Custom Product");
+        assert.equal(createdData.items[0].image, "https://example.com/item.png");
+        assert.equal(createdData.totalAmount, 30000);
+      } finally {
+        Order.create = originalCreate;
+      }
+    });
+  });
+
+  // ─── 8. getAllOrders ───────────────────────────────────────────────────────
+  describe("getAllOrders()", () => {
+    it("should return all orders across marketplace sorted by createdAt desc", async () => {
+      const mockOrders = [
+        { _id: new mongoose.Types.ObjectId(), orderNumber: "ORD-ALL-1" },
+        { _id: new mongoose.Types.ObjectId(), orderNumber: "ORD-ALL-2" },
+      ];
+
+      const originalFind = Order.find;
+      Order.find = () => ({
+        populate: () => ({
+          populate: () => ({
+            sort: async () => mockOrders,
+          }),
+        }),
+      });
+
+      try {
+        const { req, res } = createMockReqRes({
+          user: { id: new mongoose.Types.ObjectId().toString(), role: "super_admin" },
+        });
+
+        await orderController.getAllOrders(req, res);
+
+        assert.equal(res.statusCode, 200);
+        assert.equal(res.jsonData.orders.length, 2);
+      } finally {
+        Order.find = originalFind;
+      }
+    });
+  });
 });

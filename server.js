@@ -1,9 +1,11 @@
 const express = require("express");
+const http = require("http");
 const mongoose = require("mongoose");
 const dotenv = require("dotenv");
 const helmet = require("helmet");
 const morgan = require("morgan");
 const cors = require("cors");
+const socketService = require("./src/services/socket.service");
 
 // Swagger setup
 const swaggerUi = require("swagger-ui-express");
@@ -63,7 +65,44 @@ app.use("/api/vendors", require("./src/routes/vendor.routes"));
 app.use("/api/admin/vendors", require("./src/routes/admin.vendor.routes"));
 app.use("/api/affiliates", require("./src/routes/affiliate.routes"));
 app.use("/api/webhooks", require("./src/routes/webhook.routes"));
+app.use("/api/vendor", require("./src/routes/vendor.service.routes"));
+app.use("/api/buyer", require("./src/routes/buyer.service.routes"));
+app.use("/api/admin", require("./src/routes/admin.monetization.routes"));
+app.use("/api/reviews", require("./src/routes/review.routes"));
+app.use("/api/users", require("./src/routes/user.routes"));
+app.use("/api/promotions", require("./src/routes/promotion.routes"));
+app.use("/api/shipping", require("./src/routes/shipping.routes"));
+app.use("/api/notifications", require("./src/routes/notification.routes"));
+app.use("/api/reports", require("./src/routes/report.routes"));
 
+// Real-time Server-Sent Events (SSE) stream for browsers
+app.get("/api/events", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.flushHeaders?.();
+
+  // Send initial connection event
+  res.write(`event: connected\ndata: ${JSON.stringify({ status: "connected", time: new Date() })}\n\n`);
+
+  socketService.addSseClient(res);
+
+  // Keep-alive heartbeat every 25 seconds
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(": heartbeat\n\n");
+    } catch {
+      clearInterval(heartbeat);
+      socketService.removeSseClient(res);
+    }
+  }, 25000);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    socketService.removeSseClient(res);
+  });
+});
 
 // Swagger documentation route
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
@@ -106,6 +145,9 @@ mongoose.connection.once("open", () => {
 const PORT = process.env.PORT || 4000;
 const HOST = process.env.HOST || "0.0.0.0";
 
-app.listen(PORT, HOST, () => {
+const httpServer = http.createServer(app);
+socketService.init(httpServer);
+
+httpServer.listen(PORT, HOST, () => {
   console.log(`Server running on http://${HOST}:${PORT}`);
 });

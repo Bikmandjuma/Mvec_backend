@@ -9,7 +9,8 @@ const {
   getVendorOrders,
   updateVendorOrderStatus,
   updateOrderStatus,
-  confirmOrderDelivery
+  confirmOrderDelivery,
+  getAllOrders
 } = require("../controllers/order.controller");
 
 const { checkStaffPermission } = require("../middleware/staff.middleware");
@@ -18,6 +19,7 @@ const { protect, authorize } = require("../middleware/auth.middleware");
 // Require authentication for all order routes
 router.use(protect);
 
+router.get("/", authorize("super_admin", "admin"), getAllOrders);
 router.post("/checkout", createCheckoutOrder);
 router.post("/direct-checkout", directCheckout);
 router.get("/my-orders", getMyOrders);

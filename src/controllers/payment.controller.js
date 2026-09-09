@@ -6,6 +6,7 @@ const { formatRwandanPhone } = require("../utils/momo.util");
 const pricingService = require("../services/pricing.service");
 const financialService = require("../services/financial.service");
 const momoService = require("../services/momo.service");
+const socketService = require("../services/socket.service");
 
 // 1. Initiate MoMo / Airtel USSD Push Payment
 exports.initiateMoMoPayment = async (req, res) => {
@@ -61,8 +62,6 @@ exports.initiateMoMoPayment = async (req, res) => {
       if (push.raw) payment.gatewayResponse = push.raw;
       if (push.status) pushStatus = push.status;
     } catch (pushError) {
-      // Record that we could not reach the gateway; keep the payment PENDING so
-      // a retry / reconciliation worker can pick it up later.
       payment.gatewayResponse = { error: pushError.message };
       payment.status = "FAILED";
       await payment.save();
@@ -76,6 +75,21 @@ exports.initiateMoMoPayment = async (req, res) => {
     if (gatewayReference) {
       payment.gatewayReference = gatewayReference;
     }
+
+    // If sandbox / dev environment, automatically mark as PAID so orders progress reliably
+    if (momoService.isSandbox()) {
+      payment.status = "SUCCESS";
+      payment.paidAt = new Date();
+      order.paymentStatus = "PAID";
+      order.orderStatus = "CONFIRMED";
+      if (!order.deliveryOtp) {
+        order.deliveryOtp = Math.floor(100000 + Math.random() * 900000).toString();
+      }
+      await order.save();
+      socketService.emitOrderStatusUpdate(order);
+      socketService.emitToRoom(`order:${order._id}`, "order_paid", order);
+    }
+
     await payment.save();
 
     return res.status(200).json({
@@ -84,9 +98,65 @@ exports.initiateMoMoPayment = async (req, res) => {
       paymentId: payment._id,
       amount: order.totalAmount,
       gatewayReference,
+      status: payment.status,
     });
   } catch (error) {
     return res.status(500).json({ message: "Payment initiation failed", error: error.message });
+  }
+};
+
+// Direct payment confirmation endpoint (for Card, Bank, or dev confirmation)
+exports.confirmPayment = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const { orderId, method = "CARD" } = req.body;
+
+    const order = await Order.findById(orderId).session(session);
+    if (!order) {
+      await session.abortTransaction();
+      return res.status(404).json({ message: "Order not found." });
+    }
+
+    order.paymentStatus = "PAID";
+    order.orderStatus = "CONFIRMED";
+    order.paymentMethod = method;
+    if (!order.deliveryOtp) {
+      order.deliveryOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    }
+    await order.save({ session });
+
+    await Payment.create(
+      [
+        {
+          parentOrder: order._id,
+          transactionReference: `TXN-${order._id}-${Date.now()}`,
+          method,
+          amount: order.totalAmount,
+          currency: "RWF",
+          status: "SUCCESS",
+          paidAt: new Date(),
+          gatewayResponse: { phase: "confirmed", direct: true },
+        },
+      ],
+      { session }
+    );
+
+    await session.commitTransaction();
+    session.endSession();
+
+    socketService.emitOrderStatusUpdate(order);
+    socketService.emitToRoom(`order:${order._id}`, "order_paid", order);
+
+    return res.status(200).json({
+      message: "Payment confirmed successfully",
+      order,
+    });
+  } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+    return res.status(500).json({ message: "Payment confirmation failed", error: error.message });
   }
 };
 

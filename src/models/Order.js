@@ -4,12 +4,12 @@ const orderItemSchema = new mongoose.Schema({
   product: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "Product",
-    required: true,
+    required: false,
   },
   vendor: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "User",
-    required: true,
+    required: false,
   },
   category: {
     type: mongoose.Schema.Types.ObjectId,
@@ -18,6 +18,7 @@ const orderItemSchema = new mongoose.Schema({
   name: { type: String, required: true },
   price: { type: Number, required: true },
   quantity: { type: Number, required: true },
+  image: { type: String },
 });
 
 const orderSchema = new mongoose.Schema(
@@ -54,20 +55,27 @@ const orderSchema = new mongoose.Schema(
         "PROCESSING",
         "READY_FOR_SHIPMENT",
         "SHIPPED",
+        "OUT_FOR_DELIVERY",
         "DELIVERED",
+        "COMPLETED",
         "CANCELLED",
         "RETURNED",
         "REFUNDED",
         "FAILED",
       ],
-      default: "PROCESSING",
+      default: "PENDING",
     },
     paymentMethod: {
       type: String,
-      enum: ["MOMO", "AIRTEL", "CASH_ON_DELIVERY"],
+      enum: ["MOMO", "AIRTEL", "CASH_ON_DELIVERY", "CARD", "BANK"],
       default: "MOMO",
     },
-    // Add these fields to orderSchema if missing:
+    deliveryOtp: String,
+    isDelivered: {
+      type: Boolean,
+      default: false,
+    },
+    deliveredAt: Date,
     slaBreached: {
       type: Boolean,
       default: false,

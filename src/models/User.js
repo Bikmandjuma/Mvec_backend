@@ -79,6 +79,11 @@ const userSchema = new mongoose.Schema(
       enum: ["buyer", "vendor", "supplier", "affiliate", "super_admin"],
       default: "buyer",
     },
+    status: {
+      type: String,
+      enum: ["ACTIVE", "SUSPENDED", "BLOCKED", "PENDING"],
+      default: "ACTIVE",
+    },
     companyName: {
       type: String,
       required: function () {

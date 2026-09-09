@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const Order = require("../models/Order");
 const Cart = require("../models/Cart");
 const Product = require("../models/Product");
@@ -5,6 +6,7 @@ const Settlement = require("../models/Settlement");
 const LedgerEntry = require("../models/LedgerEntry");
 const VendorWallet = require("../models/VendorWallet");
 const payoutController = require("./payout.controller");
+const socketService = require("../services/socket.service");
 
 // Helper function to generate unique order numbers
 const generateOrderNumber = () => {
@@ -119,27 +121,29 @@ exports.directCheckout = async (req, res) => {
     let calculatedTotal = 0;
 
     for (const item of items) {
-      let resolvedVendor = item.vendor || null;
+      let resolvedVendor = (item.vendor && mongoose.isValidObjectId(item.vendor)) ? item.vendor : null;
       let resolvedName = item.name;
-      let resolvedPrice = item.price;
+      let resolvedPrice = Number(item.price) || 0;
       let resolvedProduct = null;
+      let resolvedImage = item.image || "";
 
       // If a real productId (MongoDB ObjectId) is provided, look it up
-      if (item.productId) {
+      if (item.productId && mongoose.isValidObjectId(item.productId)) {
         const product = await Product.findById(item.productId);
         if (product && product.status !== "INACTIVE") {
           resolvedProduct = product._id;
-          resolvedVendor = product.vendor;
+          resolvedVendor = product.vendor || resolvedVendor;
           resolvedName = product.name;
           resolvedPrice = product.discountPrice || product.price;
+          resolvedImage = product.media?.mainImage || resolvedImage;
 
-          if (product.stockQuantity < item.qty) {
+          if (product.stockQuantity < (Number(item.qty) || 1)) {
             return res.status(400).json({
               message: `Insufficient stock for ${product.name}. Available: ${product.stockQuantity}`,
             });
           }
 
-          product.stockQuantity -= item.qty;
+          product.stockQuantity -= (Number(item.qty) || 1);
           if (product.stockQuantity <= 0) {
             product.stockQuantity = 0;
             product.status = "OUT_OF_STOCK";
@@ -148,16 +152,20 @@ exports.directCheckout = async (req, res) => {
         }
       }
 
-      calculatedTotal += resolvedPrice * item.qty;
+      const qty = Number(item.qty || item.quantity) || 1;
+      calculatedTotal += resolvedPrice * qty;
 
       orderItems.push({
         product: resolvedProduct,
         vendor: resolvedVendor,
         name: resolvedName,
         price: resolvedPrice,
-        quantity: item.qty,
+        quantity: qty,
+        image: resolvedImage,
       });
     }
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
     const order = await Order.create({
       user: req.user.id,
@@ -166,7 +174,13 @@ exports.directCheckout = async (req, res) => {
       shippingAddress,
       totalAmount: calculatedTotal,
       paymentMethod,
+      paymentStatus: "PENDING",
+      orderStatus: "PENDING",
+      deliveryOtp: otp,
     });
+
+    // Notify connected clients in real-time
+    socketService.emitOrderCreated(order);
 
     return res.status(201).json({ message: "Order placed successfully", order });
   } catch (error) {
@@ -267,7 +281,9 @@ exports.updateVendorOrderStatus = async (req, res) => {
       "PROCESSING",
       "READY_FOR_SHIPMENT",
       "SHIPPED",
+      "OUT_FOR_DELIVERY",
       "DELIVERED",
+      "COMPLETED",
       "CANCELLED",
       "RETURNED",
       "REFUNDED",
@@ -307,6 +323,10 @@ exports.updateVendorOrderStatus = async (req, res) => {
           .json({ message: `Invalid order status: ${status}` });
       }
       order.orderStatus = status;
+      if (status === "DELIVERED") {
+        order.isDelivered = true;
+        order.deliveredAt = new Date();
+      }
     }
 
     if (paymentStatus) {
@@ -319,6 +339,9 @@ exports.updateVendorOrderStatus = async (req, res) => {
     }
 
     await order.save();
+
+    // Notify connected buyers, vendors, and admins in real-time
+    socketService.emitOrderStatusUpdate(order);
 
     // Trigger payout release if order is marked as DELIVERED
     if (status === "DELIVERED") {
@@ -342,7 +365,17 @@ exports.updateOrderStatus = async (req, res) => {
     const { id } = req.params;
     const { status } = req.body;
 
-    const validStatuses = ["PENDING", "PROCESSING", "SHIPPED", "DELIVERED", "CANCELLED"];
+    const validStatuses = [
+      "PENDING",
+      "CONFIRMED",
+      "PROCESSING",
+      "READY_FOR_SHIPMENT",
+      "SHIPPED",
+      "OUT_FOR_DELIVERY",
+      "DELIVERED",
+      "COMPLETED",
+      "CANCELLED",
+    ];
     if (!status || !validStatuses.includes(status.toUpperCase())) {
       return res.status(400).json({ message: "Invalid order status provided." });
     }
@@ -355,7 +388,7 @@ exports.updateOrderStatus = async (req, res) => {
     const updatedStatus = status.toUpperCase();
 
     // Prevent re-processing already delivered orders
-    if (order.orderStatus === "DELIVERED") {
+    if (order.orderStatus === "DELIVERED" && updatedStatus !== "COMPLETED") {
       return res.status(400).json({ message: "Order has already been marked as DELIVERED." });
     }
 
@@ -367,6 +400,9 @@ exports.updateOrderStatus = async (req, res) => {
     }
 
     await order.save();
+
+    // Real-time broadcast
+    socketService.emitOrderStatusUpdate(order);
 
     // 🚀 EARNINGS RELEASE ENGINE
     // If status reaches DELIVERED, release pending earnings per vendor in the order
@@ -447,6 +483,9 @@ exports.confirmOrderDelivery = async (req, res) => {
     await session.commitTransaction();
     session.endSession();
 
+    // Real-time broadcast
+    socketService.emitOrderStatusUpdate(order);
+
     return res.status(200).json({
       message: "Order delivered successfully and funds released from escrow.",
       order,
@@ -454,6 +493,22 @@ exports.confirmOrderDelivery = async (req, res) => {
   } catch (error) {
     await session.abortTransaction();
     session.endSession();
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Get all orders across marketplace (Admin)
+// @route   GET /api/orders
+// @access  Private (Super Admin / Admin)
+exports.getAllOrders = async (req, res) => {
+  try {
+    const orders = await Order.find()
+      .populate("user", "Fullname email phone")
+      .populate("items.vendor", "Fullname companyName email phone")
+      .sort({ createdAt: -1 });
+
+    return res.status(200).json({ orders });
+  } catch (error) {
     return res.status(500).json({ message: error.message });
   }
 };
