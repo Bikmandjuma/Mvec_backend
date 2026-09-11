@@ -48,6 +48,7 @@ const paymentSchema = new mongoose.Schema(
       type: String,
       default: "RWF",
     },
+    gatewayFee: { type: Number, default: 0 },
     gatewayResponse: {
       type: Object,
     },

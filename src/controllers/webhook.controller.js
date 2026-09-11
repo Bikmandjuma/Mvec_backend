@@ -7,7 +7,10 @@ const paymentService = require("../services/payment.service");
  */
 function verifyWebhookSignature(payload, signatureHeader, secret) {
   if (!signatureHeader || !secret) return false;
-  const hmac = crypto.createHmac("sha256", secret).update(JSON.stringify(payload)).digest("hex");
+  const hmac = crypto
+    .createHmac("sha256", secret)
+    .update(JSON.stringify(payload))
+    .digest("hex");
   const a = Buffer.from(hmac);
   const b = Buffer.from(signatureHeader);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
@@ -19,25 +22,43 @@ function verifyWebhookSignature(payload, signatureHeader, secret) {
 exports.handleMomoWebhook = async (req, res) => {
   try {
     const signature = req.headers["x-momo-signature"];
-    const isSandbox = process.env.NODE_ENV !== "production" || !process.env.MOMO_WEBHOOK_SECRET;
+    const isSandbox =
+      process.env.NODE_ENV !== "production" || !process.env.MOMO_WEBHOOK_SECRET;
 
-    if (!isSandbox && !verifyWebhookSignature(req.body, signature, process.env.MOMO_WEBHOOK_SECRET)) {
+    if (
+      !isSandbox &&
+      !verifyWebhookSignature(
+        req.body,
+        signature,
+        process.env.MOMO_WEBHOOK_SECRET,
+      )
+    ) {
       return res.status(401).json({ message: "Invalid webhook signature" });
     }
 
-    const { financialTransactionId, externalId, amount, status } = req.body;
+    const { financialTransactionId, externalId, amount, status, fee } =
+      req.body;
+    const gatewayFee = Number(fee) || 0;
 
-    if (status !== "SUCCESSFUL") {
-      // Persist an IGNORED log so the external id is never reprocessed/confused later.
-      if (financialTransactionId) {
+    // Extract Airtel status code and reference
+    const statusCode =
+      req.body.status?.code || req.body.transaction?.status_code;
+    const externalTxId = req.body.transaction?.id;
+
+    // Airtel uses "200" or "TS" for successful callbacks
+    if (statusCode !== "200" && statusCode !== "TS") {
+      if (externalTxId) {
         await paymentService.recordIgnoredWebhook({
-          provider: "MTN_MOMO",
-          externalTransactionId: financialTransactionId,
-          amount: Number(amount),
+          provider: "AIRTEL_MONEY",
+          externalTransactionId: externalTxId,
+          amount: Number(req.body.transaction?.amount || 0),
           payload: req.body,
         });
       }
-      return res.status(200).json({ message: "Transaction status not SUCCESSFUL. Ignored." });
+      return res.status(200).json({
+        success: true,
+        message: "Transaction status not successful. Ignored.",
+      });
     }
 
     const externalTransactionId = financialTransactionId || externalId;
@@ -62,7 +83,9 @@ exports.handleMomoWebhook = async (req, res) => {
     }
 
     if (!orderId) {
-      return res.status(404).json({ message: "Unable to resolve order for webhook callback." });
+      return res
+        .status(404)
+        .json({ message: "Unable to resolve order for webhook callback." });
     }
 
     const result = await paymentService.processPaymentWebhook({
@@ -71,9 +94,16 @@ exports.handleMomoWebhook = async (req, res) => {
       orderId,
       amount: Number(amount),
       payload: req.body,
+      gatewayFee,
     });
 
-    return res.status(200).json({ success: true, message: "MoMo webhook processed successfully.", result });
+    return res
+      .status(200)
+      .json({
+        success: true,
+        message: "MoMo webhook processed successfully.",
+        result,
+      });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }
@@ -84,49 +114,112 @@ exports.handleMomoWebhook = async (req, res) => {
 // @access  Public (Provider Verified)
 exports.handleAirtelWebhook = async (req, res) => {
   try {
-    const signature = req.headers["x-airtel-signature"];
-    const isSandbox = process.env.NODE_ENV !== "production" || !process.env.AIRTEL_WEBHOOK_SECRET;
+    // 1. Safe Signature Header Retrieval
+    const signature =
+      req.headers["x-airtel-signature"] ||
+      req.headers["x-signature"] ||
+      req.headers["authorization"];
 
-    if (!isSandbox && !verifyWebhookSignature(req.body, signature, process.env.AIRTEL_WEBHOOK_SECRET)) {
-      return res.status(401).json({ message: "Invalid webhook signature" });
+    const isSandbox =
+      process.env.NODE_ENV !== "production" ||
+      !process.env.AIRTEL_WEBHOOK_SECRET;
+
+    // 2. Signature Check (Pass req.rawBody or raw buffer if HMAC verification is used)
+    if (!isSandbox) {
+      const isValid = verifyWebhookSignature(
+        req.rawBody || req.body,
+        signature,
+        process.env.AIRTEL_WEBHOOK_SECRET,
+      );
+      if (!isValid) {
+        return res.status(401).json({ message: "Invalid webhook signature" });
+      }
     }
 
-    const { transaction } = req.body;
-    // Airtel payload format
-    const externalTransactionId = transaction?.id;
-    const reference = transaction?.reference;
+    const { transaction, status } = req.body;
+
+    // 3. Robust Extraction across V1 / V2 Webhook Schemas
+    const externalTransactionId =
+      transaction?.id || transaction?.airtel_money_id;
+    const reference = transaction?.reference || req.body?.reference;
     const amount = Number(transaction?.amount);
-    const statusCode = transaction?.status_code;
+    const gatewayFee = Number(transaction?.fee) || 0;
 
-    if (statusCode !== "TS" && statusCode !== "200") { // TS = Transaction Success
-      return res.status(200).json({ message: "Airtel transaction not successful. Ignored." });
+    // Standardize status extraction
+    const statusCode = String(
+      transaction?.status_code || transaction?.code || status?.code || "",
+    ).toUpperCase();
+
+    const isSuccess = ["TS", "200", "2000", "SUCCESS", "DP0001"].includes(
+      statusCode,
+    );
+
+    // If transaction failed or pending, acknowledge webhook but do not fullfill order
+    if (!isSuccess) {
+      console.log(
+        `[Airtel Webhook] Payment not successful for ref: ${reference}. Code: ${statusCode}`,
+      );
+      return res
+        .status(200)
+        .json({
+          success: true,
+          message:
+            "Airtel transaction non-successful status received and recorded.",
+        });
     }
 
-    // Resolve the internal order from the persisted Payment record.
+    // 4. Resolve Internal Order / Payment Record
     let orderId = null;
+
     if (reference) {
       const payment = await Payment.findOne({
-        $or: [{ transactionReference: reference }, { gatewayReference: reference }],
+        $or: [
+          { transactionReference: reference },
+          { gatewayReference: reference },
+          { _id: reference.match(/^[0-9a-f]{24}$/i) ? reference : null },
+        ].filter(Boolean),
       });
-      if (payment) orderId = payment.parentOrder;
+
+      if (payment) {
+        orderId = payment.parentOrder || payment._id;
+      }
     }
+
+    // Fallback: direct MongoDB ObjectId match if reference is the order ID directly
     if (!orderId && reference && /^[0-9a-f]{24}$/i.test(reference)) {
       orderId = reference;
     }
+
     if (!orderId) {
-      return res.status(404).json({ message: "Unable to resolve order for webhook callback." });
+      console.error(
+        `[Airtel Webhook] Unresolved order reference: ${reference}`,
+      );
+      return res
+        .status(404)
+        .json({ message: "Unable to resolve order for webhook callback." });
     }
 
+    // 5. Process Successful Payment Execution
     const result = await paymentService.processPaymentWebhook({
       provider: "AIRTEL_MONEY",
       externalTransactionId,
       orderId,
       amount,
       payload: req.body,
+      gatewayFee,
     });
 
-    return res.status(200).json({ success: true, message: "Airtel webhook processed successfully.", result });
+    // Always respond with 200 OK so Airtel stops retrying the webhook
+    return res
+      .status(200)
+      .json({
+        success: true,
+        message: "Airtel webhook processed successfully.",
+        result,
+      });
   } catch (error) {
+    console.error("[Airtel Webhook Error]:", error);
+    // Respond with 500 so gateway knows to retry later
     return res.status(500).json({ message: error.message });
   }
 };

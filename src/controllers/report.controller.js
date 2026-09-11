@@ -68,7 +68,7 @@ exports.getSummary = async (req, res) => {
         activeVendors: vendors,
         lowStockProducts: productsLowStock,
         paymentVolume,
-        commission: Math.round(gmv * 0.1496),
+        commission: Math.round(gmv * 0.05),
         refunds: Math.max(1, Math.round(periodOrders * 0.033)),
       },
     });

@@ -16,7 +16,12 @@ const pricingSnapshotSchema = new mongoose.Schema(
     commissionRateValue: { type: Number, required: true },
     commissionAmount: { type: Number, required: true }, // Total platform cut for this item
     
-    vendorNetEarnings: { type: Number, required: true }, // grossTotal - commissionAmount
+    vendorNetEarnings: { type: Number, required: true },
+    developerShare: { type: Number, default: 0 },
+    adminShare: { type: Number, default: 0 },
+    affiliateShare: { type: Number, default: 0 },
+    gatewayFee: { type: Number, default: 0 },
+    hasAffiliate: { type: Boolean, default: false },
     currency: { type: String, default: "RWF", required: true },
   },
   { timestamps: true }

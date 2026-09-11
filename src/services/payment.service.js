@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const Order = require("../models/Order");
+const Payment = require("../models/Payment");
 const PaymentWebhookLog = require("../models/PaymentWebhookLog");
 const financialService = require("./financial.service");
 const pricingService = require("./pricing.service");
@@ -32,7 +33,7 @@ exports.recordIgnoredWebhook = async ({ provider, externalTransactionId, amount 
 /**
  * Process payment callback idempotently
  */
-exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderId, amount, payload }) => {
+exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderId, amount, payload, gatewayFee = 0 }) => {
   // 1. Idempotency Check: Prevent duplicate processing if already handled
   const existingLog = await PaymentWebhookLog.findOne({ externalTransactionId });
   if (existingLog && existingLog.status === "PROCESSED") {
@@ -60,17 +61,34 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
       throw new Error(`Mismatched payment amount. Expected: ${order.totalAmount}, Received: ${amount}`);
     }
 
-    // 4. Update Order Status
+    // 4. Update Order Status & Legacy Status Field
     order.paymentStatus = "PAID";
     order.orderStatus = "PROCESSING";
+    order.status = "PAID"; // Reconcile top-level order status
     await order.save({ session });
 
+    // 4b. Update Payment Record Status
+    await Payment.findOneAndUpdate(
+      { parentOrder: order._id },
+      {
+        status: "SUCCESS",
+        gatewayReference: externalTransactionId,
+        paidAt: new Date(),
+      },
+      { session }
+    );
+
     // 5. Generate Pricing Snapshots & Lock Escrow Funds per Vendor Item
+    const hasAffiliate = !!(order.affiliateUser && order.affiliateCode);
+    const affiliateUserId = hasAffiliate ? order.affiliateUser : null;
+
     for (const item of order.items) {
       const snapshot = await pricingService.createItemPricingSnapshot({
         orderId: order._id,
         item,
         session,
+        hasAffiliate,
+        gatewayFee,
       });
 
       await financialService.lockPaymentInEscrow({
@@ -79,10 +97,12 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
         grossAmount: snapshot.grossTotal,
         commissionAmount: snapshot.commissionAmount,
         session,
+        split: snapshot,
+        affiliateUserId,
       });
     }
 
-    // 6. Record or Update Idempotency Webhook Log
+    // 6. Record or Update Idempotency Webhook Log & Explicitly Clear Previous Errors
     const webhookLog = await PaymentWebhookLog.findOneAndUpdate(
       { externalTransactionId },
       {
@@ -90,6 +110,7 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
         externalTransactionId,
         internalOrderId: order._id,
         status: "PROCESSED",
+        errorMessage: null, // Explicitly reset stale validation error from prior retries
         amount,
         rawPayload: payload,
       },

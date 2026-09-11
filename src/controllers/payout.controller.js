@@ -3,7 +3,7 @@ const { Payout, VendorBalance } = require("../models/Payout");
 const Order = require("../models/Order");
 const { formatRwandanPhone } = require("../utils/momo.util");
 
-const DEFAULT_COMMISSION_RATE = 0.10; // 10% platform fee
+const { TOTAL_PLATFORM_FEE_PERCENT } = require("../config/revenueSplit");
 
 // Helper: Generate unique payout reference number
 const generatePayoutNumber = () => `PAY-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -18,7 +18,7 @@ exports.getVendorBalance = async (req, res) => {
     if (!balance) {
       balance = await VendorBalance.create({ vendor: userId });
     }
-    return res.status(200).json({ balance, commissionRate: `${DEFAULT_COMMISSION_RATE * 100}%` });
+    return res.status(200).json({ balance, commissionRate: `${TOTAL_PLATFORM_FEE_PERCENT}%` });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }
@@ -117,7 +117,7 @@ exports.creditPendingEarnings = async (orderId, vendorId) => {
     return acc + total;
   }, 0);
 
-  const platformFee = itemSubtotal * DEFAULT_COMMISSION_RATE;
+  const platformFee = (itemSubtotal * TOTAL_PLATFORM_FEE_PERCENT) / 100;
   const netEarnings = itemSubtotal - platformFee;
 
   let balance = await VendorBalance.findOne({ vendor: vendorId });
@@ -143,7 +143,7 @@ exports.releaseOrderEarnings = async (orderId, vendorId) => {
     return acc + total;
   }, 0);
 
-  const platformFee = itemSubtotal * DEFAULT_COMMISSION_RATE;
+  const platformFee = (itemSubtotal * TOTAL_PLATFORM_FEE_PERCENT) / 100;
   const netEarnings = itemSubtotal - platformFee;
 
   let balance = await VendorBalance.findOne({ vendor: vendorId });

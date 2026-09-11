@@ -90,6 +90,8 @@ const orderSchema = new mongoose.Schema(
       type: String,
     },
     paymentReference: String,
+    affiliateCode: { type: String, default: null },
+    affiliateUser: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
   },
   { timestamps: true },
 );

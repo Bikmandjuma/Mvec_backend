@@ -8,6 +8,11 @@ const settlementSchema = new mongoose.Schema(
     grossAmount: { type: Number, required: true },
     commissionAmount: { type: Number, required: true },
     netAmount: { type: Number, required: true },
+    developerShare: { type: Number, default: 0 },
+    adminShare: { type: Number, default: 0 },
+    affiliateShare: { type: Number, default: 0 },
+    gatewayFee: { type: Number, default: 0 },
+    affiliateUser: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     status: {
       type: String,
       enum: ["HELD", "RELEASED", "ADMIN_HOLD", "REFUNDED", "CANCELLED"],

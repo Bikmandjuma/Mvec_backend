@@ -14,6 +14,7 @@
   "type": "commonjs",
   "dependencies": {
     "@prisma/client": "^7.9.1",
+    "axios": "^1.20.0",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
@@ -23,6 +24,7 @@
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.9.4",
     "morgan": "^1.12.0",
+    "node-cache": "^5.1.2",
     "node-cron": "^4.6.0",
     "nodemailer": "^9.0.5",
     "nodemon": "^3.1.14",

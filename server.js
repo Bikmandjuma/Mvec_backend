@@ -21,14 +21,12 @@ const { initBackgroundWorkers } = require("./src/workers/slaWorker");
 
 dotenv.config();
 
-mongoose
-  .connect(process.env.MONGO_URI)
-  .then(() => {
-    console.log("Connected to MongoDB");
-  })
-  .catch((error) => {
-    console.error("Error connecting to MongoDB:", error);
-  });
+// Ensure directConnection or explicit replicaSet options are provided
+const MONGO_URI = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/your_database_name?replicaSet=rs0&directConnection=true";
+
+mongoose.connect(MONGO_URI)
+  .then(() => console.log("Connected to MongoDB Replica Set successfully"))
+  .catch((err) => console.error("Error connecting to MongoDB:", err));
 
 const app = express();
 
@@ -68,6 +66,8 @@ app.use("/api/webhooks", require("./src/routes/webhook.routes"));
 app.use("/api/vendor", require("./src/routes/vendor.service.routes"));
 app.use("/api/buyer", require("./src/routes/buyer.service.routes"));
 app.use("/api/admin", require("./src/routes/admin.monetization.routes"));
+app.use("/api/admin/payouts", require("./src/routes/admin.payout.routes"));
+app.use("/api/developer/payouts", require("./src/routes/developer.payout.routes"));
 app.use("/api/reviews", require("./src/routes/review.routes"));
 app.use("/api/users", require("./src/routes/user.routes"));
 app.use("/api/promotions", require("./src/routes/promotion.routes"));
@@ -149,5 +149,6 @@ const httpServer = http.createServer(app);
 socketService.init(httpServer);
 
 httpServer.listen(PORT, HOST, () => {
-  console.log(`Server running on http://${HOST}:${PORT}`);
+  console.log(`🚀 Server listening on ${HOST}:${PORT}`);
+  console.log(`🏠 Local access: http://localhost:${PORT}`);
 });

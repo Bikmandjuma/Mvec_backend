@@ -3,36 +3,68 @@ const LedgerAccount = require("../models/LedgerAccount");
 const LedgerEntry = require("../models/LedgerEntry");
 const Settlement = require("../models/Settlement");
 const VendorWallet = require("../models/VendorWallet");
+const AdminWallet = require("../models/AdminWallet");
+const DeveloperWallet = require("../models/DeveloperWallet");
+const AffiliateWallet = require("../models/AffiliateWallet");
+const User = require("../models/User");
 
-/**
- * 1. Locks incoming buyer payment into Escrow
- */
-exports.lockPaymentInEscrow = async ({ orderId, vendorId, grossAmount, commissionAmount, session }) => {
-  const netAmount = grossAmount - commissionAmount;
+async function getOrCreateLedgerAccount({ accountType, ownerId = null, session }) {
+  const query = { accountType };
+  if (ownerId) query.ownerId = ownerId;
 
-  // Fetch or create Escrow Holding Account
-  let escrowAccount = await LedgerAccount.findOne({ accountType: "ESCROW_HOLDING" }).session(session);
-  if (!escrowAccount) {
-    escrowAccount = await LedgerAccount.create(
-      [{ accountNumber: "ACC-ESCROW-001", accountType: "ESCROW_HOLDING", balance: 0 }],
+  let account = await LedgerAccount.findOne(query).session(session);
+  if (!account) {
+    const accountNumber = ownerId
+      ? `ACC-${accountType}-${ownerId}`
+      : `ACC-${accountType}-001`;
+    account = await LedgerAccount.create(
+      [{ accountNumber, accountType, ownerId, balance: 0 }],
       { session }
     ).then((res) => res[0]);
   }
+  return account;
+}
 
-  // Fetch or create Vendor Payable Account
-  let vendorAccount = await LedgerAccount.findOne({ ownerId: vendorId, accountType: "VENDOR_PAYABLE" }).session(session);
-  if (!vendorAccount) {
-    vendorAccount = await LedgerAccount.create(
-      [{ accountNumber: `ACC-VENDOR-${vendorId}`, accountType: "VENDOR_PAYABLE", ownerId: vendorId, balance: 0 }],
-      { session }
-    ).then((res) => res[0]);
-  }
+async function findDefaultAdmin(session) {
+  const admin = await User.findOne({ role: { $in: ["super_admin", "admin"] } })
+    .session(session)
+    .sort({ createdAt: 1 });
+  return admin ? admin._id : null;
+}
 
-  // Update Account Balances
+async function findDefaultDeveloper(session) {
+  const dev = await User.findOne({ role: "developer" })
+    .session(session)
+    .sort({ createdAt: 1 });
+  return dev ? dev._id : null;
+}
+
+exports.lockPaymentInEscrow = async ({
+  orderId,
+  vendorId,
+  grossAmount,
+  commissionAmount,
+  session,
+  split = null,
+  affiliateUserId = null,
+}) => {
+  const platformFee = split
+    ? Number(split.totalPlatformFee) || Number(split.commissionAmount) || 0
+    : Number(commissionAmount) || 0;
+  const netAmount = split
+    ? Number(split.vendorNet) || Number(split.vendorNetEarnings) || grossAmount - platformFee
+    : grossAmount - commissionAmount;
+  const devShare = split ? split.developerShare : 0;
+  const adminShare = split ? split.adminShare : 0;
+  const affShare = split ? split.affiliateShare : 0;
+  const gwFee = split ? split.gatewayFee : 0;
+
+  const escrowAccount = await getOrCreateLedgerAccount({ accountType: "ESCROW_HOLDING", session });
+  const vendorAccount = await getOrCreateLedgerAccount({ accountType: "VENDOR_PAYABLE", ownerId: vendorId, session });
+
   escrowAccount.balance += grossAmount;
   await escrowAccount.save({ session });
 
-  // Record Ledger Entry
   await LedgerEntry.create(
     [
       {
@@ -48,7 +80,8 @@ exports.lockPaymentInEscrow = async ({ orderId, vendorId, grossAmount, commissio
     { session }
   );
 
-  // Create Settlement Record
+  const adminUserId = adminShare > 0 ? await findDefaultAdmin(session) : null;
+
   const settlement = await Settlement.create(
     [
       {
@@ -56,28 +89,56 @@ exports.lockPaymentInEscrow = async ({ orderId, vendorId, grossAmount, commissio
         order: orderId,
         vendor: vendorId,
         grossAmount,
-        commissionAmount,
+        commissionAmount: platformFee,
         netAmount,
+        developerShare: devShare,
+        adminShare,
+        affiliateShare: affShare,
+        gatewayFee: gwFee,
+        affiliateUser: affiliateUserId,
         status: "HELD",
       },
     ],
     { session }
   );
 
-  // Update Vendor Wallet Pending Balance
   await VendorWallet.findOneAndUpdate(
     { vendor: vendorId },
     { $inc: { pendingBalance: netAmount } },
     { upsert: true, session }
   );
 
+  if (devShare > 0) {
+    const developerUserId = await findDefaultDeveloper(session);
+    if (developerUserId) {
+      await DeveloperWallet.findOneAndUpdate(
+        { developerUser: developerUserId },
+        { $inc: { pendingBalance: devShare } },
+        { upsert: true, session }
+      );
+    }
+  }
+
+  if (adminShare > 0 && adminUserId) {
+    await AdminWallet.findOneAndUpdate(
+      { adminUser: adminUserId },
+      { $inc: { pendingBalance: adminShare } },
+      { upsert: true, session }
+    );
+  }
+
+  if (affShare > 0 && affiliateUserId) {
+    await AffiliateWallet.findOneAndUpdate(
+      { affiliateUser: affiliateUserId },
+      { $inc: { pendingBalance: affShare } },
+      { upsert: true, session }
+    );
+  }
+
   return settlement[0];
 };
 
-/**
- * 2. Releases Escrow Funds to Vendor upon OTP Delivery Confirmation or Super Admin Override
- */
-exports.releaseEscrowToVendor = async ({ settlementId, session }) => {
+exports.releaseEscrowToVendor = async ({ settlementId, session, adminUserId = null }) => {
   const settlement = await Settlement.findById(settlementId).session(session);
   if (!settlement) {
     throw new Error("Settlement not found.");
@@ -87,31 +148,15 @@ exports.releaseEscrowToVendor = async ({ settlementId, session }) => {
     throw new Error(`Settlement is not eligible for release with status: ${settlement.status}`);
   }
 
-  let escrowAccount = await LedgerAccount.findOne({ accountType: "ESCROW_HOLDING" }).session(session);
-  if (!escrowAccount) {
-    escrowAccount = await LedgerAccount.create(
-      [{ accountNumber: "ACC-ESCROW-001", accountType: "ESCROW_HOLDING", balance: 0 }],
-      { session }
-    ).then((res) => res[0]);
-  }
+  const escrowAccount = await getOrCreateLedgerAccount({ accountType: "ESCROW_HOLDING", session });
+  const vendorAccount = await getOrCreateLedgerAccount({ accountType: "VENDOR_PAYABLE", ownerId: settlement.vendor, session });
+  const platformAccount = await getOrCreateLedgerAccount({ accountType: "PLATFORM_REVENUE", session });
 
-  let vendorAccount = await LedgerAccount.findOne({ ownerId: settlement.vendor, accountType: "VENDOR_PAYABLE" }).session(session);
-  if (!vendorAccount) {
-    vendorAccount = await LedgerAccount.create(
-      [{ accountNumber: `ACC-VENDOR-${settlement.vendor}`, accountType: "VENDOR_PAYABLE", ownerId: settlement.vendor, balance: 0 }],
-      { session }
-    ).then((res) => res[0]);
-  }
-  
-  let platformAccount = await LedgerAccount.findOne({ accountType: "PLATFORM_REVENUE" }).session(session);
-  if (!platformAccount) {
-    platformAccount = await LedgerAccount.create(
-      [{ accountNumber: "ACC-PLATFORM-REV", accountType: "PLATFORM_REVENUE", balance: 0 }],
-      { session }
-    ).then((res) => res[0]);
-  }
+  const devShare = settlement.developerShare || 0;
+  const adminShare = settlement.adminShare || 0;
+  const affShare = settlement.affiliateShare || 0;
+  const gwFee = settlement.gatewayFee || 0;
 
-  // Deduct from Escrow Account and credit Vendor & Platform
   escrowAccount.balance -= settlement.grossAmount;
   vendorAccount.balance += settlement.netAmount;
   platformAccount.balance += settlement.commissionAmount;
@@ -120,12 +165,75 @@ exports.releaseEscrowToVendor = async ({ settlementId, session }) => {
   await vendorAccount.save({ session });
   await platformAccount.save({ session });
 
-  // Update Settlement Status
+  if (devShare > 0) {
+    const devAccount = await getOrCreateLedgerAccount({ accountType: "DEVELOPER_REVENUE", session });
+    devAccount.balance += devShare;
+    await devAccount.save({ session });
+
+    const developerUserId = await findDefaultDeveloper(session);
+    if (developerUserId) {
+      await DeveloperWallet.findOneAndUpdate(
+        { developerUser: developerUserId },
+        {
+          $inc: {
+            pendingBalance: -devShare,
+            availableBalance: devShare,
+            totalEarned: devShare,
+          },
+        },
+        { session }
+      );
+    }
+  }
+
+  if (adminShare > 0) {
+    const adminAccount = await getOrCreateLedgerAccount({ accountType: "ADMIN_REVENUE", session });
+    adminAccount.balance += adminShare;
+    await adminAccount.save({ session });
+
+    const targetAdminId = adminUserId || (await findDefaultAdmin(session));
+    if (targetAdminId) {
+      await AdminWallet.findOneAndUpdate(
+        { adminUser: targetAdminId },
+        {
+          $inc: {
+            pendingBalance: -adminShare,
+            availableBalance: adminShare,
+            totalEarned: adminShare,
+          },
+        },
+        { session }
+      );
+    }
+  }
+
+  if (affShare > 0 && settlement.affiliateUser) {
+    const affAccount = await getOrCreateLedgerAccount({ accountType: "AFFILIATE_COMMISSION", session });
+    affAccount.balance += affShare;
+    await affAccount.save({ session });
+
+    await AffiliateWallet.findOneAndUpdate(
+      { affiliateUser: settlement.affiliateUser },
+      {
+        $inc: {
+          pendingBalance: -affShare,
+          availableBalance: affShare,
+        },
+      },
+      { session }
+    );
+  }
+
+  if (gwFee > 0) {
+    const gwAccount = await getOrCreateLedgerAccount({ accountType: "GATEWAY_FEES", session });
+    gwAccount.balance += gwFee;
+    await gwAccount.save({ session });
+  }
+
   settlement.status = "RELEASED";
   settlement.releasedAt = new Date();
   await settlement.save({ session });
 
-  // Record Double-Entry Ledger Releases
   await LedgerEntry.create(
     [
       {
@@ -150,7 +258,6 @@ exports.releaseEscrowToVendor = async ({ settlementId, session }) => {
     { session }
   );
 
-  // Update Vendor Wallet: Move Pending -> Available
   await VendorWallet.findOneAndUpdate(
     { vendor: settlement.vendor },
     {

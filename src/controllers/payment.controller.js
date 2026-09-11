@@ -6,102 +6,138 @@ const { formatRwandanPhone } = require("../utils/momo.util");
 const pricingService = require("../services/pricing.service");
 const financialService = require("../services/financial.service");
 const momoService = require("../services/momo.service");
+const airtelService = require("../services/airtel.service");
 const socketService = require("../services/socket.service");
 
-// 1. Initiate MoMo / Airtel USSD Push Payment
+async function initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService, explicitProvider = null }) {
+  const phoneInfo = formatRwandanPhone(phoneNumber);
+  if (!phoneInfo) {
+    throw Object.assign(new Error("Invalid Rwandan phone number. Must start with 078/079 (MTN) or 073/072 (Airtel)."), { statusCode: 400 });
+  }
+
+  // For explicit provider endpoints (e.g. Airtel), enforce the matching prefix.
+  if (explicitProvider && phoneInfo.provider !== explicitProvider) {
+    throw Object.assign(
+      new Error(`The phone number you entered is a ${phoneInfo.provider} number. Please use a ${explicitProvider} number for this payment method.`),
+      { statusCode: 400 }
+    );
+  }
+
+  const provider = explicitProvider || phoneInfo.provider;
+  const paymentMethod = provider === "MTN" ? "MOMO" : "AIRTEL";
+
+  const order = await Order.findById(orderId);
+  if (!order) {
+    throw Object.assign(new Error("Order not found."), { statusCode: 404 });
+  }
+
+  if (order.paymentStatus === "PAID") {
+    throw Object.assign(new Error("Order is already paid."), { statusCode: 400 });
+  }
+
+  const transactionRef = `ORD-${order._id}-${Date.now()}`;
+
+  // 1. Create a pending Payment record BEFORE pushing so the webhook can
+  //    reconcile the callback against a persisted transaction.
+  const payment = await Payment.create({
+    parentOrder: order._id,
+    transactionReference: transactionRef,
+    method: paymentMethod,
+    phoneNumber: phoneInfo.formattedNumber,
+    provider,
+    amount: order.totalAmount,
+    currency: "RWF",
+    status: "PENDING",
+    gatewayResponse: { phase: "initiated" },
+  });
+
+  order.paymentMethod = paymentMethod;
+  await order.save();
+
+  // 2. Trigger the USSD push to the buyer's phone number.
+  let gatewayReference = null;
+  let pushStatus = "PENDING";
+  try {
+    const push = await gatewayService.triggerUssdPush({
+      amount: order.totalAmount,
+      currency: "RWF",
+      phone: phoneInfo.formattedNumber,
+    });
+    gatewayReference = push.reference || null;
+    if (push.raw) payment.gatewayResponse = push.raw;
+    if (push.status) pushStatus = push.status;
+  } catch (pushError) {
+    payment.gatewayResponse = { error: pushError.message };
+    payment.status = "FAILED";
+    await payment.save();
+    throw Object.assign(new Error("Unable to reach the mobile money gateway. Payment not pushed."), {
+      statusCode: 502,
+      details: pushError.message,
+    });
+  }
+
+  // 3. Store the provider reference returned by the gateway.
+  if (gatewayReference) {
+    payment.gatewayReference = gatewayReference;
+  }
+
+  // If sandbox / dev environment, automatically mark as PAID so orders progress reliably
+  if (gatewayService.isSandbox()) {
+    payment.status = "SUCCESS";
+    payment.paidAt = new Date();
+    order.paymentStatus = "PAID";
+    order.orderStatus = "CONFIRMED";
+    if (!order.deliveryOtp) {
+      order.deliveryOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    }
+    await order.save();
+    socketService.emitOrderStatusUpdate(order);
+    socketService.emitToRoom(`order:${order._id}`, "order_paid", order);
+  }
+
+  await payment.save();
+
+  return {
+    message: `Payment prompt initiated for ${paymentMethod} (${phoneInfo.localNumber}). Please approve the USSD prompt on your phone.`,
+    paymentRef: transactionRef,
+    paymentId: payment._id,
+    amount: order.totalAmount,
+    gatewayReference,
+    status: payment.status,
+  };
+}
+
+// 1. Initiate MTN MoMo USSD Push Payment
 exports.initiateMoMoPayment = async (req, res) => {
   try {
     const { orderId, phoneNumber } = req.body;
-
-    const phoneInfo = formatRwandanPhone(phoneNumber);
-    if (!phoneInfo) {
-      return res.status(400).json({
-        message: "Invalid Rwandan phone number. Must start with 078/079 (MTN) or 073/072 (Airtel).",
-      });
-    }
-
-    const order = await Order.findById(orderId);
-    if (!order) {
-      return res.status(404).json({ message: "Order not found." });
-    }
-
-    if (order.paymentStatus === "PAID") {
-      return res.status(400).json({ message: "Order is already paid." });
-    }
-
-    const paymentMethod = phoneInfo.provider === "MTN" ? "MOMO" : "AIRTEL";
-    const transactionRef = `ORD-${order._id}-${Date.now()}`;
-
-    // 1. Create a pending Payment record BEFORE pushing so the webhook can
-    //    reconcile the callback against a persisted transaction.
-    const payment = await Payment.create({
-      parentOrder: order._id,
-      transactionReference: transactionRef,
-      method: paymentMethod,
-      phoneNumber: phoneInfo.formattedNumber,
-      provider: phoneInfo.provider,
-      amount: order.totalAmount,
-      currency: "RWF",
-      status: "PENDING",
-      gatewayResponse: { phase: "initiated" },
+    const result = await initiateMobileMoneyPayment({
+      orderId,
+      phoneNumber,
+      gatewayService: momoService,
+      explicitProvider: "MTN",
     });
-
-    order.paymentMethod = paymentMethod;
-    await order.save();
-
-    // 2. Trigger the USSD push to the buyer's phone number.
-    let gatewayReference = null;
-    let pushStatus = "PENDING";
-    try {
-      const push = await momoService.triggerUssdPush({
-        amount: order.totalAmount,
-        currency: "RWF",
-        phone: phoneInfo.formattedNumber,
-      });
-      gatewayReference = push.reference || null;
-      if (push.raw) payment.gatewayResponse = push.raw;
-      if (push.status) pushStatus = push.status;
-    } catch (pushError) {
-      payment.gatewayResponse = { error: pushError.message };
-      payment.status = "FAILED";
-      await payment.save();
-      return res.status(502).json({
-        message: "Unable to reach the mobile money gateway. Payment not pushed.",
-        error: pushError.message,
-      });
-    }
-
-    // 3. Store the provider reference returned by the gateway.
-    if (gatewayReference) {
-      payment.gatewayReference = gatewayReference;
-    }
-
-    // If sandbox / dev environment, automatically mark as PAID so orders progress reliably
-    if (momoService.isSandbox()) {
-      payment.status = "SUCCESS";
-      payment.paidAt = new Date();
-      order.paymentStatus = "PAID";
-      order.orderStatus = "CONFIRMED";
-      if (!order.deliveryOtp) {
-        order.deliveryOtp = Math.floor(100000 + Math.random() * 900000).toString();
-      }
-      await order.save();
-      socketService.emitOrderStatusUpdate(order);
-      socketService.emitToRoom(`order:${order._id}`, "order_paid", order);
-    }
-
-    await payment.save();
-
-    return res.status(200).json({
-      message: `Payment prompt initiated for ${paymentMethod} (${phoneInfo.localNumber}). Please approve the USSD prompt on your phone.`,
-      paymentRef: transactionRef,
-      paymentId: payment._id,
-      amount: order.totalAmount,
-      gatewayReference,
-      status: payment.status,
-    });
+    return res.status(200).json(result);
   } catch (error) {
-    return res.status(500).json({ message: "Payment initiation failed", error: error.message });
+    const statusCode = error.statusCode || 500;
+    return res.status(statusCode).json({ message: error.message, ...(error.details && { error: error.details }) });
+  }
+};
+
+// 1b. Initiate Airtel Money USSD Push Payment
+exports.initiateAirtelPayment = async (req, res) => {
+  try {
+    const { orderId, phoneNumber } = req.body;
+    const result = await initiateMobileMoneyPayment({
+      orderId,
+      phoneNumber,
+      gatewayService: airtelService,
+      explicitProvider: "AIRTEL",
+    });
+    return res.status(200).json(result);
+  } catch (error) {
+    const statusCode = error.statusCode || 500;
+    return res.status(statusCode).json({ message: error.message, ...(error.details && { error: error.details }) });
   }
 };
 
@@ -213,11 +249,17 @@ exports.handlePaymentWebhook = async (req, res) => {
     await order.save({ session });
 
     // 4. Evaluate Dynamic Commission & Lock Escrow Funds per Vendor Item
+    const hasAffiliate = !!(order.affiliateUser && order.affiliateCode);
+    const affiliateUserId = hasAffiliate ? order.affiliateUser : null;
+    const gatewayFee = Number(event.data?.fees?.split(",")[0]?.split(":")[1]) || Number(event.fee) || 0;
+
     for (const item of order.items) {
       const snapshot = await pricingService.createItemPricingSnapshot({
         orderId: order._id,
         item,
         session,
+        hasAffiliate,
+        gatewayFee,
       });
 
       await financialService.lockPaymentInEscrow({
@@ -226,6 +268,8 @@ exports.handlePaymentWebhook = async (req, res) => {
         grossAmount: snapshot.grossTotal,
         commissionAmount: snapshot.commissionAmount,
         session,
+        split: snapshot,
+        affiliateUserId,
       });
     }
 
