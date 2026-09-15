@@ -16,6 +16,10 @@ router.delete("/:id", review.deleteReview);
 
 // ─── VENDOR ───────────────────────────────────────────────────────────────────
 router.get("/vendor/mine", authorize("vendor"), review.listVendorReviews);
+router.get("/vendor", authorize("vendor"), review.listVendorReviews);
+
+// Vendor reply to a review on their product
+router.post("/:id/reply", authorize("vendor", "super_admin"), review.replyToReview);
 
 // ─── ADMIN ────────────────────────────────────────────────────────────────────
 router.get("/", authorize("super_admin"), review.adminListReviews);

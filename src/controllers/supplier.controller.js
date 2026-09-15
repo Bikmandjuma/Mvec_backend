@@ -1,4 +1,6 @@
+const mongoose = require("mongoose");
 const Supplier = require("../models/Supplier");
+const Product = require("../models/Product");
 
 // ─── 1. ONBOARD SUPPLIER (complete profile after registering) ──────────────
 // @route   POST /api/suppliers/onboard
@@ -145,6 +147,36 @@ exports.getSupplierByIdOrSlug = async (req, res) => {
 
     // NOTE: once Product model links `supplier`, populate their products/reviews here too
     return res.status(200).json({ supplier });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+// ─── 5b. PUBLIC SUPPLIER WHOLESALE CATALOG (by supplier id) ─────────────────
+// @route   GET /api/suppliers/:id/products
+// @access  Public
+exports.getSupplierProducts = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(404).json({ message: "Supplier not found" });
+    }
+
+    const supplier = await Supplier.findOne({
+      _id: id,
+      status: "ACTIVE",
+      verificationStatus: "VERIFIED",
+    });
+
+    if (!supplier) {
+      return res.status(404).json({ message: "Supplier not found" });
+    }
+
+    const products = await Product.find({ supplier: supplier._id, status: "ACTIVE" })
+      .select("name sku price discountPrice stockQuantity media supplier");
+
+    return res.status(200).json({ supplier, products });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }

@@ -14,6 +14,10 @@ const reviewSchema = new mongoose.Schema(
       default: "PUBLISHED",
     },
     isVerifiedPurchase: { type: Boolean, default: true },
+    vendorReply: {
+      text: { type: String, default: "" },
+      repliedAt: { type: Date },
+    },
   },
   { timestamps: true }
 );

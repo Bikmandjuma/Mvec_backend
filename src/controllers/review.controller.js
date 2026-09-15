@@ -24,12 +24,15 @@ function mapReview(r) {
     comment: r.reviewText,
     status: r.status || "PUBLISHED",
     date: r.createdAt,
+    orderId: r.parentOrder,
     isVerifiedPurchase: r.isVerifiedPurchase,
+    vendorReply: r.vendorReply?.text || "",
+    vendorRepliedAt: r.vendorReply?.repliedAt || null,
   };
 }
 
 const populateOpts = [
-  { path: "product", select: "name media image" },
+  { path: "product", select: "name media image vendor" },
   { path: "user", select: "Fullname email" },
 ];
 
@@ -251,6 +254,53 @@ exports.deleteReview = async (req, res) => {
     return res.status(200).json({ message: "Review deleted" });
   } catch (error) {
     console.error("Error deleting review:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+// @desc    Vendor responds to a review on one of their products
+// @route   POST /api/reviews/:id/reply
+// @access  Private (vendor of the reviewed product)
+exports.replyToReview = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reply } = req.body;
+
+    if (!reply || !String(reply).trim()) {
+      return res.status(400).json({ message: "Reply text is required" });
+    }
+
+    const review = await Review.findById(id).populate(populateOpts);
+    if (!review) {
+      return res.status(404).json({ message: "Review not found" });
+    }
+
+    // Only the vendor who owns the reviewed product (or admin) may reply.
+    const productDoc =
+      review.product && typeof review.product === "object" ? review.product : await Product.findById(review.product);
+    const isVendor =
+      req.user.role === "vendor" &&
+      productDoc &&
+      String(productDoc.vendor) === String(req.user._id);
+    const isAdmin = req.user.role === "super_admin";
+
+    if (!isVendor && !isAdmin) {
+      return res.status(403).json({ message: "You can only reply to reviews of your own products" });
+    }
+
+    review.vendorReply = {
+      text: String(reply).trim(),
+      repliedAt: new Date(),
+    };
+    await review.save();
+    await Review.populate(review, populateOpts);
+
+    return res.status(200).json({
+      message: "Reply submitted",
+      review: mapReview(review.toObject()),
+    });
+  } catch (error) {
+    console.error("Error replying to review:", error);
     return res.status(500).json({ message: "Internal server error" });
   }
 };

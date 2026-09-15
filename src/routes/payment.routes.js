@@ -1,10 +1,10 @@
 const express = require("express");
 const router = express.Router();
 const { protect } = require("../middleware/auth.middleware");
-const { initiateMoMoPayment, initiateAirtelPayment, handlePaymentWebhook, confirmPayment } = require("../controllers/payment.controller");
+const { initiateMomoPayment, initiateAirtelPayment, handlePaymentWebhook, confirmPayment } = require("../controllers/payment.controller");
 
 // Initiate MTN MoMo Push Notification
-router.post("/pay/momo", protect, initiateMoMoPayment);
+router.post("/pay/momo", protect, initiateMomoPayment);
 
 // Initiate Airtel Money Push Notification
 router.post("/pay/airtel", protect, initiateAirtelPayment);

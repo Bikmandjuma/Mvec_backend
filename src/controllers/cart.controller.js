@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const Cart = require("../models/Cart");
 const Product = require("../models/Product");
 
@@ -29,13 +30,18 @@ exports.addToCart = async (req, res) => {
   try {
     const { productId, quantity = 1 } = req.body;
 
+    if (!mongoose.isValidObjectId(productId)) {
+      return res.status(404).json({ message: "Product not found" });
+    }
+
     const product = await Product.findById(productId);
     if (!product) {
       return res.status(404).json({ message: "Product not found" });
     }
 
     // Check 1: Prevent vendors from buying their own products
-    if (product.vendor.toString() === req.user.id.toString()) {
+    const productVendor = product.vendor && product.vendor.toString();
+    if (productVendor && productVendor === req.user.id.toString()) {
       return res.status(403).json({
         message: "Action denied. You cannot add your own product to your cart.",
       });
@@ -53,7 +59,7 @@ exports.addToCart = async (req, res) => {
     }
 
     const existingItemIndex = cart.items.findIndex(
-      (item) => item.product.toString() === productId
+      (item) => item.product && item.product.toString() === productId
     );
 
     const targetQuantity = existingItemIndex > -1 
@@ -106,13 +112,17 @@ exports.updateCartItemQuantity = async (req, res) => {
       return res.status(400).json({ message: "Quantity must be at least 1" });
     }
 
+    if (!mongoose.isValidObjectId(productId)) {
+      return res.status(404).json({ message: "Item not in cart" });
+    }
+
     const cart = await Cart.findOne({ user: req.user.id });
     if (!cart) {
       return res.status(404).json({ message: "Cart not found" });
     }
 
     const itemIndex = cart.items.findIndex(
-      (item) => item.product.toString() === productId
+      (item) => item.product && item.product.toString() === productId
     );
 
     if (itemIndex === -1) {
@@ -149,13 +159,17 @@ exports.removeFromCart = async (req, res) => {
   try {
     const { productId } = req.params;
 
+    if (!mongoose.isValidObjectId(productId)) {
+      return res.status(404).json({ message: "Item not in cart" });
+    }
+
     const cart = await Cart.findOne({ user: req.user.id });
     if (!cart) {
       return res.status(404).json({ message: "Cart not found" });
     }
 
     cart.items = cart.items.filter(
-      (item) => item.product.toString() !== productId
+      (item) => item.product && item.product.toString() !== productId
     );
 
     cart.calculateTotal();

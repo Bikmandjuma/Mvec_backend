@@ -1,23 +1,49 @@
 const mongoose = require("mongoose");
 const WholesaleOrder = require("../models/WholesaleOrder");
-const VendorWallet = require("../models/VendorWallet"); // Adjust paths as needed
-const crypto = require("crypto");
+const VendorWallet = require("../models/VendorWallet");
+const Supplier = require("../models/Supplier");
 
 class WholesaleService {
   /**
    * Validate MOQ and create B2B Wholesale Order
    */
   async createWholesaleOrder({ vendorId, supplierId, items }) {
-    let totalAmount = 0;
+    if (!mongoose.isValidObjectId(supplierId)) {
+      throw new Error("Invalid supplier ID provided.");
+    }
 
-    // Validate Minimum Order Quantities (MOQ)
+    const supplier = await Supplier.findById(supplierId);
+    if (!supplier) {
+      throw new Error("Supplier profile not found.");
+    }
+    const supplierUserId = supplier.user;
+
+    if (!mongoose.isValidObjectId(vendorId)) {
+      throw new Error("Invalid vendor ID provided.");
+    }
+
+    let totalAmount = 0;
+    const validatedItems = [];
+
     for (const item of items) {
+      if (!item.productId || !mongoose.isValidObjectId(item.productId)) {
+        throw new Error(
+          `Invalid product ID for item '${item.productName}'. Only real catalog products can be ordered.`
+        );
+      }
       if (item.quantity < item.moq) {
         throw new Error(
           `MOQ Breach: Item '${item.productName}' requires a minimum quantity of ${item.moq}, but got ${item.quantity}.`
         );
       }
       totalAmount += item.unitPrice * item.quantity;
+      validatedItems.push({
+        product: item.productId,
+        productName: item.productName,
+        unitPrice: item.unitPrice,
+        quantity: item.quantity,
+        moq: item.moq,
+      });
     }
 
     const orderNumber = `WSO-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -26,8 +52,8 @@ class WholesaleService {
     const order = await WholesaleOrder.create({
       orderNumber,
       vendor: vendorId,
-      supplier: supplierId,
-      items,
+      supplier: supplierUserId,
+      items: validatedItems,
       totalAmount,
       status: "PENDING_PAYMENT",
       deliveryOtp,

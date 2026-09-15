@@ -108,7 +108,7 @@ async function initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService
 }
 
 // 1. Initiate MTN MoMo USSD Push Payment
-exports.initiateMoMoPayment = async (req, res) => {
+exports.initiateMomoPayment = async (req, res) => {
   try {
     const { orderId, phoneNumber } = req.body;
     const result = await initiateMobileMoneyPayment({

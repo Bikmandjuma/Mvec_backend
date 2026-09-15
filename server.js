@@ -55,6 +55,7 @@ app.use("/api/admin", require("./src/routes/admin.financial.routes"));
 app.use("/api/admin", require("./src/routes/admin.commission.routes"));
 app.use("/api/wholesale", require("./src/routes/wholesale.routes"));
 app.use("/api/disputes", require("./src/routes/dispute.routes"));
+app.use("/api/abuse-reports", require("./src/routes/abuseReport.routes"));
 app.use("/api/conversations", require("./src/routes/conversation.routes"));
 app.use("/api/support", require("./src/routes/support.routes"));
 app.use("/api/languages", require("./src/routes/language.routes"));

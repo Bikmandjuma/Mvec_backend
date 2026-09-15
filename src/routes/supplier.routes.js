@@ -6,6 +6,7 @@ const { protect, authorize } = require("../middleware/auth.middleware");
 // ─── PUBLIC ROUTES ──────────────────────────────────────────────────────────
 router.get("/", supplier.getSuppliers);                    // GET /api/suppliers?q=&location=&page=
 router.get("/:idOrSlug", supplier.getSupplierByIdOrSlug);  // GET /api/suppliers/:idOrSlug
+router.get("/:id/products", supplier.getSupplierProducts); // GET /api/suppliers/:id/products
 
 // ─── PRIVATE: SUPPLIER'S OWN PROFILE ────────────────────────────────────────
 router.post("/onboard", protect, authorize("supplier"), supplier.onboardSupplier);

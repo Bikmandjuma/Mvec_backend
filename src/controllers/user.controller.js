@@ -1,6 +1,7 @@
 const User = require("../models/User");
 const Order = require("../models/Order");
 const Product = require("../models/Product");
+const Store = require("../models/Store");
 
 const USER_WITHOUT_PASSWORD = "-password -resetPasswordToken -resetPasswordExpires";
 
@@ -150,6 +151,105 @@ exports.listVendorCustomers = async (req, res) => {
     });
   } catch (error) {
     console.error("Error listing vendor customers:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+// @desc    Search platform users / stores / orders for abuse report forms
+// @route   GET /api/users/search?q=query
+// @access  Private (vendor or admin)
+exports.searchUsers = async (req, res) => {
+  try {
+    const { q } = req.query;
+    if (!q || !String(q).trim() || String(q).trim().length < 2) {
+      return res.status(200).json({ data: [], meta: { total: 0 } });
+    }
+
+    const query = String(q).trim();
+    const re = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+
+    const [users, stores, orders] = await Promise.all([
+      User.find({
+        $or: [{ Fullname: re }, { email: re }, { phone: re }, { companyName: re }],
+      })
+        .select(USER_WITHOUT_PASSWORD)
+        .limit(10),
+      Store.find({
+        $or: [{ storeName: re }, { slug: re }, { businessCategory: re }],
+      })
+        .select("storeName slug logo businessCategory vendor status")
+        .limit(8),
+      Order.find({ orderNumber: re })
+        .select("orderNumber user totalAmount createdAt")
+        .populate("user", "Fullname email phone companyName role")
+        .limit(8),
+    ]);
+
+    const storeVendorIds = stores.map((s) => s.vendor).filter(Boolean);
+    const storeOwners = storeVendorIds.length
+      ? await User.find({ _id: { $in: storeVendorIds } }).select("Fullname email phone companyName role status")
+      : [];
+    const ownerById = {};
+    for (const o of storeOwners) ownerById[String(o._id)] = o;
+
+    const data = [];
+
+    for (const u of users) {
+      data.push({
+        kind: "user",
+        targetUserId: u._id,
+        label: u.Fullname,
+        subtitle: [u.role, u.companyName].filter(Boolean).join(" · "),
+        email: u.email,
+        phone: u.phone,
+        role: u.role,
+        companyName: u.companyName || "",
+      });
+    }
+
+    for (const s of stores) {
+      const owner = ownerById[String(s.vendor)];
+      data.push({
+        kind: "store",
+        targetUserId: s.vendor,
+        label: s.storeName,
+        subtitle: `${s.businessCategory || "Store"} · ${owner?.Fullname || ""}`.trim().replace(/^ ·| · $/g, ""),
+        email: owner?.email,
+        phone: owner?.phone,
+        role: "vendor",
+        companyName: owner?.companyName || "",
+        store: { id: s._id, slug: s.slug, logo: s.logo },
+      });
+    }
+
+    for (const o of orders) {
+      const buyer = o.user && typeof o.user === "object" ? o.user : null;
+      data.push({
+        kind: "order",
+        targetUserId: buyer ? buyer._id : o.user,
+        orderId: o._id,
+        label: `Order ${o.orderNumber}`,
+        subtitle: `${buyer?.Fullname || "Customer"} · ${Number(o.totalAmount).toLocaleString("en-RW")} RWF`,
+        role: buyer?.role || "buyer",
+        companyName: buyer?.companyName || "",
+      });
+    }
+
+    // Deduplicate by targetUserId+kind, keep first occurrence (users first)
+    const seen = new Set();
+    const deduped = data.filter((d) => {
+      const key = `${d.kind}:${String(d.targetUserId)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    return res.status(200).json({
+      data: deduped.slice(0, 20),
+      meta: { total: deduped.length },
+    });
+  } catch (error) {
+    console.error("Error searching users:", error);
     return res.status(500).json({ message: "Internal server error" });
   }
 };

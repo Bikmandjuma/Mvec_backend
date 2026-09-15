@@ -36,22 +36,17 @@ exports.handleMomoWebhook = async (req, res) => {
       return res.status(401).json({ message: "Invalid webhook signature" });
     }
 
-    const { financialTransactionId, externalId, amount, status, fee } =
-      req.body;
+    // MoMo callback payload: { status, externalId, financialTransactionId, amount, fee }
+    const { financialTransactionId, externalId, amount, fee } = req.body;
     const gatewayFee = Number(fee) || 0;
 
-    // Extract Airtel status code and reference
-    const statusCode =
-      req.body.status?.code || req.body.transaction?.status_code;
-    const externalTxId = req.body.transaction?.id;
-
-    // Airtel uses "200" or "TS" for successful callbacks
-    if (statusCode !== "200" && statusCode !== "TS") {
-      if (externalTxId) {
+    // MoMo uses "SUCCESSFUL" for completed transactions
+    if (req.body.status !== "SUCCESSFUL") {
+      if (financialTransactionId || externalId) {
         await paymentService.recordIgnoredWebhook({
-          provider: "AIRTEL_MONEY",
-          externalTransactionId: externalTxId,
-          amount: Number(req.body.transaction?.amount || 0),
+          provider: "MTN_MOMO",
+          externalTransactionId: financialTransactionId || externalId,
+          amount: Number(amount || 0),
           payload: req.body,
         });
       }
@@ -63,9 +58,7 @@ exports.handleMomoWebhook = async (req, res) => {
 
     const externalTransactionId = financialTransactionId || externalId;
 
-    // Resolve the internal order through the persisted Payment record. The
-    // gateway returns `externalId` (our transactionReference or gatewayReference),
-    // so we never trust an arbitrary order id from the callback payload.
+    // Resolve the internal order through the persisted Payment record.
     let orderId = null;
     if (externalTransactionId) {
       const payment = await Payment.findOne({
