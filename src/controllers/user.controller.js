@@ -5,6 +5,22 @@ const Store = require("../models/Store");
 
 const USER_WITHOUT_PASSWORD = "-password -resetPasswordToken -resetPasswordExpires";
 
+// Account statuses the platform exposes. Legacy spellings are normalized onto
+// these canonical values when a PATCH arrives.
+const USER_STATUS_VALUES = ["ACTIVE", "SUSPEND", "BLOCK", "INVESTIGATE"];
+const USER_STATUS_LEGACY = {
+  SUSPENDED: "SUSPEND",
+  BLOCKED: "BLOCK",
+  INVESTIGATION: "INVESTIGATE",
+};
+
+// Normalize any casing/spacing of a status into the canonical uppercase form,
+// mapping legacy values (SUSPENDED/BLOCKED/INVESTIGATION) onto the new ones.
+function normalizeStatus(value) {
+  const raw = String(value || "").trim().toUpperCase().replace(/[\s-]+/g, "_");
+  return USER_STATUS_LEGACY[raw] || raw;
+}
+
 function mapUser(u) {
   return {
     id: u._id,
@@ -84,24 +100,41 @@ exports.adminUpdateUser = async (req, res) => {
 
     const { role, status, Fullname, email, phone, gender } = req.body;
 
+    if (status !== undefined) {
+      const normalizedStatus = normalizeStatus(status);
+      if (!USER_STATUS_VALUES.includes(normalizedStatus)) {
+        return res.status(400).json({
+          message: "Invalid status value provided",
+          allowed: USER_STATUS_VALUES,
+        });
+      }
+      user.status = normalizedStatus;
+    }
+
     if (role !== undefined) user.role = role;
     if (Fullname !== undefined) user.Fullname = Fullname;
     if (email !== undefined) user.email = email;
     if (phone !== undefined) user.phone = phone;
     if (gender !== undefined) user.gender = gender;
-    if (status !== undefined) user.status = status;
 
     await user.save();
+
     return res.status(200).json({
       message: "User updated",
       user: mapUser(user),
     });
   } catch (error) {
-    console.error("Error updating user:", error);
+    console.error("API Error during user PATCH:", error);
     if (error.code === 11000) {
       return res.status(409).json({ message: "Email or phone already in use" });
     }
-    return res.status(500).json({ message: "Internal server error" });
+    if (error.name === "ValidationError") {
+      return res.status(400).json({ message: error.message });
+    }
+    if (error.name === "CastError") {
+      return res.status(400).json({ message: "Invalid user id format" });
+    }
+    return res.status(500).json({ message: "Internal Server Error", error: error.message });
   }
 };
 

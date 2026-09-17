@@ -19,14 +19,17 @@ router.get("/", getAllProducts);
 
 // Placed these above router.use(protect);
 router.get("/slug/:slug", getProductBySlug);
-router.get("/:id", getProductById);
 
 
 // Protected routes (Require authentication)
 router.use(protect);
 
-// Route for vendor dashboard to get ONLY their own products
+// Route for vendor dashboard to get ONLY their own products.
+// Registered BEFORE "/:id" so the literal segment never gets swallowed by route params.
 router.get("/vendor/me", authorize("vendor"), getVendorProducts);
+
+// Single product by id (kept after the literal routes to avoid shadowing)
+router.get("/:id", getProductById);
 
 
 // Allow vendors, super admins, or staff with 'canManageProducts'

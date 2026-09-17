@@ -241,13 +241,31 @@ describe("Operations: Reviews, Users, Promotions, Shipping, Notifications, Repor
       expect(res.body.data[0].name).toBe("Kigali Tech Store");
     });
 
-    test("Admin can update a user role", async () => {
+    test("Admin can update a user status", async () => {
+      const res = await request(app)
+        .patch(`/api/users/${buyerUser._id}`)
+        .set("Authorization", `Bearer ${superAdminToken}`)
+        .send({ status: "SUSPEND" });
+      expect(res.status).toBe(200);
+      expect(res.body.user.status).toBe("SUSPEND");
+    });
+
+    test("Legacy status values are normalized to the canonical enum", async () => {
       const res = await request(app)
         .patch(`/api/users/${buyerUser._id}`)
         .set("Authorization", `Bearer ${superAdminToken}`)
         .send({ status: "SUSPENDED" });
       expect(res.status).toBe(200);
-      expect(res.body.user.status).toBe("SUSPENDED");
+      expect(res.body.user.status).toBe("SUSPEND");
+    });
+
+    test("Invalid status values are rejected with 400", async () => {
+      const res = await request(app)
+        .patch(`/api/users/${buyerUser._id}`)
+        .set("Authorization", `Bearer ${superAdminToken}`)
+        .send({ status: "NOT_A_STATUS" });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/allowed/i);
     });
 
     test("Vendor lists customers who ordered their products", async () => {

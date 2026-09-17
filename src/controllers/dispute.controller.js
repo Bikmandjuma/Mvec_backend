@@ -1,5 +1,44 @@
 const disputeService = require("../services/dispute.service");
+const Dispute = require("../models/Dispute");
 const socketService = require("../services/socket.service");
+
+const DISPUTE_POPULATE = [
+  { path: "order", select: "orderNumber totalAmount status createdAt" },
+  { path: "raisedBy", select: "Fullname email" },
+  { path: "vendor", select: "Fullname email companyName" },
+  { path: "arbitrationDecision.arbitratedBy", select: "Fullname email" },
+];
+
+exports.adminListDisputes = async (req, res) => {
+  try {
+    const { status, page = 1, limit = 50 } = req.query;
+    const query = {};
+    if (status) query.status = status;
+    const disputes = await Dispute.find(query)
+      .sort({ createdAt: -1 })
+      .skip((Number(page) - 1) * Number(limit))
+      .limit(Number(limit))
+      .populate(DISPUTE_POPULATE);
+    const total = await Dispute.countDocuments(query);
+    return res.status(200).json({ success: true, data: disputes, meta: { total } });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.listMyDisputes = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const disputes = await Dispute.find({
+      $or: [{ raisedBy: userId }, { vendor: userId }],
+    })
+      .sort({ createdAt: -1 })
+      .populate(DISPUTE_POPULATE);
+    return res.status(200).json({ success: true, data: disputes });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
 
 exports.openDispute = async (req, res) => {
   try {

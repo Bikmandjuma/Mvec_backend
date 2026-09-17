@@ -10,7 +10,8 @@ const {
   updateVendorOrderStatus,
   updateOrderStatus,
   confirmOrderDelivery,
-  getAllOrders
+  getAllOrders,
+  cancelOrderByBuyer,
 } = require("../controllers/order.controller");
 
 const { checkStaffPermission } = require("../middleware/staff.middleware");
@@ -25,6 +26,7 @@ router.post("/direct-checkout", directCheckout);
 router.get("/my-orders", getMyOrders);
 router.get("/vendor/orders", authorize("vendor"), getVendorOrders);
 router.get("/:id", getOrderById);
+router.post("/:id/cancel", protect, cancelOrderByBuyer);
 router.patch(
   "/vendor/status",
   protect,

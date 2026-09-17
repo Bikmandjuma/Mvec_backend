@@ -79,3 +79,48 @@ exports.adminProcessPayout = async (req, res) => {
     return res.status(400).json({ success: false, message: error.message });
   }
 };
+
+exports.getMyDashboard = async (req, res) => {
+  try {
+    const data = await affiliateService.getDashboard(req.user.id);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+exports.adminListAffiliates = async (req, res) => {
+  try {
+    const data = await affiliateService.listAffiliates();
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+exports.listMyPayouts = async (req, res) => {
+  try {
+    const data = await affiliateService.listPayouts({ user: req.user.id });
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+exports.adminListPayouts = async (req, res) => {
+  try {
+    const data = await affiliateService.listPayouts({ isAdmin: true });
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+exports.getMyConversions = async (req, res) => {
+  try {
+    const data = await affiliateService.getConversionAudit(req.user.id);
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    return res.status(400).json({ success: false, message: error.message });
+  }
+};

@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const Order = require("../models/Order");
 const Cart = require("../models/Cart");
 const Product = require("../models/Product");
+const Payment = require("../models/Payment");
 const Settlement = require("../models/Settlement");
 const LedgerEntry = require("../models/LedgerEntry");
 const VendorWallet = require("../models/VendorWallet");
@@ -508,6 +509,73 @@ exports.getAllOrders = async (req, res) => {
       .sort({ createdAt: -1 });
 
     return res.status(200).json({ orders });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+/*
+ * Buyer-initiated cancellation with a 30-minute refund window.
+ * Restores stock, marks the order/payment as cancelled/refunded and notifies
+ * connected clients in real-time.
+ */
+// @desc    Buyer cancels own order within 30 minutes of payment
+// @route   POST /api/orders/:id/cancel
+// @access  Private (Buyer / Super Admin)
+const BUYER_CANCEL_WINDOW_MS = 30 * 60 * 1000;
+
+exports.cancelOrderByBuyer = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const order = await Order.findById(id);
+
+    if (!order) {
+      return res.status(404).json({ message: "Order not found." });
+    }
+    if (String(order.user) !== String(req.user.id) && req.user.role !== "super_admin") {
+      return res.status(403).json({ message: "Access denied." });
+    }
+    if (order.paymentStatus !== "PAID" && order.paymentStatus !== "CONFIRMED") {
+      return res.status(400).json({ message: "Only paid orders can be cancelled from this page." });
+    }
+    if (["CANCELLED", "REFUNDED", "COMPLETED", "DELIVERED", "RETURNED"].includes(order.orderStatus)) {
+      return res.status(400).json({ message: "This order cannot be cancelled anymore." });
+    }
+
+    // Use the latest successful payment timestamp as the paid time
+    const payment = await Payment.findOne({ parentOrder: order._id, status: "SUCCESS" }).sort({ createdAt: -1 });
+    const paidAt = payment && (payment.paidAt || payment.createdAt) ? payment.paidAt || payment.createdAt : null;
+    if (!paidAt || Date.now() - new Date(paidAt).getTime() > BUYER_CANCEL_WINDOW_MS) {
+      return res.status(400).json({ message: "The 30-minute cancellation period has ended." });
+    }
+
+    order.orderStatus = "CANCELLED";
+    order.paymentStatus = "REFUNDED";
+    order.cancellationReason = "Buyer cancelled within 30 minutes of payment";
+    await order.save();
+
+    if (payment) {
+      payment.status = "REFUNDED";
+      await payment.save();
+    }
+
+    // Restore stock for each product that was snapshot into this order
+    for (const item of order.items || []) {
+      if (!item.product) continue;
+      const product = await Product.findById(item.product);
+      if (product) {
+        product.stockQuantity = Math.max(0, (product.stockQuantity || 0) + (item.quantity || 0));
+        if (product.status === "OUT_OF_STOCK" && product.stockQuantity > 0) product.status = "ACTIVE";
+        await product.save();
+      }
+    }
+
+    socketService.emitOrderStatusUpdate(order);
+
+    return res.status(200).json({
+      message: "Order cancelled successfully. A full refund has been recorded.",
+      order,
+    });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }

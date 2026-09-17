@@ -1,4 +1,6 @@
 const Vendor = require("../models/Vendor");
+const Product = require("../models/Product");
+const Category = require("../models/Category");
 
 // ─── 1. ONBOARD VENDOR ──────────────────────────────────────────────────────
 // @route   POST /api/vendors/onboard
@@ -169,8 +171,36 @@ exports.adminGetVendors = async (req, res) => {
       Vendor.countDocuments(filter),
     ]);
 
+    // Enrich with per-vendor product counts + category breakdown for admin tables
+    const vendorIds = vendors.map((v) => v._id);
+    let productStats = [];
+    if (vendorIds.length) {
+      productStats = await Product.aggregate([
+        { $match: { vendor: { $in: vendorIds }, status: { $ne: "INACTIVE" } } },
+        { $group: { _id: "$vendor", productCount: { $sum: 1 }, categories: { $addToSet: "$category" } } },
+      ]);
+    }
+    const categoryIds = [...new Set(productStats.flatMap((s) => s.categories || []))];
+    const categoryNames = await Category.find({ _id: { $in: categoryIds } }).select("name");
+    const catName = {};
+    categoryNames.forEach((c) => { catName[String(c._id)] = c.name; });
+
+    const statsByVendor = new Map(productStats.map((s) => [String(s._id), s]));
+    const enriched = vendors.map((v) => {
+      const stats = statsByVendor.get(String(v._id)) || { productCount: 0, categories: [] };
+      const categories = (stats.categories || [])
+        .map((cid) => catName[String(cid)] || null)
+        .filter(Boolean);
+      return {
+        ...v.toObject(),
+        productCount: Number(stats.productCount) || 0,
+        productCategories: categories,
+        category: categories[0] || "",
+      };
+    });
+
     return res.status(200).json({
-      data: vendors,
+      data: enriched,
       meta: { page: pageNum, pageSize: limit, total },
     });
   } catch (error) {

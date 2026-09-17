@@ -1,6 +1,34 @@
 const mongoose = require("mongoose");
 const Supplier = require("../models/Supplier");
 const Product = require("../models/Product");
+const WholesaleProduct = require("../models/WholesaleProduct");
+
+// Resolve the signed-in supplier's profile document (used by wholesale CRUD).
+async function resolveMySupplier(userId) {
+  const supplier = await Supplier.findOne({ user: userId });
+  if (!supplier) {
+    const error = new Error("Supplier profile not found. Please complete onboarding.");
+    error.status = 404;
+    throw error;
+  }
+  return supplier;
+}
+
+// Normalize the numeric + media fields of a wholesale product payload.
+function sanitizeWholesalePayload(body = {}, defaults = {}) {
+  return {
+    name: body.name !== undefined ? body.name : defaults.name,
+    shortDescription: body.shortDescription !== undefined ? body.shortDescription : defaults.shortDescription,
+    category: body.category !== undefined && body.category !== "" ? body.category : defaults.category || "General",
+    unit: body.unit !== undefined && body.unit !== "" ? body.unit : defaults.unit || "piece",
+    wholesalePrice: Math.max(0, Number(body.wholesalePrice ?? defaults.wholesalePrice ?? 0) || 0),
+    retailPrice: Math.max(0, Number(body.retailPrice ?? defaults.retailPrice ?? 0) || 0),
+    moq: Math.max(1, Number(body.moq ?? defaults.moq ?? 1) || 1),
+    stockQuantity: Math.max(0, Number(body.stockQuantity ?? defaults.stockQuantity ?? 0) || 0),
+    bulkDiscount: Math.min(100, Math.max(0, Number(body.bulkDiscount ?? defaults.bulkDiscount ?? 0) || 0)),
+    media: body.media !== undefined ? body.media : defaults.media || { mainImage: "", gallery: [] },
+  };
+}
 
 // ─── 1. ONBOARD SUPPLIER (complete profile after registering) ──────────────
 // @route   POST /api/suppliers/onboard
@@ -260,5 +288,95 @@ exports.adminUpdateSupplierStatus = async (req, res) => {
     return res.status(200).json({ message: `Supplier status set to ${status}`, supplier });
   } catch (error) {
     return res.status(500).json({ message: error.message });
+  }
+};
+
+// ─── 9. SUPPLIER: LIST OWN WHOLESALE PRODUCTS ────────────────────────────────
+// @route   GET /api/suppliers/me/products
+// @access  Private (role: "supplier", own catalog)
+exports.getMyWholesaleProducts = async (req, res) => {
+  try {
+    const supplier = await resolveMySupplier(req.user.id);
+    const products = await WholesaleProduct.find({ supplier: supplier._id }).sort({ createdAt: -1 });
+    return res.status(200).json({ success: true, supplier: supplier._id, count: products.length, products });
+  } catch (error) {
+    return res.status(error.status || 500).json({ message: error.message });
+  }
+};
+
+// ─── 10. SUPPLIER: CREATE WHOLESALE PRODUCT ──────────────────────────────────
+// @route   POST /api/suppliers/me/products
+// @access  Private (role: "supplier", own catalog)
+exports.createWholesaleProduct = async (req, res) => {
+  try {
+    const supplier = await resolveMySupplier(req.user.id);
+    const { name, wholesalePrice } = req.body;
+
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ message: "name is required" });
+    }
+    if (wholesalePrice === undefined || wholesalePrice === null || wholesalePrice === "" || Number(wholesalePrice) < 0) {
+      return res.status(400).json({ message: "A valid wholesalePrice is required" });
+    }
+
+    const payload = sanitizeWholesalePayload(req.body);
+    const product = await WholesaleProduct.create({ supplier: supplier._id, ...payload });
+
+    return res.status(201).json({ success: true, message: "Wholesale product created.", product });
+  } catch (error) {
+    return res.status(error.status || 400).json({ message: error.message });
+  }
+};
+
+// ─── 11. SUPPLIER: UPDATE OWN WHOLESALE PRODUCT ──────────────────────────────
+// @route   PUT /api/suppliers/me/products/:productId
+// @access  Private (role: "supplier", own catalog)
+exports.updateWholesaleProduct = async (req, res) => {
+  try {
+    const supplier = await resolveMySupplier(req.user.id);
+    const product = await WholesaleProduct.findOne({ _id: req.params.productId, supplier: supplier._id });
+    if (!product) {
+      return res.status(404).json({ message: "Wholesale product not found" });
+    }
+
+    const payload = sanitizeWholesalePayload(req.body, {
+      name: product.name,
+      shortDescription: product.shortDescription,
+      category: product.category,
+      unit: product.unit,
+      wholesalePrice: product.wholesalePrice,
+      retailPrice: product.retailPrice,
+      moq: product.moq,
+      stockQuantity: product.stockQuantity,
+      bulkDiscount: product.bulkDiscount,
+      media: product.media,
+    });
+
+    if (req.body.status !== undefined) {
+      product.status = req.body.status;
+    }
+
+    Object.assign(product, payload);
+    await product.save();
+
+    return res.status(200).json({ success: true, message: "Wholesale product updated.", product });
+  } catch (error) {
+    return res.status(error.status || 400).json({ message: error.message });
+  }
+};
+
+// ─── 12. SUPPLIER: DELETE OWN WHOLESALE PRODUCT ──────────────────────────────
+// @route   DELETE /api/suppliers/me/products/:productId
+// @access  Private (role: "supplier", own catalog)
+exports.deleteWholesaleProduct = async (req, res) => {
+  try {
+    const supplier = await resolveMySupplier(req.user.id);
+    const product = await WholesaleProduct.findOneAndDelete({ _id: req.params.productId, supplier: supplier._id });
+    if (!product) {
+      return res.status(404).json({ message: "Wholesale product not found" });
+    }
+    return res.status(200).json({ success: true, message: "Wholesale product deleted." });
+  } catch (error) {
+    return res.status(error.status || 500).json({ message: error.message });
   }
 };

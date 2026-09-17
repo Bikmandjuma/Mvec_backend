@@ -64,6 +64,69 @@ exports.getSupportCaseById = async (req, res) => {
   }
 };
 
+// @desc    List support cases (all for staff, own for regular users)
+// @route   GET /api/support/cases
+// @access  Private
+exports.listSupportCases = async (req, res) => {
+  try {
+    const isStaff = ["admin", "super_admin", "support"].includes(req.user.role);
+    const filter = isStaff ? {} : { openedBy: req.user.id };
+    const { status, page = 1, pageSize = 50 } = req.query;
+    if (status) filter.status = status;
+
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const limit = Math.min(parseInt(pageSize, 10) || 50, 100);
+    const skip = (pageNum - 1) * limit;
+
+    const [cases, total] = await Promise.all([
+      SupportCase.find(filter)
+        .populate("openedBy", "Fullname email role")
+        .populate("assignedTo", "Fullname email")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit),
+      SupportCase.countDocuments(filter),
+    ]);
+
+    return res.status(200).json({ cases, meta: { page: pageNum, pageSize: limit, total } });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Update support case status / assignee (staff only)
+// @route   PATCH /api/support/cases/:id/status
+// @access  Private (admin, super_admin, support)
+exports.updateSupportCaseStatus = async (req, res) => {
+  try {
+    const isStaff = ["admin", "super_admin", "support"].includes(req.user.role);
+    if (!isStaff) {
+      return res.status(403).json({ message: "Only support staff can update case status." });
+    }
+
+    const { id } = req.params;
+    const { status, assignedTo } = req.body;
+
+    const allowed = ["OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED"];
+    if (!status || !allowed.includes(status)) {
+      return res.status(400).json({ message: "Invalid status value" });
+    }
+
+    const supportCase = await SupportCase.findById(id);
+    if (!supportCase) {
+      return res.status(404).json({ message: "Support case not found" });
+    }
+
+    supportCase.status = status;
+    if (assignedTo) supportCase.assignedTo = assignedTo;
+    await supportCase.save();
+
+    return res.status(200).json({ message: "Support case updated", case: supportCase });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
 // @desc    Add comment/update to a support case
 // @route   POST /api/support/cases/:id/comments
 // @access  Private

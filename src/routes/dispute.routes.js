@@ -3,6 +3,12 @@ const router = express.Router();
 const disputeController = require("../controllers/dispute.controller");
 const { protect, authorize } = require("../middleware/auth.middleware"); // Adjust middleware import path if needed
 
+// Super Admin: list all dispute cases
+router.get("/", protect, authorize("super_admin"), disputeController.adminListDisputes);
+
+// Own dispute cases (raised by or involving the signed-in user)
+router.get("/mine", protect, disputeController.listMyDisputes);
+
 // Open a dispute case for an order
 router.post("/", protect, disputeController.openDispute);
 
