@@ -1,12 +1,9 @@
 const mongoose = require("mongoose");
 const Order = require("../models/Order");
 const Payment = require("../models/Payment");
-const PaymentWebhookLog = require("../models/PaymentWebhookLog");
 const { formatRwandanPhone } = require("../utils/momo.util");
-const pricingService = require("../services/pricing.service");
-const financialService = require("../services/financial.service");
-const momoService = require("../services/momo.service");
-const airtelService = require("../services/airtel.service");
+const paymentService = require("../services/payment.service");
+const paypackService = require("../services/paypack.service");
 const socketService = require("../services/socket.service");
 
 async function initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService, explicitProvider = null }) {
@@ -48,6 +45,7 @@ async function initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService
     amount: order.totalAmount,
     currency: "RWF",
     status: "PENDING",
+    gateway: gatewayService.name,
     gatewayResponse: { phase: "initiated" },
   });
 
@@ -107,37 +105,75 @@ async function initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService
   };
 }
 
-// 1. Initiate MTN MoMo USSD Push Payment
-exports.initiateMomoPayment = async (req, res) => {
-  try {
-    const { orderId, phoneNumber } = req.body;
-    const result = await initiateMobileMoneyPayment({
-      orderId,
-      phoneNumber,
-      gatewayService: momoService,
-      explicitProvider: "MTN",
-    });
-    return res.status(200).json(result);
-  } catch (error) {
-    const statusCode = error.statusCode || 500;
-    return res.status(statusCode).json({ message: error.message, ...(error.details && { error: error.details }) });
-  }
+// All mobile money collections go through Paypack, which handles both MTN and Airtel numbers.
+const paypackGateway = {
+  name: "PAYPACK",
+  isSandbox: () => paypackService.isSandbox(),
+  triggerUssdPush: (args) => paypackService.triggerUssdPush(args),
 };
 
-// 1b. Initiate Airtel Money USSD Push Payment
-exports.initiateAirtelPayment = async (req, res) => {
+function mobileMoneyHandler(explicitProvider) {
+  return async (req, res) => {
+    try {
+      const { orderId, phoneNumber } = req.body;
+      const result = await initiateMobileMoneyPayment({
+        orderId,
+        phoneNumber,
+        gatewayService: paypackGateway,
+        explicitProvider,
+      });
+      return res.status(200).json(result);
+    } catch (error) {
+      const statusCode = error.statusCode || 500;
+      return res.status(statusCode).json({ message: error.message, ...(error.details && { error: error.details }) });
+    }
+  };
+}
+
+// 1. Initiate a Paypack payment for any MTN or Airtel number (provider auto-detected)
+exports.initiatePaypackPayment = mobileMoneyHandler(null);
+
+// 1a. Initiate MTN MoMo USSD Push Payment (via Paypack)
+exports.initiateMomoPayment = mobileMoneyHandler("MTN");
+
+// 1b. Initiate Airtel Money USSD Push Payment (via Paypack)
+exports.initiateAirtelPayment = mobileMoneyHandler("AIRTEL");
+
+// 1c. Check a payment's status, reconciling with Paypack while it is still pending.
+//     Lets clients poll for completion when the Paypack webhook cannot reach the
+//     server (e.g. local development).
+exports.checkPaymentStatus = async (req, res) => {
   try {
-    const { orderId, phoneNumber } = req.body;
-    const result = await initiateMobileMoneyPayment({
-      orderId,
-      phoneNumber,
-      gatewayService: airtelService,
-      explicitProvider: "AIRTEL",
-    });
-    return res.status(200).json(result);
+    const payment = await Payment.findById(req.params.paymentId);
+    if (!payment) {
+      return res.status(404).json({ message: "Payment not found." });
+    }
+
+    if (payment.status === "PENDING" && payment.gateway === "PAYPACK" && payment.gatewayReference) {
+      const result = await paypackService.getTransactionStatus(payment.gatewayReference);
+
+      if (result.status === "SUCCESSFUL") {
+        await paymentService.processPaymentWebhook({
+          provider: "PAYPACK",
+          externalTransactionId: payment.gatewayReference,
+          orderId: payment.parentOrder,
+          paymentId: payment._id,
+          amount: result.amount ?? payment.amount,
+          payload: result.raw || {},
+          gatewayFee: result.fee || 0,
+        });
+      } else if (result.status === "FAILED") {
+        payment.status = "FAILED";
+        payment.gatewayResponse = result.raw || payment.gatewayResponse;
+        await payment.save();
+      }
+    }
+
+    const fresh = await Payment.findById(payment._id);
+    const order = await Order.findById(fresh.parentOrder).select("paymentStatus orderStatus totalAmount");
+    return res.status(200).json({ payment: fresh, order });
   } catch (error) {
-    const statusCode = error.statusCode || 500;
-    return res.status(statusCode).json({ message: error.message, ...(error.details && { error: error.details }) });
+    return res.status(500).json({ message: "Unable to check payment status", error: error.message });
   }
 };
 
@@ -193,108 +229,5 @@ exports.confirmPayment = async (req, res) => {
     await session.abortTransaction();
     session.endSession();
     return res.status(500).json({ message: "Payment confirmation failed", error: error.message });
-  }
-};
-
-// 2. Idempotent Webhook Handler with Escrow & Dynamic Commissioning
-exports.handlePaymentWebhook = async (req, res) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
-  try {
-    const event = req.body;
-    
-    // Paystack / MoMo Provider standard payload parsing
-    const reference = event.data?.reference || event.reference;
-    const amount = event.data?.amount || event.amount;
-    const isSuccessful = event.event === "charge.success" || event.status === "SUCCESSFUL";
-
-    if (!isSuccessful) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(200).json({ status: "ignored", message: "Transaction not successful" });
-    }
-
-    // 1. Idempotency Check: Avoid processing duplicate webhook callbacks
-    const existingLog = await PaymentWebhookLog.findOne({ externalTransactionId: reference }).session(session);
-    if (existingLog && existingLog.status === "PROCESSED") {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(200).json({ status: "success", message: "Already processed" });
-    }
-
-    // 2. Locate Payment & Order Records
-    const payment = await Payment.findOne({ transactionReference: reference }).session(session);
-    if (!payment) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(404).json({ message: "Associated payment record not found." });
-    }
-
-    const order = await Order.findById(payment.parentOrder).session(session);
-    if (!order) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(404).json({ message: "Associated order not found." });
-    }
-
-    // 3. Mark Payment & Order as PAID
-    payment.status = "SUCCESS";
-    payment.paidAt = new Date();
-    payment.gatewayResponse = event;
-    await payment.save({ session });
-
-    order.paymentStatus = "PAID";
-    order.orderStatus = "PROCESSING";
-    await order.save({ session });
-
-    // 4. Evaluate Dynamic Commission & Lock Escrow Funds per Vendor Item
-    const hasAffiliate = !!(order.affiliateUser && order.affiliateCode);
-    const affiliateUserId = hasAffiliate ? order.affiliateUser : null;
-    const gatewayFee = Number(event.data?.fees?.split(",")[0]?.split(":")[1]) || Number(event.fee) || 0;
-
-    for (const item of order.items) {
-      const snapshot = await pricingService.createItemPricingSnapshot({
-        orderId: order._id,
-        item,
-        session,
-        hasAffiliate,
-        gatewayFee,
-      });
-
-      await financialService.lockPaymentInEscrow({
-        orderId: order._id,
-        vendorId: item.vendor,
-        grossAmount: snapshot.grossTotal,
-        commissionAmount: snapshot.commissionAmount,
-        session,
-        split: snapshot,
-        affiliateUserId,
-      });
-    }
-
-    // 5. Create Idempotency Audit Log Entry
-    await PaymentWebhookLog.create(
-      [
-        {
-          provider: payment.provider === "MTN" ? "MTN_MOMO" : "AIRTEL_MONEY",
-          externalTransactionId: reference,
-          internalOrderId: order._id,
-          status: "PROCESSED",
-          amount: payment.amount,
-          rawPayload: event,
-        },
-      ],
-      { session }
-    );
-
-    await session.commitTransaction();
-    session.endSession();
-
-    return res.status(200).json({ status: "success", message: "Payment processed & escrow locked." });
-  } catch (error) {
-    await session.abortTransaction();
-    session.endSession();
-    return res.status(500).json({ message: "Webhook processing error", error: error.message });
   }
 };

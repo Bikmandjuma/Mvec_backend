@@ -27,6 +27,11 @@ const paymentSchema = new mongoose.Schema(
       enum: ["MOMO", "AIRTEL", "CASH_ON_DELIVERY"],
       required: true,
     },
+    // Gateway that processed the collection (e.g. PAYPACK).
+    gateway: {
+      type: String,
+      enum: ["PAYPACK", "MOMO", "AIRTEL"],
+    },
     phoneNumber: {
       type: String, // E.g., 250788XXXXXX or 25073XXXXXXX
     },

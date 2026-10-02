@@ -30,12 +30,25 @@ mongoose.connect(MONGO_URI)
 
 const app = express();
 
-app.use(helmet());
+// Over plain http (local dev), HSTS and upgrade-insecure-requests make browsers
+// fetch assets via https, which breaks Swagger UI with a blank page.
+const isProduction = process.env.NODE_ENV === "production";
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: { upgradeInsecureRequests: isProduction ? [] : null },
+  },
+  strictTransportSecurity: isProduction,
+}));
 app.use(cors({
   origin: "*",
   credentials: true,
 }));
-app.use(express.json());
+// Keep the raw body so webhook signatures (Paypack, Airtel) can be verified.
+app.use(express.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf;
+  },
+}));
 app.use(morgan("dev"));
 
   

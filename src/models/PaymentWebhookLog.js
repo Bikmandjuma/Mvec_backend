@@ -4,7 +4,7 @@ const paymentWebhookLogSchema = new mongoose.Schema(
   {
     provider: {
       type: String,
-      enum: ["MTN_MOMO", "AIRTEL_MONEY"],
+      enum: ["MTN_MOMO", "AIRTEL_MONEY", "PAYPACK"],
       required: true,
     },
     // The provider's unique transaction/reference ID (Used for Idempotency)
