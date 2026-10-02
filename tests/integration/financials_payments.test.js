@@ -24,6 +24,7 @@ const DeveloperPayout = require("../../src/models/DeveloperPayout");
 const PaymentWebhookLog = require("../../src/models/PaymentWebhookLog");
 const CommissionRule = require("../../src/models/CommissionRule");
 const financialService = require("../../src/services/financial.service");
+const paypackService = require("../../src/services/paypack.service");
 
 jest.setTimeout(60000);
 
@@ -35,7 +36,7 @@ function createTestApp() {
   const testApp = express();
   testApp.use(helmet());
   testApp.use(cors());
-  testApp.use(express.json());
+  testApp.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
 
   testApp.use("/api/auth", require("../../src/routes/auth.routes"));
   testApp.use("/api/products", require("../../src/routes/product.routes"));
@@ -45,12 +46,24 @@ function createTestApp() {
   testApp.use("/api/payouts", require("../../src/routes/payout.routes"));
   testApp.use("/api/staff", require("../../src/routes/staff.routes"));
   testApp.use("/api/payments", require("../../src/routes/payment.routes"));
+  testApp.use("/api/webhooks", require("../../src/routes/webhook.routes"));
   testApp.use("/api/admin", require("../../src/routes/admin.financial.routes"));
   testApp.use("/api/admin", require("../../src/routes/admin.commission.routes"));
   testApp.use("/api/admin/payouts", require("../../src/routes/admin.payout.routes"));
   testApp.use("/api/developer/payouts", require("../../src/routes/developer.payout.routes"));
 
   return testApp;
+}
+
+// Simulates Paypack's "transaction:processed" callback for a cashin.
+function sendPaypackWebhook(ref, amount, { fee = 0, status = "successful" } = {}) {
+  return request(app)
+    .post("/api/webhooks/paypack")
+    .send({
+      event_id: `evt-${ref}`,
+      event_kind: "transaction:processed",
+      data: { ref, kind: "CASHIN", amount, fee, status },
+    });
 }
 
 const canRunTransactions = async (mongoose) => {
@@ -65,13 +78,12 @@ const canRunTransactions = async (mongoose) => {
   }
 };
 
-const hasSystemMongod = () => {
+const systemMongodPath = () => {
   try {
     const { execSync } = require("child_process");
-    execSync("command -v mongod", { stdio: "ignore" });
-    return true;
+    return execSync("command -v mongod", { encoding: "utf8" }).trim() || null;
   } catch (err) {
-    return false;
+    return null;
   }
 };
 
@@ -81,9 +93,10 @@ async function startMongo() {
     try {
       let uri;
       let stop;
-      if (hasSystemMongod()) {
+      const mongodPath = systemMongodPath();
+      if (mongodPath) {
         const replSet = await MongoMemoryReplSet.create({
-          binary: { systemBinary: "/usr/bin/mongod" },
+          binary: { systemBinary: mongodPath },
           replSet: { count: 1, name: "rs0" },
         });
         uri = replSet.getUri("test");
@@ -120,6 +133,13 @@ describe("Financials & Payments Integration Suite", () => {
   beforeAll(async () => {
     process.env.NODE_ENV = "test";
     process.env.JWT_SECRET = JWT_SECRET;
+    delete process.env.PAYPACK_WEBHOOK_SECRET;
+
+    jest.spyOn(paypackService, "isSandbox").mockReturnValue(false);
+    jest.spyOn(paypackService, "triggerUssdPush").mockImplementation(async ({ amount }) => {
+      const ref = require("crypto").randomUUID();
+      return { success: true, reference: ref, status: "PENDING", raw: { ref, amount, status: "pending" } };
+    });
 
     try {
       // startMongo connects mongoose and verifies a replica set topology is present.
@@ -254,7 +274,7 @@ describe("Financials & Payments Integration Suite", () => {
   });
 
   describe("1. Payment Initiation Test", () => {
-    test("Should initiate MoMo payment and create Payment record (sandbox auto-succeeds)", async () => {
+    test("Should initiate Paypack payment and create a pending Payment record", async () => {
       if (!mongoReady) return;
       const order = await Order.create({
         user: buyerUser._id,
@@ -281,7 +301,7 @@ describe("Financials & Payments Integration Suite", () => {
       });
 
       const response = await request(app)
-        .post("/api/payments/momo/initiate")
+        .post("/api/payments/pay")
         .set("Authorization", `Bearer ${buyerToken}`)
         .send({
           orderId: order._id.toString(),
@@ -291,10 +311,13 @@ describe("Financials & Payments Integration Suite", () => {
       expect(response.status).toBe(200);
       expect(response.body.paymentRef).toBeDefined();
       expect(response.body.paymentId).toBeDefined();
+      expect(response.body.gatewayReference).toBeDefined();
 
       const payment = await Payment.findById(response.body.paymentId);
       expect(payment).toBeTruthy();
-      expect(payment.status).toBe("SUCCESS");
+      expect(payment.status).toBe("PENDING");
+      expect(payment.gateway).toBe("PAYPACK");
+      expect(payment.gatewayReference).toBe(response.body.gatewayReference);
       expect(payment.provider).toBe("MTN");
       expect(payment.amount).toBe(30000);
     });
@@ -328,7 +351,7 @@ describe("Financials & Payments Integration Suite", () => {
       });
 
       const response = await request(app)
-        .post("/api/payments/airtel/initiate")
+        .post("/api/payments/pay/airtel")
         .set("Authorization", `Bearer ${buyerToken}`)
         .send({
           orderId: order._id.toString(),
@@ -338,10 +361,13 @@ describe("Financials & Payments Integration Suite", () => {
       expect(response.status).toBe(200);
       expect(response.body.paymentRef).toBeDefined();
       expect(response.body.paymentId).toBeDefined();
+      expect(response.body.gatewayReference).toBeDefined();
 
       const payment = await Payment.findById(response.body.paymentId);
       expect(payment).toBeTruthy();
-      expect(payment.status).toBe("SUCCESS");
+      expect(payment.status).toBe("PENDING");
+      expect(payment.gateway).toBe("PAYPACK");
+      expect(payment.gatewayReference).toBe(response.body.gatewayReference);
       expect(payment.provider).toBe("AIRTEL");
       expect(payment.method).toBe("AIRTEL");
       expect(payment.amount).toBe(15000);
@@ -374,7 +400,7 @@ describe("Financials & Payments Integration Suite", () => {
       });
 
       const response = await request(app)
-        .post("/api/payments/airtel/initiate")
+        .post("/api/payments/pay/airtel")
         .set("Authorization", `Bearer ${buyerToken}`)
         .send({
           orderId: order._id.toString(),
@@ -413,27 +439,20 @@ describe("Financials & Payments Integration Suite", () => {
       });
 
       const initResponse = await request(app)
-        .post("/api/payments/momo/initiate")
+        .post("/api/payments/pay")
         .set("Authorization", `Bearer ${buyerToken}`)
         .send({
           orderId: order._id.toString(),
           phoneNumber: "0788123456",
         });
 
-      const paymentRef = initResponse.body.paymentRef;
+      const paymentRef = initResponse.body.gatewayReference;
 
-      const webhookPayload = {
-        event: "charge.success",
-        reference: paymentRef,
-        amount: 30000,
-      };
-
-      const webhookResponse = await request(app)
-        .post("/api/payments/webhook")
-        .send(webhookPayload);
+      const webhookResponse = await sendPaypackWebhook(paymentRef, 30000);
 
       expect(webhookResponse.status).toBe(200);
-      expect(webhookResponse.body.status).toBe("success");
+      expect(webhookResponse.body.success).toBe(true);
+      expect(webhookResponse.body.result.status).toBe("SUCCESS");
 
       const updatedOrder = await Order.findById(order._id);
       expect(updatedOrder.paymentStatus).toBe("PAID");
@@ -446,12 +465,10 @@ describe("Financials & Payments Integration Suite", () => {
       expect(settlements.length).toBeGreaterThan(0);
       expect(settlements[0].status).toBe("HELD");
 
-      const duplicateResponse = await request(app)
-        .post("/api/payments/webhook")
-        .send(webhookPayload);
+      const duplicateResponse = await sendPaypackWebhook(paymentRef, 30000);
 
       expect(duplicateResponse.status).toBe(200);
-      expect(duplicateResponse.body.message).toBe("Already processed");
+      expect(duplicateResponse.body.result.status).toBe("ALREADY_PROCESSED");
 
       const ledgerEntries = await LedgerEntry.find({ relatedOrder: order._id });
       expect(ledgerEntries.length).toBe(1);
@@ -505,22 +522,16 @@ describe("Financials & Payments Integration Suite", () => {
       });
 
       const initResponse = await request(app)
-        .post("/api/payments/momo/initiate")
+        .post("/api/payments/pay")
         .set("Authorization", `Bearer ${buyerToken}`)
         .send({
           orderId: order._id.toString(),
           phoneNumber: "0788123456",
         });
 
-      const paymentRef = initResponse.body.paymentRef;
+      const paymentRef = initResponse.body.gatewayReference;
 
-      await request(app)
-        .post("/api/payments/webhook")
-        .send({
-          event: "charge.success",
-          reference: paymentRef,
-          amount: 10000,
-        });
+      await sendPaypackWebhook(paymentRef, 10000);
 
       const snapshot = await PricingSnapshot.findOne({ order: order._id });
       expect(snapshot).toBeTruthy();
@@ -579,22 +590,16 @@ describe("Financials & Payments Integration Suite", () => {
       });
 
       const initResponse = await request(app)
-        .post("/api/payments/momo/initiate")
+        .post("/api/payments/pay")
         .set("Authorization", `Bearer ${buyerToken}`)
         .send({
           orderId: order._id.toString(),
           phoneNumber: "0788123456",
         });
 
-      const paymentRef = initResponse.body.paymentRef;
+      const paymentRef = initResponse.body.gatewayReference;
 
-      await request(app)
-        .post("/api/payments/webhook")
-        .send({
-          event: "charge.success",
-          reference: paymentRef,
-          amount: 30000,
-        });
+      await sendPaypackWebhook(paymentRef, 30000);
 
       const settlement = await Settlement.findOne({ order: order._id });
       expect(settlement).toBeTruthy();
@@ -648,23 +653,16 @@ describe("Financials & Payments Integration Suite", () => {
       });
 
       const initResponse = await request(app)
-        .post("/api/payments/momo/initiate")
+        .post("/api/payments/pay")
         .set("Authorization", `Bearer ${buyerToken}`)
         .send({
           orderId: order._id.toString(),
           phoneNumber: "0788123456",
         });
 
-      const paymentRef = initResponse.body.paymentRef;
+      const paymentRef = initResponse.body.gatewayReference;
 
-      const webhookResponse = await request(app)
-        .post("/api/payments/webhook")
-        .send({
-          event: "charge.success",
-          reference: paymentRef,
-          amount: 100000,
-          fee: 1000,
-        });
+      const webhookResponse = await sendPaypackWebhook(paymentRef, 100000, { fee: 1000 });
 
       expect(webhookResponse.status).toBe(200);
 

@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const Payment = require("../models/Payment");
 const paymentService = require("../services/payment.service");
+const paypackService = require("../services/paypack.service");
 
 /**
  * HMAC Validation Helper
@@ -213,6 +214,73 @@ exports.handleAirtelWebhook = async (req, res) => {
   } catch (error) {
     console.error("[Airtel Webhook Error]:", error);
     // Respond with 500 so gateway knows to retry later
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Paypack Payment Webhook Receiver
+// @route   POST /api/webhooks/paypack
+// @access  Public (Provider Verified via X-Paypack-Signature)
+exports.handlePaypackWebhook = async (req, res) => {
+  try {
+    // Verify the signature whenever a webhook secret is configured.
+    if (process.env.PAYPACK_WEBHOOK_SECRET) {
+      const isValid = paypackService.verifyWebhookSignature(
+        req.rawBody,
+        req.headers["x-paypack-signature"],
+      );
+      if (!isValid) {
+        return res.status(401).json({ message: "Invalid webhook signature" });
+      }
+    }
+
+    // Payload: { event_id, event_kind, created_at, data: { ref, kind, amount, fee, status, ... } }
+    const { event_kind: eventKind, data = {} } = req.body;
+
+    // Only a processed CASHIN carries a final status; ignore everything else.
+    if (eventKind !== "transaction:processed" || data.kind !== "CASHIN") {
+      return res.status(200).json({ success: true, message: "Event ignored." });
+    }
+
+    const payment = await Payment.findOne({ gatewayReference: data.ref });
+    if (!payment) {
+      return res
+        .status(404)
+        .json({ message: "Unable to resolve payment for webhook callback." });
+    }
+
+    const status = paypackService.normalizeStatus(data.status);
+
+    if (status !== "SUCCESSFUL") {
+      if (status === "FAILED" && payment.status === "PENDING") {
+        payment.status = "FAILED";
+        payment.gatewayResponse = req.body;
+        await payment.save();
+      }
+      return res.status(200).json({
+        success: true,
+        message: "Transaction status not successful. Recorded.",
+      });
+    }
+
+    const result = await paymentService.processPaymentWebhook({
+      provider: "PAYPACK",
+      externalTransactionId: data.ref,
+      orderId: payment.parentOrder,
+      paymentId: payment._id,
+      amount: Number(data.amount),
+      payload: req.body,
+      gatewayFee: Number(data.fee) || 0,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Paypack webhook processed successfully.",
+      result,
+    });
+  } catch (error) {
+    console.error("[Paypack Webhook Error]:", error);
+    // Respond with 500 so Paypack retries later
     return res.status(500).json({ message: error.message });
   }
 };

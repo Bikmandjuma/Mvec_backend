@@ -33,7 +33,7 @@ exports.recordIgnoredWebhook = async ({ provider, externalTransactionId, amount 
 /**
  * Process payment callback idempotently
  */
-exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderId, amount, payload, gatewayFee = 0 }) => {
+exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderId, paymentId = null, amount, payload, gatewayFee = 0 }) => {
   // 1. Idempotency Check: Prevent duplicate processing if already handled
   const existingLog = await PaymentWebhookLog.findOne({ externalTransactionId });
   if (existingLog && existingLog.status === "PROCESSED") {
@@ -68,11 +68,13 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
     await order.save({ session });
 
     // 4b. Update Payment Record Status
+    // Target the exact payment attempt when known; an order can have several.
     await Payment.findOneAndUpdate(
-      { parentOrder: order._id },
+      paymentId ? { _id: paymentId } : { parentOrder: order._id },
       {
         status: "SUCCESS",
         gatewayReference: externalTransactionId,
+        gatewayFee,
         paidAt: new Date(),
       },
       { session }
