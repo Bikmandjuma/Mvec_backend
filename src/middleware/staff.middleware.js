@@ -7,7 +7,9 @@ exports.checkStaffPermission = (requiredPermission) => {
       // If user is the store owner (primary vendor) or super admin, pass through
       if (req.user.role === "super_admin") return next();
 
-      const store = await Store.findOne({ owner: req.user.id });
+      const store = await Store.findOne({
+        $or: [{ owner: req.user.id }, { vendor: req.user.id }],
+      });
       if (store) {
         req.store = store;
         return next(); // User is the main owner
