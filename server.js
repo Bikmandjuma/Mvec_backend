@@ -63,6 +63,7 @@ app.use("/api/orders", require("./src/routes/order.routes"));
 app.use("/api/stores", require("./src/routes/store.routes"));
 app.use("/api/payouts", require("./src/routes/payout.routes"));
 app.use("/api/staff", require("./src/routes/staff.routes"));
+app.use("/api/vendor/staff", require("./src/routes/staff.routes"));
 app.use("/api/payments", require("./src/routes/payment.routes"));
 app.use("/api/admin", require("./src/routes/admin.financial.routes"));
 app.use("/api/admin", require("./src/routes/admin.commission.routes"));
@@ -153,8 +154,32 @@ app.use((err, req, res, next) => {
 // Initialize background cron tasks once DB connection is established
 mongoose.connection.once("open", () => {
   console.log("Connected to MongoDB.");
+  rebuildSparseUserIndexes();
   initBackgroundWorkers();
 });
+
+// The users.email / users.phone unique indexes were created non-sparse, so
+// every account missing one of them indexed as `null` and collided with the
+// next one (phone-only sign-ups, Google accounts). Mongoose only creates
+// indexes, so an existing deployment must drop the old option before the
+// sparse schema indexes can be rebuilt.
+async function rebuildSparseUserIndexes() {
+  try {
+    const collection = mongoose.connection.collection("users");
+    const existing = await collection.indexes();
+    const stale = ["email_1", "phone_1"].filter((name) => {
+      const index = existing.find((i) => i.name === name);
+      return index && index.unique && !index.sparse;
+    });
+    for (const name of stale) {
+      await collection.dropIndex(name);
+      console.log(`Rebuilding users.${name} as a sparse unique index.`);
+    }
+    if (stale.length) await User.syncIndexes();
+  } catch (err) {
+    console.error("Could not rebuild user indexes:", err.message);
+  }
+}
 
 const PORT = process.env.PORT || 4000;
 const HOST = process.env.HOST || "0.0.0.0";

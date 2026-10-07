@@ -16,10 +16,15 @@ exports.onboardVendor = async (req, res) => {
       return res.status(409).json({ message: "Vendor profile already exists" });
     }
 
-    const { businessName, description, phone, email, logoUrl, bannerUrl, location } = req.body;
+    const { businessName, description, phone, email, logoUrl, bannerUrl, location, address } = req.body;
 
     if (!businessName || !phone || !email) {
       return res.status(400).json({ message: "businessName, phone, and email are required" });
+    }
+
+    let locationVal = location !== undefined ? location : null;
+    if (!locationVal && address) {
+      locationVal = typeof address === "object" ? (address.city || address.street) : address;
     }
 
     const vendor = await Vendor.create({
@@ -30,8 +35,54 @@ exports.onboardVendor = async (req, res) => {
       email,
       logoUrl,
       bannerUrl,
-      location: location || null,
+      location: locationVal,
     });
+
+    // Auto-sync Store record so all store/staff/settings endpoints function seamlessly
+    try {
+      const Store = require("../models/Store");
+      let store = await Store.findOne({ vendor: req.user.id });
+      if (!store) {
+        const createSlug = (text) =>
+          text
+            .toString()
+            .toLowerCase()
+            .trim()
+            .replace(/\s+/g, "-")
+            .replace(/[^\w\-]+/g, "")
+            .replace(/\-\-+/g, "-");
+        let slugCandidate = createSlug(businessName);
+        const slugExists = await Store.findOne({ slug: slugCandidate });
+        if (slugExists) {
+          slugCandidate = `${slugCandidate}-${Date.now().toString(36)}`;
+        }
+
+        const cityStr = typeof locationVal === "string" ? locationVal : (typeof address === "object" && address?.city ? address.city : "Kigali");
+        const streetStr = typeof address === "object" && address?.street ? address.street : (typeof locationVal === "string" ? locationVal : "");
+
+        await Store.create({
+          vendor: req.user.id,
+          storeName: businessName,
+          slug: slugCandidate,
+          description: description || "",
+          contactEmail: email,
+          contactPhone: phone,
+          logo: logoUrl || "",
+          banner: bannerUrl || "",
+          location: locationVal || cityStr,
+          address: {
+            street: streetStr,
+            city: cityStr,
+            country: (typeof address === "object" && address?.country) || "Rwanda",
+          },
+          businessAddress: streetStr || cityStr,
+          status: "ACTIVE",
+        });
+      }
+    } catch (storeErr) {
+      // Non-fatal
+      console.error("Auto-sync Store error on vendor onboarding:", storeErr.message);
+    }
 
     return res.status(201).json({ message: "Vendor profile created", vendor });
   } catch (error) {
@@ -67,7 +118,7 @@ exports.updateMyProfile = async (req, res) => {
       return res.status(404).json({ message: "Vendor profile not found. Please complete onboarding." });
     }
 
-    const { businessName, description, phone, email, logoUrl, bannerUrl, location } = req.body;
+    const { businessName, description, phone, email, logoUrl, bannerUrl, location, address } = req.body;
 
     // Editable fields — excludes verificationStatus, ratingAvg, status, commissionRate
     if (businessName !== undefined) vendor.businessName = businessName;
@@ -76,9 +127,42 @@ exports.updateMyProfile = async (req, res) => {
     if (email !== undefined) vendor.email = email;
     if (logoUrl !== undefined) vendor.logoUrl = logoUrl;
     if (bannerUrl !== undefined) vendor.bannerUrl = bannerUrl;
-    if (location !== undefined) vendor.location = location;
+    if (location !== undefined) {
+      vendor.location = location;
+    } else if (address !== undefined) {
+      vendor.location = typeof address === "object" ? (address.city || address.street) : address;
+    }
 
     await vendor.save();
+
+    // Sync Store record
+    try {
+      const Store = require("../models/Store");
+      const store = await Store.findOne({ vendor: req.user.id });
+      if (store) {
+        if (businessName !== undefined) store.storeName = businessName;
+        if (description !== undefined) store.description = description;
+        if (phone !== undefined) store.contactPhone = phone;
+        if (email !== undefined) store.contactEmail = email;
+        if (logoUrl !== undefined) store.logo = logoUrl;
+        if (bannerUrl !== undefined) store.banner = bannerUrl;
+        if (location !== undefined || address !== undefined) {
+          const loc = location !== undefined ? location : address;
+          store.location = loc;
+          const cityStr = typeof loc === "string" ? loc : (loc?.city || store.address?.city || "Kigali");
+          const streetStr = typeof address === "object" && address?.street ? address.street : (store.address?.street || "");
+          store.address = {
+            street: streetStr,
+            city: cityStr,
+            country: store.address?.country || "Rwanda",
+          };
+        }
+        await store.save();
+      }
+    } catch (storeErr) {
+      console.error("Auto-sync Store error on vendor profile update:", storeErr.message);
+    }
+
     return res.status(200).json({ message: "Vendor profile updated", vendor });
   } catch (error) {
     if (error.code === 11000) {
