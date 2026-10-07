@@ -1,15 +1,47 @@
 const Product = require("../models/Product");
 
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 // @desc    Get all active products for buyers (Public)
 // @route   GET /api/products
 // @access  Public / Buyer / Admin
+// Query:   ?search=&status=&page=&limit= (the affiliate share screen relies on
+//          all three; absent params keep the original "every active product"
+//          behaviour so existing clients are unaffected).
 exports.getAllProducts = async (req, res) => {
   try {
-    const products = await Product.find({ status: "ACTIVE" })
-      .populate("vendor", "Fullname companyName email")
-      .populate("category", "name slug");
+    const { search } = req.query;
+    const status = (req.query.status || "ACTIVE").toString().toUpperCase();
 
-    return res.status(200).json({ count: products.length, products });
+    const query = { status };
+    if (search && String(search).trim()) {
+      const pattern = new RegExp(escapeRegex(String(search).trim()), "i");
+      query.$or = [{ name: pattern }, { description: pattern }, { brand: pattern }];
+    }
+
+    const page = parseInt(req.query.page, 10);
+    const limit = parseInt(req.query.limit, 10);
+
+    let cursor = Product.find(query)
+      .populate("vendor", "Fullname companyName email")
+      .populate("category", "name slug")
+      .sort({ createdAt: -1 });
+
+    if (Number.isFinite(limit) && limit > 0) {
+      cursor = cursor.limit(Math.min(limit, 200));
+      if (Number.isFinite(page) && page > 1) cursor = cursor.skip((page - 1) * limit);
+    }
+
+    const products = await cursor;
+    const total = await Product.countDocuments(query);
+
+    return res.status(200).json({
+      count: products.length,
+      total,
+      page: Number.isFinite(page) && page > 0 ? page : 1,
+      limit: Number.isFinite(limit) && limit > 0 ? limit : products.length,
+      products,
+    });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }
@@ -20,7 +52,10 @@ exports.getAllProducts = async (req, res) => {
 // @access  Private (Vendor Only)
 exports.getVendorProducts = async (req, res) => {
   try {
-    const products = await Product.find({ vendor: req.user.id }).populate(
+    const vendorId = req.vendorId || req.targetVendorId || req.user.id;
+    const products = await Product.find({
+      $or: [{ vendor: vendorId }, { vendor: req.user.id }],
+    }).populate(
       "category",
       "name",
     );
@@ -36,9 +71,10 @@ exports.getVendorProducts = async (req, res) => {
 // @access  Private (Vendor / Admin)
 exports.createProduct = async (req, res) => {
   try {
+    const vendorId = req.vendorId || req.targetVendorId || req.user.id;
     const product = new Product({
       ...req.body,
-      vendor: req.user.id,
+      vendor: vendorId,
     });
 
     await product.save();
@@ -68,11 +104,13 @@ exports.updateProduct = async (req, res) => {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    // 1. Ownership check — vendor can only edit their OWN product
-    if (
-      req.user.role !== "super_admin" &&
-      product.vendor.toString() !== req.user.id.toString()
-    ) {
+    // 1. Ownership check — vendor or authorized staff can edit product
+    const vendorId = req.vendorId || req.targetVendorId || req.user.id;
+    const isOwner =
+      product.vendor.toString() === req.user.id.toString() ||
+      product.vendor.toString() === vendorId.toString();
+
+    if (req.user.role !== "super_admin" && !isOwner) {
       return res.status(403).json({
         message: "Access denied. You can only update your own products.",
       });
@@ -134,10 +172,12 @@ exports.deleteProduct = async (req, res) => {
     }
 
     // Ownership check
-    if (
-      req.user.role !== "super_admin" &&
-      product.vendor.toString() !== req.user.id.toString()
-    ) {
+    const vendorId = req.vendorId || req.targetVendorId || req.user.id;
+    const isOwner =
+      product.vendor.toString() === req.user.id.toString() ||
+      product.vendor.toString() === vendorId.toString();
+
+    if (req.user.role !== "super_admin" && !isOwner) {
       return res.status(403).json({
         message: "Access denied. You can only delete your own products.",
       });

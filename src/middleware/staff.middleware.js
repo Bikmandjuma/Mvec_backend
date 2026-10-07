@@ -12,24 +12,42 @@ exports.checkStaffPermission = (requiredPermission) => {
       });
       if (store) {
         req.store = store;
+        req.vendorId = store.vendor;
+        req.ownerId = store.vendor;
         return next(); // User is the main owner
       }
 
       // Check if user is an active staff member of a store
-      const staffMember = await Staff.findOne({ user: req.user.id, status: "ACTIVE" });
+      const staffMember = await Staff.findOne({
+        $or: [{ user: req.user.id }, { user_id: req.user.id }],
+        status: "ACTIVE",
+      });
       if (!staffMember) {
         return res.status(403).json({ message: "Access denied: Not authorized as store owner or staff." });
       }
 
-      // Check granular permission flag
-      if (requiredPermission && !staffMember.permissions[requiredPermission]) {
-        return res.status(403).json({ 
-          message: `Access denied: Missing permission [${requiredPermission}].` 
-        });
+      // Check granular permission flag (case-insensitive and format-agnostic)
+      if (requiredPermission) {
+        const perms = staffMember.permissions?.toObject?.() || staffMember.permissions || {};
+        const normalizedRequired = String(requiredPermission).replace(/[^a-zA-Z]/g, "").toLowerCase();
+        let hasPerm = false;
+        for (const [k, v] of Object.entries(perms)) {
+          if (k.replace(/[^a-zA-Z]/g, "").toLowerCase() === normalizedRequired && v === true) {
+            hasPerm = true;
+            break;
+          }
+        }
+        if (!hasPerm) {
+          return res.status(403).json({ 
+            message: `Access denied: Missing permission [${requiredPermission}].` 
+          });
+        }
       }
 
       req.staff = staffMember;
       req.store = await Store.findById(staffMember.store);
+      req.vendorId = staffMember.vendorOwner;
+      req.ownerId = staffMember.vendorOwner;
       next();
     } catch (error) {
       return res.status(500).json({ message: error.message });
