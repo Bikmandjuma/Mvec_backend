@@ -1,4 +1,28 @@
 const Product = require("../models/Product");
+const Category = require("../models/Category");
+const mongoose = require("mongoose");
+
+const normalizeProductPayload = (body = {}) => {
+  const normalized = { ...body };
+  const category = body.category ?? body.categoryId;
+  if (category !== undefined) normalized.category = category;
+
+  const media = { ...(body.media || {}) };
+  if (body.mainImage !== undefined) media.mainImage = body.mainImage;
+  if (body.gallery !== undefined) media.gallery = body.gallery;
+  if (Object.keys(media).length) normalized.media = media;
+
+  const attributes = { ...(body.attributes || {}) };
+  for (const key of ["color", "size", "material", "weight", "capacity", "model"]) {
+    if (body[key] !== undefined) attributes[key] = body[key];
+  }
+  if (Object.keys(attributes).length) normalized.attributes = attributes;
+
+  for (const key of ["categoryId", "mainImage", "gallery", "color", "size", "material", "weight", "capacity", "model"]) {
+    delete normalized[key];
+  }
+  return normalized;
+};
 
 const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -72,8 +96,15 @@ exports.getVendorProducts = async (req, res) => {
 exports.createProduct = async (req, res) => {
   try {
     const vendorId = req.vendorId || req.targetVendorId || req.user.id;
+    const payload = normalizeProductPayload(req.body);
+    if (!mongoose.Types.ObjectId.isValid(payload.category)) {
+      return res.status(400).json({ message: "Select a valid category from the category list." });
+    }
+    if (!(await Category.exists({ _id: payload.category }))) {
+      return res.status(400).json({ message: "The selected category no longer exists. Refresh the category list and try again." });
+    }
     const product = new Product({
-      ...req.body,
+      ...payload,
       vendor: vendorId,
     });
 
@@ -130,11 +161,26 @@ exports.updateProduct = async (req, res) => {
     }
 
     // 2. Prepare payload copy
-    const updates = { ...req.body };
+    const updates = normalizeProductPayload(req.body);
+    if (updates.category !== undefined) {
+      if (!mongoose.Types.ObjectId.isValid(updates.category)) {
+        return res.status(400).json({ message: "Select a valid category from the category list." });
+      }
+      if (!(await Category.exists({ _id: updates.category }))) {
+        return res.status(400).json({ message: "The selected category no longer exists. Refresh the category list and try again." });
+      }
+    }
 
     // Prevent changing immutable unique indexes
     delete updates.sku;
     delete updates.slug;
+
+    if (updates.media) {
+      updates.media = { ...(product.media?.toObject?.() || product.media || {}), ...updates.media };
+    }
+    if (updates.attributes) {
+      updates.attributes = { ...(product.attributes?.toObject?.() || product.attributes || {}), ...updates.attributes };
+    }
 
     // Add before product.save() inside updateProduct
     if (updates.stockQuantity !== undefined) {
@@ -232,3 +278,4 @@ exports.getProductBySlug = async (req, res) => {
   }
 };
 
+exports.normalizeProductPayload = normalizeProductPayload;

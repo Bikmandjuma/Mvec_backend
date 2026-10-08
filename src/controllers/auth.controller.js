@@ -75,6 +75,7 @@ const buildUserResponse = (u, staffDetails = null) => ({
   Fullname: u.Fullname,
   email: u.email || null,
   role: u.role,
+  isSellerEnabled: Boolean(u.isSellerEnabled),
   phone: u.phone || null,
   gender: u.gender || null,
   companyName: u.companyName || null,

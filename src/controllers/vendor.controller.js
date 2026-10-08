@@ -1,6 +1,98 @@
 const Vendor = require("../models/Vendor");
 const Product = require("../models/Product");
 const Category = require("../models/Category");
+const Store = require("../models/Store");
+const User = require("../models/User");
+
+// Enable seller mode for the authenticated super admin while preserving the
+// super_admin role, then create the vendor profile and store used by seller APIs.
+exports.becomeSeller = async (req, res) => {
+  try {
+    if (req.user.role !== "super_admin") {
+      return res.status(403).json({ message: "Only super admins can activate seller mode" });
+    }
+
+    const businessName = String(req.body.businessName || req.body.storeName || "").trim();
+    const phone = String(req.body.phone || req.body.businessPhone || "").trim();
+    const email = String(req.body.email || req.body.businessEmail || "").trim().toLowerCase();
+    const description = String(req.body.description || req.body.shortDescription || "").trim();
+    if (!businessName || !phone || !email) {
+      return res.status(400).json({ message: "Business/store name, business phone, and business email are required" });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ message: "A valid business email is required" });
+    }
+
+    const existingVendor = await Vendor.findOne({ user: req.user._id });
+    if (existingVendor) {
+      if (!req.user.isSellerEnabled) {
+        await User.updateOne(
+          { _id: req.user._id },
+          { $set: { isSellerEnabled: true } },
+        );
+      }
+      return res.status(200).json({ message: "Seller mode is already enabled", isSellerEnabled: true, vendor: existingVendor });
+    }
+
+    const slugBase = businessName.toLowerCase().trim()
+      .replace(/\s+/g, "-").replace(/[^\w-]+/g, "").replace(/--+/g, "-")
+      .replace(/^-|-$/g, "") || "store";
+    let storeSlug = slugBase;
+    if (await Store.exists({ slug: storeSlug })) storeSlug = `${slugBase}-${Date.now().toString(36)}`;
+
+    const vendor = await Vendor.create({
+      user: req.user._id,
+      businessName,
+      description,
+      phone,
+      email,
+      verificationStatus: "VERIFIED",
+      status: "ACTIVE",
+    });
+    let store;
+    try {
+      store = await Store.create({
+        vendor: req.user._id,
+        storeName: businessName,
+        slug: storeSlug,
+        description,
+        contactEmail: email,
+        contactPhone: phone,
+        businessPhone: phone,
+        location: "Kigali",
+        address: { city: "Kigali", country: "Rwanda" },
+        businessAddress: "Kigali, Rwanda",
+        status: "ACTIVE",
+      });
+
+      // `protect` intentionally excludes password from its user query. Use an
+      // atomic update instead of saving that partial document, which would
+      // otherwise fail User's required-password validation.
+      await User.updateOne(
+        { _id: req.user._id },
+        { $set: { isSellerEnabled: true, companyName: businessName } },
+      );
+    } catch (error) {
+      await Promise.all([
+        Store.deleteOne({ _id: store?._id }),
+        Vendor.deleteOne({ _id: vendor._id }),
+      ]);
+      throw error;
+    }
+
+    return res.status(201).json({
+      message: "Seller mode activated",
+      isSellerEnabled: true,
+      vendor,
+      store,
+    });
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({ message: "A store or vendor profile with this information already exists" });
+    }
+    return res.status(400).json({ message: error.message });
+  }
+};
 
 // ─── 1. ONBOARD VENDOR ──────────────────────────────────────────────────────
 // @route   POST /api/vendors/onboard
@@ -256,7 +348,9 @@ exports.adminGetVendors = async (req, res) => {
     ]);
 
     // Enrich with per-vendor product counts + category breakdown for admin tables
-    const vendorIds = vendors.map((v) => v._id);
+    // Product.vendor stores the owner User ID, not the Vendor profile ID.
+    // Aggregate against populated owner IDs so admin product counts match the catalog.
+    const vendorIds = vendors.map((v) => v.user?._id || v.user).filter(Boolean);
     let productStats = [];
     if (vendorIds.length) {
       productStats = await Product.aggregate([
@@ -271,7 +365,8 @@ exports.adminGetVendors = async (req, res) => {
 
     const statsByVendor = new Map(productStats.map((s) => [String(s._id), s]));
     const enriched = vendors.map((v) => {
-      const stats = statsByVendor.get(String(v._id)) || { productCount: 0, categories: [] };
+      const ownerId = v.user?._id || v.user;
+      const stats = statsByVendor.get(String(ownerId)) || { productCount: 0, categories: [] };
       const categories = (stats.categories || [])
         .map((cid) => catName[String(cid)] || null)
         .filter(Boolean);
