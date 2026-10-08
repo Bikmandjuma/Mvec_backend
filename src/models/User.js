@@ -85,6 +85,9 @@ const userSchema = new mongoose.Schema(
       enum: ["buyer", "vendor", "supplier", "affiliate", "super_admin", "developer"],
       default: "buyer",
     },
+    // Super admins can also operate their own vendor account without
+    // surrendering administrative privileges.
+    isSellerEnabled: { type: Boolean, default: false },
     status: {
       type: String,
       enum: ["ACTIVE", "SUSPEND", "BLOCK", "INVESTIGATE"],

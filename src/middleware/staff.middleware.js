@@ -4,8 +4,15 @@ const Store = require("../models/Store");
 exports.checkStaffPermission = (requiredPermission) => {
   return async (req, res, next) => {
     try {
-      // If user is the store owner (primary vendor) or super admin, pass through
+      // super_admin always passes
       if (req.user.role === "super_admin") return next();
+
+      // Vendors are the primary owners of their products even without a Store document
+      if (req.user.role === "vendor") {
+        req.vendorId = req.user.id;
+        req.ownerId = req.user.id;
+        return next();
+      }
 
       const store = await Store.findOne({
         $or: [{ owner: req.user.id }, { vendor: req.user.id }],
@@ -14,7 +21,7 @@ exports.checkStaffPermission = (requiredPermission) => {
         req.store = store;
         req.vendorId = store.vendor;
         req.ownerId = store.vendor;
-        return next(); // User is the main owner
+        return next(); // User is the main store owner
       }
 
       // Check if user is an active staff member of a store
