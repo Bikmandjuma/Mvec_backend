@@ -210,7 +210,12 @@ exports.getMyOrders = async (req, res) => {
 // @access  Private
 exports.getOrderById = async (req, res) => {
   try {
-    const order = await Order.findById(req.params.id)
+    const { id } = req.params;
+    if (!id || id === "undefined" || !mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ message: "A valid order ID is required." });
+    }
+
+    const order = await Order.findById(id)
       .populate("user", "Fullname email")
       .populate("items.vendor", "Fullname companyName email");
 
@@ -550,6 +555,9 @@ exports.cancelOrderByBuyer = async (req, res) => {
     }
     if (["CANCELLED", "REFUNDED", "COMPLETED", "DELIVERED", "RETURNED"].includes(order.orderStatus)) {
       return res.status(400).json({ message: "This order cannot be cancelled anymore." });
+    }
+    if (!["PENDING", "CONFIRMED", "PROCESSING"].includes(order.orderStatus)) {
+      return res.status(400).json({ message: "This order is already being fulfilled and cannot be cancelled." });
     }
 
     // The cancellation deadline is fixed from order creation time.
