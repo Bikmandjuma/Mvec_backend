@@ -6,7 +6,12 @@ const paymentService = require("../services/payment.service");
 const paypackService = require("../services/paypack.service");
 const socketService = require("../services/socket.service");
 
-async function initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService, explicitProvider = null }) {
+async function initiateMobileMoneyPayment({ amount, phoneNumber, userId, gatewayService, explicitProvider = null }) {
+  const value = Number(amount);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw Object.assign(new Error("Amount must be a positive whole number of RWF."), { statusCode: 400 });
+  }
+
   const phoneInfo = formatRwandanPhone(phoneNumber);
   if (!phoneInfo) {
     throw Object.assign(new Error("Invalid Rwandan phone number. Must start with 078/079 (MTN) or 073/072 (Airtel)."), { statusCode: 400 });
@@ -22,48 +27,33 @@ async function initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService
 
   const provider = explicitProvider || phoneInfo.provider;
   const paymentMethod = provider === "MTN" ? "MOMO" : "AIRTEL";
-
-  const order = await Order.findById(orderId);
-  if (!order) {
-    throw Object.assign(new Error("Order not found."), { statusCode: 404 });
-  }
-
-  if (order.paymentStatus === "PAID") {
-    throw Object.assign(new Error("Order is already paid."), { statusCode: 400 });
-  }
-
-  const transactionRef = `ORD-${order._id}-${Date.now()}`;
+  const transactionRef = `PAY-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 
   // 1. Create a pending Payment record BEFORE pushing so the webhook can
   //    reconcile the callback against a persisted transaction.
   const payment = await Payment.create({
-    parentOrder: order._id,
+    user: userId,
     transactionReference: transactionRef,
     method: paymentMethod,
     phoneNumber: phoneInfo.formattedNumber,
     provider,
-    amount: order.totalAmount,
+    amount: value,
     currency: "RWF",
     status: "PENDING",
     gateway: gatewayService.name,
     gatewayResponse: { phase: "initiated" },
   });
 
-  order.paymentMethod = paymentMethod;
-  await order.save();
-
-  // 2. Trigger the USSD push to the buyer's phone number.
+  // 2. Trigger the USSD push to the payer's phone number.
   let gatewayReference = null;
-  let pushStatus = "PENDING";
   try {
     const push = await gatewayService.triggerUssdPush({
-      amount: order.totalAmount,
+      amount: value,
       currency: "RWF",
       phone: phoneInfo.formattedNumber,
     });
     gatewayReference = push.reference || null;
     if (push.raw) payment.gatewayResponse = push.raw;
-    if (push.status) pushStatus = push.status;
   } catch (pushError) {
     payment.gatewayResponse = { error: pushError.message };
     payment.status = "FAILED";
@@ -79,18 +69,10 @@ async function initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService
     payment.gatewayReference = gatewayReference;
   }
 
-  // If sandbox / dev environment, automatically mark as PAID so orders progress reliably
+  // Without gateway credentials the payment is simulated and succeeds immediately.
   if (gatewayService.isSandbox()) {
     payment.status = "SUCCESS";
     payment.paidAt = new Date();
-    order.paymentStatus = "PAID";
-    order.orderStatus = "CONFIRMED";
-    if (!order.deliveryOtp) {
-      order.deliveryOtp = Math.floor(100000 + Math.random() * 900000).toString();
-    }
-    await order.save();
-    socketService.emitOrderStatusUpdate(order);
-    socketService.emitToRoom(`order:${order._id}`, "order_paid", order);
   }
 
   await payment.save();
@@ -99,7 +81,7 @@ async function initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService
     message: `Payment prompt initiated for ${paymentMethod} (${phoneInfo.localNumber}). Please approve the USSD prompt on your phone.`,
     paymentRef: transactionRef,
     paymentId: payment._id,
-    amount: order.totalAmount,
+    amount: value,
     gatewayReference,
     status: payment.status,
   };
@@ -115,10 +97,11 @@ const paypackGateway = {
 function mobileMoneyHandler(explicitProvider) {
   return async (req, res) => {
     try {
-      const { orderId, phoneNumber } = req.body;
+      const { amount, phoneNumber } = req.body;
       const result = await initiateMobileMoneyPayment({
-        orderId,
+        amount,
         phoneNumber,
+        userId: req.user._id,
         gatewayService: paypackGateway,
         explicitProvider,
       });
@@ -145,33 +128,24 @@ exports.initiateAirtelPayment = mobileMoneyHandler("AIRTEL");
 exports.checkPaymentStatus = async (req, res) => {
   try {
     const payment = await Payment.findById(req.params.paymentId);
-    if (!payment) {
+    const isOwner = payment && (!payment.user || payment.user.equals(req.user._id));
+    if (!payment || (!isOwner && req.user.role !== "super_admin")) {
       return res.status(404).json({ message: "Payment not found." });
     }
 
     if (payment.status === "PENDING" && payment.gateway === "PAYPACK" && payment.gatewayReference) {
       const result = await paypackService.getTransactionStatus(payment.gatewayReference);
-
-      if (result.status === "SUCCESSFUL") {
-        await paymentService.processPaymentWebhook({
-          provider: "PAYPACK",
-          externalTransactionId: payment.gatewayReference,
-          orderId: payment.parentOrder,
-          paymentId: payment._id,
-          amount: result.amount ?? payment.amount,
-          payload: result.raw || {},
-          gatewayFee: result.fee || 0,
-        });
-      } else if (result.status === "FAILED") {
-        payment.status = "FAILED";
-        payment.gatewayResponse = result.raw || payment.gatewayResponse;
-        await payment.save();
-      }
+      await paymentService.settlePaypackPayment({
+        payment,
+        status: result.status,
+        amount: result.amount ?? payment.amount,
+        fee: result.fee || 0,
+        payload: result.raw || {},
+      });
     }
 
     const fresh = await Payment.findById(payment._id);
-    const order = await Order.findById(fresh.parentOrder).select("paymentStatus orderStatus totalAmount");
-    return res.status(200).json({ payment: fresh, order });
+    return res.status(200).json({ payment: fresh });
   } catch (error) {
     return res.status(500).json({ message: "Unable to check payment status", error: error.message });
   }
