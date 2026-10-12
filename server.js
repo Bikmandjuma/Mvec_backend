@@ -106,6 +106,7 @@ app.use("/api/promotions", require("./src/routes/promotion.routes"));
 app.use("/api/shipping", require("./src/routes/shipping.routes"));
 app.use("/api/notifications", require("./src/routes/notification.routes"));
 app.use("/api/reports", require("./src/routes/report.routes"));
+app.use("/api/advertisements", require("./src/routes/advertisement.routes"));
 
 // Real-time Server-Sent Events (SSE) stream for browsers
 app.get("/api/events", (req, res) => {
