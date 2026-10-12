@@ -41,15 +41,38 @@ const orderSchema = new mongoose.Schema(
     items: [orderItemSchema],
     shippingAddress: {
       street: { type: String, required: true },
+      // District (Rwanda) / city.
       city: { type: String, required: true },
-      state: { type: String, required: true },
+      province: { type: String },
+      sector: { type: String },
+      // Legacy field: older orders stored the province or sector here.
+      state: { type: String },
       country: { type: String, required: true },
       postalCode: String,
     },
+    // Who receives the parcel. Couriers and sellers need a phone number to
+    // deliver; it is captured at checkout because it may differ from the
+    // account holder's.
+    recipient: {
+      name: { type: String },
+      phone: { type: String },
+      email: { type: String },
+    },
+    deliveryMethod: {
+      type: String,
+      enum: ["standard", "express"],
+      default: "standard",
+    },
+    // subtotal (products) + shippingFee = totalAmount, all computed server side.
+    subtotal: { type: Number },
+    shippingFee: { type: Number, default: 0 },
     totalAmount: { type: Number, required: true },
+    paidAt: Date,
     paymentStatus: {
       type: String,
-      enum: ["PENDING", "CONFIRMED", "PAID", "FAILED", "REFUNDED"],
+      // DISPUTED freezes a paid order (no delivery release, no cancellation)
+      // until an admin resolves the dispute.
+      enum: ["PENDING", "CONFIRMED", "PAID", "FAILED", "REFUNDED", "DISPUTED"],
       default: "PENDING",
     },
     orderStatus: {
@@ -98,7 +121,12 @@ const orderSchema = new mongoose.Schema(
     affiliateCode: { type: String, default: null },
     affiliateUser: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
   },
-  { timestamps: true },
+  {
+    timestamps: true,
+    // Expose `id` alongside `_id` so clients can rely on a single field.
+    toJSON: { virtuals: true },
+    toObject: { virtuals: true },
+  },
 );
 
 module.exports = mongoose.model("Order", orderSchema);

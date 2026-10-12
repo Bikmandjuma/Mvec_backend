@@ -6,7 +6,19 @@ const paymentService = require("../services/payment.service");
 const paypackService = require("../services/paypack.service");
 const socketService = require("../services/socket.service");
 
+const DUPLICATE_PUSH_WINDOW_MS = 2 * 60 * 1000;
+
 async function initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService, explicitProvider = null, reqUserId }) {
+  if (!mongoose.isValidObjectId(orderId)) {
+    throw Object.assign(new Error("A valid order ID is required."), { statusCode: 400 });
+  }
+
+  // Without gateway credentials the gateway runs in simulation mode. That is
+  // fine for local development but must never mark real orders as paid.
+  if (gatewayService.isSandbox() && process.env.NODE_ENV === "production") {
+    throw Object.assign(new Error("Mobile money payments are temporarily unavailable. Please try again later."), { statusCode: 503 });
+  }
+
   const phoneInfo = formatRwandanPhone(phoneNumber);
   if (!phoneInfo) {
     throw Object.assign(new Error("Invalid Rwandan phone number. Must start with 078/079 (MTN) or 073/072 (Airtel)."), { statusCode: 400 });
@@ -24,15 +36,27 @@ async function initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService
   const paymentMethod = provider === "MTN" ? "MOMO" : "AIRTEL";
 
   const order = await Order.findById(orderId);
-  if (!order) {
+  if (!order || order.user.toString() !== reqUserId.toString()) {
     throw Object.assign(new Error("Order not found."), { statusCode: 404 });
   }
-  if (order.user.toString() !== reqUserId.toString()) {
-    throw Object.assign(new Error("You are not authorized to pay for this order."), { statusCode: 403 });
-  }
-
   if (order.paymentStatus === "PAID") {
     throw Object.assign(new Error("Order is already paid."), { statusCode: 400 });
+  }
+  if (order.orderStatus !== "PENDING") {
+    throw Object.assign(new Error("This order can no longer be paid. Please place a new order."), { statusCode: 400 });
+  }
+
+  // One USSD prompt at a time: a double click must not charge the buyer twice.
+  const recentPending = await Payment.findOne({
+    parentOrder: order._id,
+    status: "PENDING",
+    createdAt: { $gte: new Date(Date.now() - DUPLICATE_PUSH_WINDOW_MS) },
+  }).sort({ createdAt: -1 });
+  if (recentPending) {
+    throw Object.assign(
+      new Error("A payment prompt was already sent to your phone. Approve it, or wait two minutes before trying again."),
+      { statusCode: 409, paymentId: recentPending._id }
+    );
   }
 
   const transactionRef = `ORD-${order._id}-${Date.now()}`;
@@ -57,7 +81,6 @@ async function initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService
 
   // 2. Trigger the USSD push to the buyer's phone number.
   let gatewayReference = null;
-  let pushStatus = "PENDING";
   try {
     const push = await gatewayService.triggerUssdPush({
       amount: order.totalAmount,
@@ -66,45 +89,40 @@ async function initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService
     });
     gatewayReference = push.reference || null;
     if (push.raw) payment.gatewayResponse = push.raw;
-    if (push.status) pushStatus = push.status;
   } catch (pushError) {
     payment.gatewayResponse = { error: pushError.message };
     payment.status = "FAILED";
     await payment.save();
     throw Object.assign(new Error("Unable to reach the mobile money gateway. Payment not pushed."), {
       statusCode: 502,
-      details: pushError.message,
     });
   }
 
   // 3. Store the provider reference returned by the gateway.
-  if (gatewayReference) {
-    payment.gatewayReference = gatewayReference;
-  }
-
-  // If sandbox / dev environment, automatically mark as PAID so orders progress reliably
-  if (gatewayService.isSandbox()) {
-    payment.status = "SUCCESS";
-    payment.paidAt = new Date();
-    order.paymentStatus = "PAID";
-    order.orderStatus = "CONFIRMED";
-    if (!order.deliveryOtp) {
-      order.deliveryOtp = Math.floor(100000 + Math.random() * 900000).toString();
-    }
-    await order.save();
-    socketService.emitOrderStatusUpdate(order);
-    socketService.emitToRoom(`order:${order._id}`, "order_paid", order);
-  }
-
+  if (gatewayReference) payment.gatewayReference = gatewayReference;
   await payment.save();
 
+  // 4. Development simulation: confirm through the same path a real gateway
+  //    callback uses, so escrow, settlements and the delivery code are created.
+  if (gatewayService.isSandbox()) {
+    await paymentService.processPaymentWebhook({
+      provider: gatewayService.name,
+      externalTransactionId: gatewayReference || transactionRef,
+      orderId: order._id,
+      paymentId: payment._id,
+      amount: order.totalAmount,
+      payload: { sandbox: true },
+    });
+  }
+
+  const fresh = await Payment.findById(payment._id);
   return {
-    message: `Payment prompt initiated for ${paymentMethod} (${phoneInfo.localNumber}). Please approve the USSD prompt on your phone.`,
+    message: `Payment prompt sent to ${phoneInfo.localNumber}. Please approve it on your phone.`,
     paymentRef: transactionRef,
     paymentId: payment._id,
     amount: order.totalAmount,
     gatewayReference,
-    status: payment.status,
+    status: fresh.status,
   };
 }
 
@@ -128,8 +146,11 @@ function mobileMoneyHandler(explicitProvider) {
       });
       return res.status(200).json(result);
     } catch (error) {
-      const statusCode = error.statusCode || 500;
-      return res.status(statusCode).json({ message: error.message, ...(error.details && { error: error.details }) });
+      if (!error.statusCode) {
+        console.error("Mobile money payment failed:", error);
+        return res.status(500).json({ message: "We could not start the payment. Please try again." });
+      }
+      return res.status(error.statusCode).json({ message: error.message, ...(error.paymentId && { paymentId: error.paymentId }) });
     }
   };
 }
@@ -223,6 +244,7 @@ exports.confirmPayment = async (req, res) => {
 
     order.paymentStatus = "PAID";
     order.orderStatus = "CONFIRMED";
+    order.paidAt = new Date();
     order.paymentMethod = method;
     if (!order.deliveryOtp) {
       order.deliveryOtp = Math.floor(100000 + Math.random() * 900000).toString();
@@ -249,7 +271,6 @@ exports.confirmPayment = async (req, res) => {
     session.endSession();
 
     socketService.emitOrderStatusUpdate(order);
-    socketService.emitToRoom(`order:${order._id}`, "order_paid", order);
 
     return res.status(200).json({
       message: "Payment confirmed successfully",

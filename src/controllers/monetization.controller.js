@@ -261,6 +261,14 @@ exports.upgradeBuyerSubscription = async (req, res) => {
     const plan = normalizePlan(req.body.plan);
     let subscription = await BuyerSubscription.findOne({ buyer: req.user.id });
 
+    // Premium is a paid plan. Until it has a payment step, buyers cannot
+    // switch it on themselves (otherwise anyone gets it for free).
+    if (plan === "PREMIUM" && !(subscription?.plan === "PREMIUM" && subscription?.status === "ACTIVE")) {
+      return res.status(402).json({
+        message: "Premium checkout is not available yet. You have not been charged.",
+      });
+    }
+
     if (plan === "PREMIUM") {
       const tier = BuyerSubscriptionTier.PREMIUM;
       if (!subscription) {

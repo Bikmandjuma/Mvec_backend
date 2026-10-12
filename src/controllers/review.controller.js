@@ -120,7 +120,16 @@ exports.listProductReviews = async (req, res) => {
       averageRating: reviews.length
         ? (reviews.reduce((s, r) => s + r.rating, 0) / reviews.length).toFixed(1)
         : 0,
-      reviews: reviews.map((r) => mapReview(r.toObject())),
+      // Public endpoint: never expose reviewers' email addresses.
+      reviews: reviews.map((r) => {
+        const row = mapReview(r.toObject());
+        delete row.email;
+        // "Aline Uwase" -> "Aline U."
+        const parts = String(row.reviewer || "").trim().split(/\s+/).filter(Boolean);
+        row.reviewer = parts.length > 1 ? `${parts[0]} ${parts[parts.length - 1][0]}.` : parts[0] || "Verified buyer";
+        row.user = row.reviewer;
+        return row;
+      }),
     });
   } catch (error) {
     console.error("Error listing product reviews:", error);

@@ -10,8 +10,20 @@ class DisputeService {
    * Open a new dispute for an order
    */
   async openDispute({ orderId, raisedById, reason, description, disputedAmount }) {
+    if (!mongoose.isValidObjectId(orderId)) throw new Error("A valid order ID is required.");
     const order = await Order.findById(orderId);
-    if (!order) throw new Error("Order not found.");
+    // Only the buyer who placed the order can open a dispute on it.
+    if (!order || String(order.user) !== String(raisedById)) throw new Error("Order not found.");
+    if (order.paymentStatus !== "PAID") {
+      throw new Error("You can report a problem once the order has been paid.");
+    }
+    const allowedReasons = ["ITEM_NOT_RECEIVED", "WRONG_ITEM", "DAMAGED_GOODS", "INCOMPLETE_ORDER", "OTHER"];
+    if (!allowedReasons.includes(reason)) throw new Error("Please choose what went wrong.");
+    if (typeof description !== "string" || description.trim().length < 10) {
+      throw new Error("Please describe the problem in at least 10 characters.");
+    }
+    const amount = Number(disputedAmount);
+    const safeAmount = Number.isFinite(amount) && amount > 0 ? Math.min(amount, order.totalAmount) : order.totalAmount;
 
     const existing = await Dispute.findOne({ order: orderId, status: { $ne: "REJECTED" } });
     if (existing) {
@@ -26,8 +38,8 @@ class DisputeService {
       raisedBy: raisedById,
       vendor: order.items[0]?.vendor || order.vendor,
       reason,
-      description,
-      disputedAmount: disputedAmount || order.totalAmount,
+      description: description.trim().slice(0, 2000),
+      disputedAmount: safeAmount,
       status: "OPEN",
     });
 

@@ -258,6 +258,28 @@ exports.updateMyProfile = async (req, res) => {
 // ─── 4. PUBLIC VENDOR DIRECTORY ─────────────────────────────────────────────
 // @route   GET /api/vendors?q=&location=&page=&pageSize=
 // @access  Public
+// Shape returned by the public storefront endpoints. Internal fields such as
+// the commission rate stay private; `id`/`userId` are what clients link with.
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const toPublicVendor = (v) => ({
+  id: v._id.toString(),
+  _id: v._id.toString(),
+  userId: v.user ? v.user.toString() : null,
+  publicId: v.publicId,
+  businessName: v.businessName,
+  slug: v.slug,
+  logoUrl: v.logoUrl,
+  bannerUrl: v.bannerUrl,
+  description: v.description,
+  category: v.category,
+  location: v.location,
+  phone: v.phone,
+  email: v.email,
+  ratingAvg: v.ratingAvg,
+  verificationStatus: v.verificationStatus,
+  status: v.status,
+});
+
 exports.getVendors = async (req, res) => {
   try {
     const { q, location, page = 1, pageSize = 20 } = req.query;
@@ -268,9 +290,9 @@ exports.getVendors = async (req, res) => {
     };
 
     if (q) {
-      filter.businessName = { $regex: q, $options: "i" };
+      filter.businessName = { $regex: escapeRegex(String(q).slice(0, 100)), $options: "i" };
     }
-    if (location) {
+    if (location && typeof location === "string") {
       filter.location = location;
     }
 
@@ -284,7 +306,7 @@ exports.getVendors = async (req, res) => {
     ]);
 
     return res.status(200).json({
-      data: vendors,
+      data: vendors.map(toPublicVendor),
       meta: { page: pageNum, pageSize: limit, total },
     });
   } catch (error) {
@@ -297,7 +319,7 @@ exports.getVendors = async (req, res) => {
 // @access  Public
 exports.getVendorByIdOrSlug = async (req, res) => {
   try {
-    const { idOrSlug } = req.params;
+    const idOrSlug = String(req.params.idOrSlug);
     const isObjectId = idOrSlug.match(/^[0-9a-fA-F]{24}$/);
 
     const query = isObjectId ? { _id: idOrSlug } : { slug: idOrSlug };
@@ -312,7 +334,7 @@ exports.getVendorByIdOrSlug = async (req, res) => {
       return res.status(404).json({ message: "Vendor store not found" });
     }
 
-    return res.status(200).json({ vendor });
+    return res.status(200).json({ vendor: toPublicVendor(vendor) });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }
