@@ -19,6 +19,11 @@ const orderItemSchema = new mongoose.Schema({
   price: { type: Number, required: true },
   quantity: { type: Number, required: true },
   image: { type: String },
+  // Server-resolved last-click attribution for this item (never client supplied).
+  affiliateUser: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+  affiliateLink: { type: mongoose.Schema.Types.ObjectId, ref: "AffiliateLink", default: null },
+  affiliateCode: { type: String, default: null },
+  affiliateClickedAt: { type: Date, default: null },
 });
 
 const orderSchema = new mongoose.Schema(
