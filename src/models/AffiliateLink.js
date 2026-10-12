@@ -45,6 +45,15 @@ const affiliateLinkSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    // Termination is a soft state: the document, its clicks, attributions and
+    // commission history all stay; only new referrals through it stop.
+    status: {
+      type: String,
+      enum: ["ACTIVE", "TERMINATED"],
+      default: "ACTIVE",
+      index: true,
+    },
+    terminatedAt: { type: Date, default: null },
   },
   { timestamps: true }
 );

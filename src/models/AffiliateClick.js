@@ -20,6 +20,10 @@ const affiliateClickSchema = new mongoose.Schema(
     affiliateCode: { type: String, default: "", index: true },
     buyerUser: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     visitorIp: { type: String, default: "" },
+    product: { type: mongoose.Schema.Types.ObjectId, ref: "Product", default: null, index: true },
+    // Random id minted by the server for a browser; powers unique-visitor counts
+    // and last-click attribution without storing anything personal.
+    visitorId: { type: String, default: "", index: true },
   },
   { timestamps: { createdAt: true, updatedAt: false } }
 );
