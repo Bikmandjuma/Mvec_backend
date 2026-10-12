@@ -3,6 +3,7 @@ const Dispute = require("../models/Dispute");
 const DisputeEvidence = require("../models/DisputeEvidence");
 const Order = require("../models/Order");
 const VendorWallet = require("../models/VendorWallet");
+const affiliateAttribution = require("./affiliateAttribution.service");
 
 class DisputeService {
   /**
@@ -138,9 +139,26 @@ class DisputeService {
       await session.commitTransaction();
       session.endSession();
 
+      // Refunds claw back affiliate commission: all of it for a full refund,
+      // the proportional share for a partial one. Keyed on the dispute so a
+      // repeated resolution can never reverse twice.
+      if (decision === "REFUND_BUYER" || (decision === "SPLIT_SETTLEMENT" && buyerRefundAmount > 0)) {
+        try {
+          await affiliateAttribution.reverseOrderCommission({
+            orderId: order._id,
+            refundAmount: decision === "REFUND_BUYER" ? null : buyerRefundAmount,
+            key: `dispute:${dispute._id}`,
+            reason: `Dispute ${dispute.disputeNumber || dispute._id} ${decision}`,
+          });
+        } catch (reverseError) {
+          // The dispute is already committed; surface the gap for manual follow-up.
+          console.error(`Affiliate commission reversal failed for dispute ${dispute._id}:`, reverseError.message);
+        }
+      }
+
       return dispute;
     } catch (error) {
-      await session.abortTransaction();
+      if (session.inTransaction()) await session.abortTransaction();
       session.endSession();
       throw error;
     }
