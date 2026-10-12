@@ -1,6 +1,30 @@
 const { Server } = require("socket.io");
 const jwt = require("jsonwebtoken");
 
+// Order payloads go to rooms with very different trust levels. Anyone can
+// join an `order:<id>` room or listen to /api/events, so those only receive a
+// status summary. The buyer's own authenticated room gets the full order; the
+// delivery code never goes to vendors, admins' broadcast or public channels.
+const toPlainOrder = (order) => (order && typeof order.toJSON === "function" ? order.toJSON() : { ...(order || {}) });
+const orderSummary = (order) => {
+  const plain = toPlainOrder(order);
+  const id = plain._id ? plain._id.toString() : plain.id;
+  return {
+    _id: id,
+    id,
+    orderNumber: plain.orderNumber,
+    orderStatus: plain.orderStatus,
+    paymentStatus: plain.paymentStatus,
+    totalAmount: plain.totalAmount,
+    updatedAt: plain.updatedAt,
+  };
+};
+const withoutSecrets = (order) => {
+  const plain = toPlainOrder(order);
+  delete plain.deliveryOtp;
+  return plain;
+};
+
 class SocketService {
   init(server) {
     this.io = new Server(server, {
@@ -19,7 +43,10 @@ class SocketService {
       }
 
       try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || "jwt_secret_token");
+        // No fallback secret: a guessable default would let anyone forge a
+        // token and join another user's private room.
+        if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is not configured");
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
         socket.user = decoded;
         next();
       } catch (err) {
@@ -117,76 +144,68 @@ class SocketService {
 
   // Helper to notify all relevant parties about order updates
   emitOrderStatusUpdate(order) {
-    const orderId = order?._id ? order._id.toString() : order?.id;
+    const summary = orderSummary(order);
+    const orderId = summary._id;
     const userId = order?.user ? (order.user._id ? order.user._id.toString() : order.user.toString()) : null;
-    
-    if (this.io) {
-      // 1. Emit to order room
-      this.io.to(`order:${orderId}`).emit("order_status_updated", order);
-      this.io.to(`order:${orderId}`).emit("order_updated", order);
+    const internal = withoutSecrets(order);
 
-      // 2. Emit to buyer's private user channel
+    if (this.io) {
+      this.io.to(`order:${orderId}`).emit("order_status_updated", summary);
+      this.io.to(`order:${orderId}`).emit("order_updated", summary);
+
       if (userId) {
         this.io.to(`user:${userId}`).emit("order_status_updated", order);
         this.io.to(`user:${userId}`).emit("order_updated", order);
       }
 
-      // 3. Emit to all vendors involved in this order
-      const vendorIds = new Set();
-      if (Array.isArray(order?.items)) {
-        order.items.forEach(item => {
-          const vId = item.vendor ? (item.vendor._id ? item.vendor._id.toString() : item.vendor.toString()) : null;
-          if (vId) vendorIds.add(vId);
-        });
-      }
-      vendorIds.forEach(vId => {
-        this.io.to(`vendor:${vId}`).emit("order_status_updated", order);
-        this.io.to(`vendor:${vId}`).emit("order_updated", order);
-        this.io.to(`user:${vId}`).emit("order_status_updated", order);
+      this.vendorIdsOf(order).forEach((vId) => {
+        this.io.to(`vendor:${vId}`).emit("order_status_updated", internal);
+        this.io.to(`vendor:${vId}`).emit("order_updated", internal);
+        if (vId !== userId) this.io.to(`user:${vId}`).emit("order_status_updated", internal);
       });
 
-      // 4. Emit to super admin / deliveries
-      this.io.to("admin").emit("order_status_updated", order);
-      this.io.to("admin").emit("order_updated", order);
+      this.io.to("admin").emit("order_status_updated", internal);
+      this.io.to("admin").emit("order_updated", internal);
 
-      // 5. General broadcast so any open dashboard re-fetches or updates live
-      this.io.emit("dashboard_update", { type: "order", orderId, status: order?.orderStatus });
+      this.io.emit("dashboard_update", { type: "order", orderId, status: summary.orderStatus });
     }
 
-    // Broadcast over SSE for instant live updates in browser
-    this.broadcastSse("order_status_updated", order);
-    this.broadcastSse("dashboard_update", { type: "order", orderId, status: order?.orderStatus, order });
+    this.broadcastSse("order_status_updated", summary);
+    this.broadcastSse("dashboard_update", { type: "order", orderId, status: summary.orderStatus });
   }
 
   emitOrderCreated(order) {
-    const orderId = order?._id ? order._id.toString() : order?.id;
+    const summary = orderSummary(order);
+    const orderId = summary._id;
     const userId = order?.user ? (order.user._id ? order.user._id.toString() : order.user.toString()) : null;
+    const internal = withoutSecrets(order);
 
     if (this.io) {
-      if (userId) {
-        this.io.to(`user:${userId}`).emit("order_created", order);
-      }
-
-      const vendorIds = new Set();
-      if (Array.isArray(order?.items)) {
-        order.items.forEach(item => {
-          const vId = item.vendor ? (item.vendor._id ? item.vendor._id.toString() : item.vendor.toString()) : null;
-          if (vId) vendorIds.add(vId);
-        });
-      }
-      vendorIds.forEach(vId => {
-        this.io.to(`vendor:${vId}`).emit("order_created", order);
-        this.io.to(`user:${vId}`).emit("order_created", order);
+      if (userId) this.io.to(`user:${userId}`).emit("order_created", order);
+      this.vendorIdsOf(order).forEach((vId) => {
+        this.io.to(`vendor:${vId}`).emit("order_created", internal);
+        if (vId !== userId) this.io.to(`user:${vId}`).emit("order_created", internal);
       });
-
-      this.io.to("admin").emit("order_created", order);
+      this.io.to("admin").emit("order_created", internal);
       this.io.emit("dashboard_update", { type: "new_order", orderId });
     }
 
-    // Broadcast over SSE
-    this.broadcastSse("order_created", order);
-    this.broadcastSse("dashboard_update", { type: "new_order", orderId, order });
+    this.broadcastSse("order_created", summary);
+    this.broadcastSse("dashboard_update", { type: "new_order", orderId });
+  }
+
+  vendorIdsOf(order) {
+    const vendorIds = new Set();
+    if (Array.isArray(order?.items)) {
+      order.items.forEach((item) => {
+        const vId = item.vendor ? (item.vendor._id ? item.vendor._id.toString() : item.vendor.toString()) : null;
+        if (vId) vendorIds.add(vId);
+      });
+    }
+    return vendorIds;
   }
 }
+
+SocketService.orderSummary = orderSummary;
 
 module.exports = new SocketService();

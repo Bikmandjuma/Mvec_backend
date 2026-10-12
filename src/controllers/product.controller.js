@@ -62,9 +62,12 @@ const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$
 exports.getAllProducts = async (req, res) => {
   try {
     const { search } = req.query;
-    const status = (req.query.status || "ACTIVE").toString().toUpperCase();
-
-    const query = { status };
+    // This route is public: only live products are ever listed, whatever
+    // status the caller asks for. Vendors see their drafts via /vendor/me.
+    const query = { status: "ACTIVE" };
+    if (req.query.vendorId && mongoose.isValidObjectId(String(req.query.vendorId))) {
+      query.vendor = String(req.query.vendorId);
+    }
     if (search && String(search).trim()) {
       const pattern = new RegExp(escapeRegex(String(search).trim()), "i");
       query.$or = [{ name: pattern }, { description: pattern }, { brand: pattern }];
@@ -74,7 +77,7 @@ exports.getAllProducts = async (req, res) => {
     const limit = parseInt(req.query.limit, 10);
 
     let cursor = Product.find(query)
-      .populate("vendor", "Fullname companyName email")
+      .populate("vendor", "Fullname companyName")
       .populate("category", "name slug")
       .sort({ createdAt: -1 });
 
@@ -268,8 +271,14 @@ exports.deleteProduct = async (req, res) => {
 // @access  Public
 exports.getProductById = async (req, res) => {
   try {
-    const product = await Product.findById(req.params.id)
-      .populate("vendor", "Fullname companyName email")
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(404).json({ message: "Product not found" });
+    }
+    const product = await Product.findOne({
+      _id: req.params.id,
+      status: { $in: ["ACTIVE", "OUT_OF_STOCK"] },
+    })
+      .populate("vendor", "Fullname companyName")
       .populate("category", "name slug");
 
     if (!product) {
@@ -290,8 +299,8 @@ exports.getProductById = async (req, res) => {
 // @access  Public
 exports.getProductBySlug = async (req, res) => {
   try {
-    const product = await Product.findOne({ slug: req.params.slug })
-      .populate("vendor", "Fullname companyName email")
+    const product = await Product.findOne({ slug: String(req.params.slug), status: { $in: ["ACTIVE", "OUT_OF_STOCK"] } })
+      .populate("vendor", "Fullname companyName")
       .populate("category", "name slug");
 
     if (!product) {
