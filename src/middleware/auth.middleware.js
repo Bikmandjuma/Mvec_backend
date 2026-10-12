@@ -41,6 +41,21 @@ exports.protect = async (req, res, next) => {
   }
 };
 
+// Attaches req.user when a valid token is present but never rejects the request
+// (public endpoints that behave slightly differently for signed-in users).
+exports.optionalProtect = async (req, res, next) => {
+  try {
+    const header = req.headers.authorization;
+    if (header && header.startsWith("Bearer")) {
+      const decoded = jwt.verify(header.split(" ")[1], process.env.JWT_SECRET);
+      req.user = await User.findById(decoded.userId || decoded.id).select("-password");
+    }
+  } catch (error) {
+    req.user = undefined;
+  }
+  next();
+};
+
 // Restrict endpoint access to specific roles
 exports.authorize = (...roles) => {
   return (req, res, next) => {

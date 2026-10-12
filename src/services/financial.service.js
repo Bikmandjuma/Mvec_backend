@@ -7,6 +7,8 @@ const AdminWallet = require("../models/AdminWallet");
 const DeveloperWallet = require("../models/DeveloperWallet");
 const AffiliateWallet = require("../models/AffiliateWallet");
 const User = require("../models/User");
+const Order = require("../models/Order");
+const ConversionAudit = require("../models/ConversionAudit");
 
 async function getOrCreateLedgerAccount({ accountType, ownerId = null, session }) {
   const query = { accountType };
@@ -47,6 +49,7 @@ exports.lockPaymentInEscrow = async ({
   session,
   split = null,
   affiliateUserId = null,
+  orderItemId = null,
 }) => {
   const platformFee = split
     ? Number(split.totalPlatformFee) || Number(split.commissionAmount) || 0
@@ -87,6 +90,7 @@ exports.lockPaymentInEscrow = async ({
       {
         settlementReference: `MVEC-SETTLE-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`,
         order: orderId,
+        orderItemId,
         vendor: vendorId,
         grossAmount,
         commissionAmount: platformFee,
@@ -136,6 +140,50 @@ exports.lockPaymentInEscrow = async ({
   }
 
   return settlement[0];
+};
+
+/**
+ * The single place affiliate commissions become APPROVED.
+ *
+ * Preconditions are read from the order itself: it must be PAID and have been
+ * confirmed DELIVERED/COMPLETED. Anything else (shipped, processing, cancelled,
+ * refunded, unpaid) leaves commissions untouched. The PENDING -> APPROVED flip
+ * is an atomic conditional update, so replays and concurrent events can never
+ * approve (or credit the wallet) twice; reversed commissions are no longer
+ * PENDING and are skipped. Delivery is tracked per order, so all promoted items
+ * of the order are approved together, each for its net (post-refund) amount.
+ */
+exports.approveAffiliateCommissionsForOrder = async ({ orderId, session }) => {
+  const order = await Order.findById(orderId).session(session);
+  if (!order) return [];
+  const delivered = order.isDelivered && ["DELIVERED", "COMPLETED"].includes(order.orderStatus);
+  if (order.paymentStatus !== "PAID" || !delivered) return [];
+
+  const pending = await ConversionAudit.find({ order: order._id, status: "PENDING" }).session(session);
+  const approved = [];
+  for (const audit of pending) {
+    const claimed = await ConversionAudit.findOneAndUpdate(
+      { _id: audit._id, status: "PENDING" },
+      { $set: { status: "APPROVED", approvedAt: new Date() } },
+      { new: true, session }
+    );
+    if (!claimed) continue;
+
+    const net = Math.round((claimed.commissionEarned - claimed.reversedAmount) * 100) / 100;
+    if (net > 0) {
+      const affAccount = await getOrCreateLedgerAccount({ accountType: "AFFILIATE_COMMISSION", session });
+      affAccount.balance += net;
+      await affAccount.save({ session });
+
+      await AffiliateWallet.findOneAndUpdate(
+        { affiliateUser: claimed.affiliateUser },
+        { $inc: { pendingBalance: -net, availableBalance: net } },
+        { session }
+      );
+    }
+    approved.push({ audit: claimed._id, amount: net });
+  }
+  return approved;
 };
 
 exports.releaseEscrowToVendor = async ({ settlementId, session, adminUserId = null }) => {
@@ -207,21 +255,10 @@ exports.releaseEscrowToVendor = async ({ settlementId, session, adminUserId = nu
     }
   }
 
+  // Affiliate commission is approved by delivery, not by escrow release alone;
+  // this is a no-op unless the order is already delivered.
   if (affShare > 0 && settlement.affiliateUser) {
-    const affAccount = await getOrCreateLedgerAccount({ accountType: "AFFILIATE_COMMISSION", session });
-    affAccount.balance += affShare;
-    await affAccount.save({ session });
-
-    await AffiliateWallet.findOneAndUpdate(
-      { affiliateUser: settlement.affiliateUser },
-      {
-        $inc: {
-          pendingBalance: -affShare,
-          availableBalance: affShare,
-        },
-      },
-      { session }
-    );
+    await exports.approveAffiliateCommissionsForOrder({ orderId: settlement.order, session });
   }
 
   if (gwFee > 0) {
@@ -255,7 +292,7 @@ exports.releaseEscrowToVendor = async ({ settlementId, session, adminUserId = nu
         description: `Platform commission deducted for settlement ${settlement.settlementReference}`,
       },
     ],
-    { session }
+    { session, ordered: true }
   );
 
   await VendorWallet.findOneAndUpdate(
