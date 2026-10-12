@@ -8,6 +8,30 @@ const LedgerEntry = require("../models/LedgerEntry");
 const VendorWallet = require("../models/VendorWallet");
 const payoutController = require("./payout.controller");
 const socketService = require("../services/socket.service");
+const financialService = require("../services/financial.service");
+const affiliateAttribution = require("../services/affiliateAttribution.service");
+
+// A cancelled/refunded/returned/failed order can never pay out affiliate
+// commission: reverse whatever is still standing (idempotent per order).
+const VOIDING_ORDER_STATUSES = ["CANCELLED", "REFUNDED", "RETURNED", "FAILED"];
+const VOIDING_PAYMENT_STATUSES = ["REFUNDED", "FAILED"];
+async function reverseCommissionIfVoided(order) {
+  if (
+    !VOIDING_ORDER_STATUSES.includes(order.orderStatus) &&
+    !VOIDING_PAYMENT_STATUSES.includes(order.paymentStatus)
+  ) {
+    return;
+  }
+  try {
+    await affiliateAttribution.reverseOrderCommission({
+      orderId: order._id,
+      key: `order-void:${order._id}`,
+      reason: `Order ${order.orderStatus}/${order.paymentStatus}`,
+    });
+  } catch (err) {
+    console.error(`Affiliate commission reversal failed for order ${order._id}:`, err.message);
+  }
+}
 
 // Helper function to generate unique order numbers
 const generateOrderNumber = () => {
@@ -66,6 +90,14 @@ exports.createCheckoutOrder = async (req, res) => {
         quantity: item.quantity,
       });
     }
+
+    // 2b. Last-click affiliate attribution, resolved from server-side records.
+    const attributions = await affiliateAttribution.resolveAttributions({
+      visitorId: req.body.visitorId,
+      buyerId: req.user.id,
+      productIds: orderItems.map((i) => i.product),
+    });
+    orderItems.forEach((i) => affiliateAttribution.applyAttribution(i, attributions.get(String(i.product))));
 
     // 3. Create the Order document
     const order = await Order.create({
@@ -161,6 +193,13 @@ exports.directCheckout = async (req, res) => {
         image: resolvedImage,
       });
     }
+
+    const attributions = await affiliateAttribution.resolveAttributions({
+      visitorId: req.body.visitorId,
+      buyerId: req.user.id,
+      productIds: orderItems.map((i) => i.product),
+    });
+    orderItems.forEach((i) => affiliateAttribution.applyAttribution(i, attributions.get(String(i.product))));
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
@@ -375,6 +414,7 @@ exports.updateVendorOrderStatus = async (req, res) => {
     }
 
     await order.save();
+    await reverseCommissionIfVoided(order);
 
     // Notify connected buyers, vendors, and admins in real-time
     socketService.emitOrderStatusUpdate(order);
@@ -436,6 +476,7 @@ exports.updateOrderStatus = async (req, res) => {
     }
 
     await order.save();
+    await reverseCommissionIfVoided(order);
 
     // Real-time broadcast
     socketService.emitOrderStatusUpdate(order);
@@ -496,6 +537,12 @@ exports.confirmOrderDelivery = async (req, res) => {
       return res.status(400).json({ message: "Order is already marked as DELIVERED." });
     }
 
+    if (["CANCELLED", "REFUNDED", "RETURNED", "FAILED"].includes(order.orderStatus)) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(400).json({ message: `A ${order.orderStatus.toLowerCase()} order cannot be delivered.` });
+    }
+
     // 1. Verify Delivery OTP if enforced
     if (order.deliveryOtp && order.deliveryOtp !== deliveryOtp) {
       await session.abortTransaction();
@@ -521,6 +568,10 @@ exports.confirmOrderDelivery = async (req, res) => {
     for (const vendorId of vendorIds) {
       await releaseVendorEscrowFunds(order._id, vendorId, session);
     }
+
+    // 5. Delivery confirmed: approve this order's pending affiliate commissions
+    //    (same transaction, idempotent, skipped for unpaid/cancelled orders).
+    await financialService.approveAffiliateCommissionsForOrder({ orderId: order._id, session });
 
     await session.commitTransaction();
     session.endSession();
@@ -603,6 +654,13 @@ exports.cancelOrderByBuyer = async (req, res) => {
       await payment.save();
     }
 
+    // Full refund: claw back any affiliate commission earned on this order.
+    await affiliateAttribution.reverseOrderCommission({
+      orderId: order._id,
+      key: `order-cancel:${order._id}`,
+      reason: "Order cancelled and refunded",
+    });
+
     // Restore stock for each product that was snapshot into this order
     for (const item of order.items || []) {
       if (!item.product) continue;
@@ -631,14 +689,19 @@ exports.cancelOrderByBuyer = async (req, res) => {
  */
 async function releaseVendorEscrowFunds(orderId, vendorId, session) {
   // Find held settlement record for this order & vendor
-  const settlement = await Settlement.findOne({
+  // One settlement exists per order item, so a vendor can have several.
+  const settlements = await Settlement.find({
     order: orderId,
     vendor: vendorId,
     status: "HELD",
   }).session(session);
 
-  if (!settlement) return; // Already released or non-existent
+  for (const settlement of settlements) {
+    await releaseSettlement(settlement, orderId, vendorId, session);
+  }
+}
 
+async function releaseSettlement(settlement, orderId, vendorId, session) {
   const releaseAmount = settlement.netAmount; // Amount after platform commission
 
   // 1. Update Settlement State

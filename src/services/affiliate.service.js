@@ -11,38 +11,60 @@ const Notification = require("../models/Notification");
 const Order = require("../models/Order");
 const User = require("../models/User");
 const { normalizePhone, describePhoneIssue } = require("../utils/sms.util");
+const Product = require("../models/Product");
+const attribution = require("./affiliateAttribution.service");
 const crypto = require("crypto");
 
 const MINIMUM_PAYOUT_RWF = 10000;
 const CURRENCY = "RWF";
+const { PROMOTABLE_STATUSES } = attribution;
+const CLICK_DEBOUNCE_MS = 10 * 1000;
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const WEB_ORIGIN = () => process.env.WEB_ORIGIN || "https://mvec.rw";
 
 class AffiliateService {
   /**
-   * Generate or retrieve affiliate referral code.
+   * Create a tracked link for one existing product.
    *
-   * Idempotent for bare product links so tapping "Create link" twice does not
-   * litter the dashboard with duplicates; labelled / campaign links are always
-   * created fresh.
+   * The product is validated here (exists + published), never trusted from the
+   * client. Idempotent for bare product links so tapping "Create link" twice
+   * does not litter the dashboard; labelled / campaign links are created fresh.
+   * A terminated link never blocks creating a new one.
    */
   async generateAffiliateLink(userId, productId = null, campaignId = null, label = "") {
-    const cleanLabel = typeof label === "string" ? label.trim() : "";
+    if (!productId || !this._isValidId(productId)) {
+      throw new Error("A valid product is required to create an affiliate link.");
+    }
+    const product = await Product.findById(productId).select("name price status media slug");
+    if (!product) throw new Error("Product not found.");
+    if (!PROMOTABLE_STATUSES.includes(product.status)) {
+      throw new Error("This product is not available for promotion.");
+    }
+    if (campaignId) {
+      if (!this._isValidId(campaignId)) throw new Error("Campaign not found.");
+      const campaign = await AffiliateCampaign.findById(campaignId).select("status");
+      if (!campaign) throw new Error("Campaign not found.");
+      if (campaign.status !== "ACTIVE") throw new Error("This campaign is not open for new links.");
+    }
 
-    if (productId && !campaignId && !cleanLabel) {
+    const cleanLabel = typeof label === "string" ? label.trim().slice(0, 120) : "";
+
+    if (!campaignId && !cleanLabel) {
       const existing = await AffiliateLink.findOne({
         affiliateUser: userId,
-        targetProduct: productId,
+        targetProduct: product._id,
         campaign: null,
+        status: { $ne: "TERMINATED" },
       }).populate("targetProduct", "name price status media");
       if (existing) return existing;
     }
 
-    const code = `AFF-${userId.toString().slice(-4)}-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
+    const code = `AFF-${userId.toString().slice(-4)}-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
 
     const link = await AffiliateLink.create({
       affiliateCode: code,
       affiliateUser: userId,
-      targetProduct: productId || null,
+      targetProduct: product._id,
       campaign: campaignId || null,
       label: cleanLabel,
     });
@@ -52,43 +74,56 @@ class AffiliateService {
   }
 
   /**
-   * Register click with Fraud Guard (Self-referral & duplicate checks)
+   * Resolve a link, record the click server-side and (when it promotes a
+   * product) refresh the visitor's last-click attribution.
+   *
+   * Only ACTIVE links count. Repeats from the same visitor on the same link
+   * within CLICK_DEBOUNCE_MS (refresh, double fire) are not counted again.
+   * `visitorId` is minted here when the browser has none.
    */
-  async trackClick(affiliateCode, visitorIp, buyerUserId = null) {
-    const link = await AffiliateLink.findOne({ affiliateCode, isActive: true });
+  async trackClick(affiliateCode, { visitorIp = "", visitorId = null, buyerUserId = null } = {}) {
+    const code = typeof affiliateCode === "string" ? affiliateCode.trim() : "";
+    const link = code
+      ? await AffiliateLink.findOne({ affiliateCode: code, isActive: true, status: { $ne: "TERMINATED" } })
+          .populate("targetProduct", "name slug status")
+      : null;
     if (!link) throw new Error("Invalid or inactive affiliate link.");
 
-    // Fraud Guard: Prevent self-referrals
+    const vid = attribution.cleanVisitorId(visitorId) || attribution.mintVisitorId();
+    const product = link.targetProduct
+      ? { id: link.targetProduct._id, slug: link.targetProduct.slug, name: link.targetProduct.name }
+      : null;
+    const base = { success: true, visitorId: vid, affiliateCode: link.affiliateCode, targetProduct: product };
+
+    // Fraud Guard: an affiliate cannot earn from their own visits.
     if (buyerUserId && link.affiliateUser.toString() === buyerUserId.toString()) {
-      return { FraudGuardFlagged: true, reason: "Self-referral blocked" };
+      return { FraudGuardFlagged: true, reason: "Self-referral blocked", visitorId: vid, targetProduct: product };
     }
 
-    link.clickCount += 1;
-    link.lastClickedAt = new Date();
-    await link.save();
+    const now = new Date();
+    const recent = await AffiliateClick.exists({
+      link: link._id,
+      visitorId: vid,
+      createdAt: { $gt: new Date(now.getTime() - CLICK_DEBOUNCE_MS) },
+    });
+    if (recent) return base;
 
-    // Timestamped copy so ?range=7d stats can be answered; the lifetime
-    // counter on the link alone cannot be bucketed by day.
-    try {
-      await AffiliateClick.create({
-        affiliateUser: link.affiliateUser,
-        link: link._id,
-        affiliateCode: link.affiliateCode,
-        buyerUser: buyerUserId || null,
-        visitorIp: visitorIp || "",
-      });
-    } catch (err) {
-      console.error("Failed to record affiliate click:", err.message);
-    }
-
-    return {
-      success: true,
-      affiliateCode: link.affiliateCode,
+    await AffiliateClick.create({
       affiliateUser: link.affiliateUser,
-      targetProduct: link.targetProduct
-        ? { id: link.targetProduct._id, slug: link.targetProduct.slug, name: link.targetProduct.name }
-        : null,
-    };
+      link: link._id,
+      affiliateCode: link.affiliateCode,
+      buyerUser: buyerUserId || null,
+      // Hashed: enough to spot abuse, not a stored address.
+      visitorIp: visitorIp
+        ? crypto.createHash("sha256").update(`${visitorIp}|${process.env.JWT_SECRET || ""}`).digest("hex").slice(0, 24)
+        : "",
+      product: link.targetProduct ? link.targetProduct._id : null,
+      visitorId: vid,
+    });
+    await AffiliateLink.updateOne({ _id: link._id }, { $inc: { clickCount: 1 }, $set: { lastClickedAt: now } });
+
+    await attribution.recordClickAttribution({ visitorId: vid, link, now });
+    return base;
   }
 
   /**
@@ -560,65 +595,112 @@ class AffiliateService {
     return this.getSettings(userId);
   }
 
-  _mapLink(link, conv, lastClickedAt) {
+  /** Commission that still stands after refund reversals. */
+  _net(row) {
+    return round2((row.commissionEarned || 0) - (row.reversedAmount || 0));
+  }
+
+  _mapLink(link, stats = {}) {
     const product = link.targetProduct;
+    const terminated = link.status === "TERMINATED" || link.isActive === false;
     return {
       _id: link._id,
       id: link._id,
       affiliateCode: link.affiliateCode,
       code: link.affiliateCode,
       label: link.label || "",
+      targetProductId: product ? String(product._id) : null,
       targetProduct: product
-        ? { _id: product._id, name: product.name, price: product.price, media: product.media }
+        ? { _id: product._id, name: product.name, price: product.price, media: product.media, status: product.status }
         : null,
       campaign: link.campaign || null,
-      clickCount: link.clickCount || 0,
-      registrationCount: 0,
-      conversionCount: conv && conv.conversions !== undefined ? conv.conversions : link.conversionCount || 0,
-      commissionEarned: conv && conv.commission !== undefined ? conv.commission : 0,
-      revenue: conv && conv.revenue !== undefined ? conv.revenue : 0,
-      isActive: link.isActive !== false,
+      status: terminated ? "TERMINATED" : "ACTIVE",
+      isActive: !terminated,
+      clickCount: stats.clicks || 0,
+      uniqueVisitors: stats.unique || 0,
+      conversionCount: stats.conversions || 0,
+      commissionEarned: stats.commission || 0,
+      revenue: stats.revenue || 0,
       createdAt: link.createdAt,
-      lastClickedAt: lastClickedAt || link.lastClickedAt || null,
+      terminatedAt: link.terminatedAt || null,
+      lastClickedAt: stats.lastClickedAt || link.lastClickedAt || null,
     };
   }
 
-  /** GET /affiliates/links */
-  async listLinks(userId) {
-    const uid = this._oid(userId);
-    const [links, convAgg, clickAgg] = await Promise.all([
-      AffiliateLink.find({ affiliateUser: userId })
-        .sort({ createdAt: -1 })
-        .populate("targetProduct", "name price status media"),
-      uid
-        ? ConversionAudit.aggregate([
-            { $match: { affiliateUser: uid } },
-            {
-              $group: {
-                _id: "$link",
-                conversions: { $sum: 1 },
-                commission: { $sum: "$commissionEarned" },
-                revenue: { $sum: "$conversionValue" },
-              },
-            },
-          ])
-        : Promise.resolve([]),
-      uid
-        ? AffiliateClick.aggregate([
-            { $match: { affiliateUser: uid } },
-            { $group: { _id: "$link", last: { $max: "$createdAt" } } },
-          ])
-        : Promise.resolve([]),
+  /** Per-link click and conversion totals (single source: AffiliateClick + ConversionAudit). */
+  async _linkStats(uid, since = null) {
+    const clickMatch = { affiliateUser: uid };
+    const convMatch = { affiliateUser: uid, status: { $ne: "REJECTED" } };
+    if (since) {
+      clickMatch.createdAt = { $gte: since };
+      convMatch.convertedAt = { $gte: since };
+    }
+    const [clickRows, convRows] = await Promise.all([
+      AffiliateClick.aggregate([
+        { $match: clickMatch },
+        {
+          $group: {
+            _id: "$link",
+            clicks: { $sum: 1 },
+            visitors: { $addToSet: "$visitorId" },
+            lastClickedAt: { $max: "$createdAt" },
+          },
+        },
+      ]),
+      ConversionAudit.aggregate([
+        { $match: convMatch },
+        {
+          $group: {
+            _id: "$link",
+            conversions: { $sum: 1 },
+            commission: { $sum: { $subtract: ["$commissionEarned", "$reversedAmount"] } },
+            revenue: { $sum: { $cond: [{ $eq: ["$status", "REVERSED"] }, 0, "$conversionValue"] } },
+          },
+        },
+      ]),
     ]);
-
-    const convByLink = new Map(convAgg.map((c) => [String(c._id), c]));
-    const lastByLink = new Map(clickAgg.map((c) => [String(c._id), c.last]));
-    return links.map((l) =>
-      this._mapLink(l, convByLink.get(String(l._id)), lastByLink.get(String(l._id)))
+    const map = new Map();
+    clickRows.forEach((r) =>
+      map.set(String(r._id), {
+        clicks: r.clicks,
+        unique: r.visitors.filter(Boolean).length,
+        lastClickedAt: r.lastClickedAt,
+      })
     );
+    convRows.forEach((r) =>
+      map.set(String(r._id), {
+        ...(map.get(String(r._id)) || {}),
+        conversions: r.conversions,
+        commission: round2(r.commission),
+        revenue: r.revenue,
+      })
+    );
+    return map;
   }
 
-  /** PATCH /affiliates/links/:id */
+  /** GET /affiliates/links?status=&q= */
+  async listLinks(userId, { status, q } = {}) {
+    const uid = this._oid(userId);
+    if (!uid) throw new Error("User not found.");
+    const query = { affiliateUser: uid };
+    const wanted = String(status || "").toUpperCase();
+    if (wanted === "ACTIVE") query.status = { $ne: "TERMINATED" };
+    if (wanted === "TERMINATED") query.status = "TERMINATED";
+
+    const [links, stats] = await Promise.all([
+      AffiliateLink.find(query)
+        .sort({ createdAt: -1 })
+        .populate("targetProduct", "name price status media"),
+      this._linkStats(uid),
+    ]);
+
+    const needle = String(q || "").trim().toLowerCase();
+    return links
+      .map((l) => this._mapLink(l, stats.get(String(l._id))))
+      .filter((l) => !needle || `${l.label} ${l.code} ${l.targetProduct?.name || ""}`.toLowerCase().includes(needle));
+  }
+
+  /** PATCH /affiliates/links/:id — relabel, or terminate with { isActive: false }. */
   async updateLink(userId, linkId, patch = {}) {
     if (!this._isValidId(linkId)) throw new Error("Affiliate link not found.");
     const link = await AffiliateLink.findOne({ _id: linkId, affiliateUser: userId }).populate(
@@ -627,29 +709,79 @@ class AffiliateService {
     );
     if (!link) throw new Error("Affiliate link not found.");
 
-    if (patch.isActive !== undefined) link.isActive = !!patch.isActive;
-    if (patch.label !== undefined && patch.label !== null) link.label = String(patch.label).trim();
+    if (patch.isActive === true && link.status === "TERMINATED") {
+      throw new Error("A terminated link cannot be reactivated. Create a new link instead.");
+    }
+    if (patch.isActive === false) await this._terminate(link);
+    if (patch.label !== undefined && patch.label !== null) link.label = String(patch.label).trim().slice(0, 120);
     await link.save();
 
-    return this._mapLink(link, null, null);
+    return this._mapLink(link);
   }
 
-  /** DELETE /affiliates/links/:id */
+  async _terminate(link) {
+    if (link.status === "TERMINATED") return;
+    link.status = "TERMINATED";
+    link.isActive = false;
+    link.terminatedAt = new Date();
+  }
+
+  /**
+   * DELETE /affiliates/links/:id — terminates (never deletes). Clicks,
+   * attributions already established and commission history are kept.
+   */
   async removeLink(userId, linkId) {
     if (!this._isValidId(linkId)) throw new Error("Affiliate link not found.");
     const link = await AffiliateLink.findOne({ _id: linkId, affiliateUser: userId });
     if (!link) throw new Error("Affiliate link not found.");
-    await link.deleteOne();
-    return { deleted: true, id: link._id };
+    await this._terminate(link);
+    await link.save();
+    return { terminated: true, id: link._id, status: link.status, terminatedAt: link.terminatedAt };
+  }
+
+  /** Commission buckets from the single commission ledger (ConversionAudit). */
+  async _commissionTotals(uid) {
+    const rows = await ConversionAudit.aggregate([
+      { $match: { affiliateUser: uid, status: { $ne: "REJECTED" } } },
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 },
+          orders: { $addToSet: "$order" },
+          gross: { $sum: "$commissionEarned" },
+          reversed: { $sum: "$reversedAmount" },
+          revenue: { $sum: "$conversionValue" },
+        },
+      },
+    ]);
+    const t = { conversions: 0, gross: 0, reversed: 0, pending: 0, approved: 0, revenue: 0 };
+    const orders = new Set();
+    rows.forEach((r) => {
+      t.conversions += r.count;
+      t.gross += r.gross;
+      t.reversed += r.reversed;
+      r.orders.forEach((o) => orders.add(String(o)));
+      const net = r.gross - r.reversed;
+      if (r._id === "PENDING") t.pending += net;
+      if (r._id === "APPROVED" || r._id === "PAID") t.approved += net;
+      if (r._id !== "REVERSED") t.revenue += r.revenue;
+    });
+    return {
+      conversions: t.conversions,
+      attributedOrders: orders.size,
+      revenue: t.revenue,
+      grossCommission: round2(t.gross),
+      reversedCommission: round2(t.reversed),
+      netCommission: round2(t.gross - t.reversed),
+      pendingCommission: round2(t.pending),
+      approvedCommission: round2(t.approved),
+    };
   }
 
   /**
    * GET /affiliates/stats?range=7d
-   *
-   * Clicks come from the timestamped AffiliateClick log. When no log exists
-   * yet (links shared before tracking shipped) the headline falls back to the
-   * lifetime counter on the links — the series stays empty rather than being
-   * invented day by day.
+   * Time series and range totals; every number comes from AffiliateClick and
+   * ConversionAudit rows, so nothing is counted twice.
    */
   async getStats(userId, range = "30d") {
     const days = this.parseRangeDays(range);
@@ -664,64 +796,39 @@ class AffiliateService {
     }
     const labels = keys.map((k) => this._labelFor(k));
     const index = new Map(keys.map((k, i) => [k, i]));
+    const day = (field) => ({ $dateToString: { format: "%Y-%m-%d", date: field } });
 
-    const [clickRows, convRows, regRows, linkClickRows, linkConvRows, links, totalClickLogs] =
-      await Promise.all([
-        AffiliateClick.aggregate([
-          { $match: { affiliateUser: uid, createdAt: { $gte: since } } },
-          { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, count: { $sum: 1 } } },
-        ]),
-        // Money events: a settlement line carries the affiliate's share.
-        Settlement.aggregate([
-          { $match: { affiliateUser: uid, affiliateShare: { $gt: 0 }, createdAt: { $gte: since } } },
-          {
-            $group: {
-              _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
-              conversions: { $sum: 1 },
-              revenue: { $sum: "$grossAmount" },
-              commission: { $sum: "$affiliateShare" },
-            },
+    const [clickRows, convRows, visitorRows, links, linkStats] = await Promise.all([
+      AffiliateClick.aggregate([
+        { $match: { affiliateUser: uid, createdAt: { $gte: since } } },
+        { $group: { _id: day("$createdAt"), count: { $sum: 1 } } },
+      ]),
+      ConversionAudit.aggregate([
+        { $match: { affiliateUser: uid, status: { $ne: "REJECTED" }, convertedAt: { $gte: since } } },
+        {
+          $group: {
+            _id: day("$convertedAt"),
+            conversions: { $sum: 1 },
+            revenue: { $sum: { $cond: [{ $eq: ["$status", "REVERSED"] }, 0, "$conversionValue"] } },
+            commission: { $sum: { $subtract: ["$commissionEarned", "$reversedAmount"] } },
           },
-        ]),
-        // "Registrations": buyers whose first attributed order landed in range.
-        Order.aggregate([
-          { $match: { affiliateUser: uid } },
-          { $sort: { createdAt: 1 } },
-          { $group: { _id: "$user", firstAt: { $first: "$createdAt" } } },
-          { $match: { firstAt: { $gte: since } } },
-          { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$firstAt" } }, count: { $sum: 1 } } },
-        ]),
-        AffiliateClick.aggregate([
-          { $match: { affiliateUser: uid, createdAt: { $gte: since } } },
-          {
-            $group: {
-              _id: "$link",
-              count: { $sum: 1 },
-              last: { $max: "$createdAt" },
-            },
-          },
-        ]),
-        ConversionAudit.aggregate([
-          { $match: { affiliateUser: uid, convertedAt: { $gte: since } } },
-          {
-            $group: {
-              _id: "$link",
-              conversions: { $sum: 1 },
-              commission: { $sum: "$commissionEarned" },
-              revenue: { $sum: "$conversionValue" },
-            },
-          },
-        ]),
-        AffiliateLink.find({ affiliateUser: userId }),
-        AffiliateClick.countDocuments({ affiliateUser: uid }),
-      ]);
+        },
+      ]),
+      AffiliateClick.aggregate([
+        { $match: { affiliateUser: uid, createdAt: { $gte: since } } },
+        { $group: { _id: "$visitorId" } },
+        { $match: { _id: { $ne: "" } } },
+        { $count: "unique" },
+      ]),
+      AffiliateLink.find({ affiliateUser: uid }).populate("targetProduct", "name price status media"),
+      this._linkStats(uid, since),
+    ]);
 
     const clicksSeries = new Array(days).fill(0);
     const convSeries = new Array(days).fill(0);
-    const regsSeries = new Array(days).fill(0);
+    const commissionSeries = new Array(days).fill(0);
     let revenue = 0;
     let commission = 0;
-
     clickRows.forEach((r) => {
       const i = index.get(r._id);
       if (i !== undefined) clicksSeries[i] += r.count;
@@ -730,57 +837,28 @@ class AffiliateService {
       const i = index.get(r._id);
       if (i !== undefined) {
         convSeries[i] += r.conversions;
+        commissionSeries[i] += round2(r.commission);
         revenue += r.revenue || 0;
         commission += r.commission || 0;
       }
     });
-    regRows.forEach((r) => {
-      const i = index.get(r._id);
-      if (i !== undefined) regsSeries[i] += r.count;
-    });
-
-    const lifetimeClicks = links.reduce((s, l) => s + (l.clickCount || 0), 0);
-    const seriesClicks = clicksSeries.reduce((s, v) => s + v, 0);
-    const headlineClicks = totalClickLogs > 0 ? seriesClicks : lifetimeClicks;
-    const registrations = regsSeries.reduce((s, v) => s + v, 0);
-    const conversions = convSeries.reduce((s, v) => s + v, 0);
-    const activeLinks = links.filter((l) => l.isActive !== false).length;
-
-    const convByLink = new Map(linkConvRows.map((c) => [String(c._id), c]));
-    const clickByLink = new Map(linkClickRows.map((c) => [String(c._id), c]));
 
     const topLinks = links
-      .map((l) => {
-        const conv = convByLink.get(String(l._id));
-        const linkClicks = clickByLink.get(String(l._id));
-        const mapped = this._mapLink(l, conv, linkClicks ? linkClicks.last : l.lastClickedAt);
-        mapped.conversionCount = conv ? conv.conversions : 0;
-        mapped.commissionEarned = conv ? conv.commission : 0;
-        mapped.revenue = conv ? conv.revenue : 0;
-        if (totalClickLogs > 0) mapped.clickCount = linkClicks ? linkClicks.count : 0;
-        return mapped;
-      })
-      .sort(
-        (a, b) => b.commissionEarned - a.commissionEarned || b.clickCount - a.clickCount
-      )
+      .map((l) => this._mapLink(l, linkStats.get(String(l._id))))
+      .sort((a, b) => b.commissionEarned - a.commissionEarned || b.clickCount - a.clickCount)
       .slice(0, 10);
 
     return {
       range: `${days}d`,
       days,
-      clicks: headlineClicks,
-      registrations,
-      conversions,
+      clicks: clicksSeries.reduce((s, v) => s + v, 0),
+      uniqueVisitors: (visitorRows[0] || {}).unique || 0,
+      conversions: convSeries.reduce((s, v) => s + v, 0),
       revenue,
-      commission,
-      activeLinks,
+      commission: round2(commission),
+      activeLinks: links.filter((l) => l.status !== "TERMINATED" && l.isActive !== false).length,
       labels,
-      series: {
-        labels,
-        clicks: clicksSeries,
-        registrations: regsSeries,
-        conversions: convSeries,
-      },
+      series: { labels, clicks: clicksSeries, conversions: convSeries, commission: commissionSeries },
       topLinks,
     };
   }
@@ -788,45 +866,70 @@ class AffiliateService {
   /** GET /affiliates/overview — one payload for the dashboard home. */
   async getOverview(userId) {
     const uid = this._oid(userId);
-    const [wallet, links, settlementTotals, regRows, stats] = await Promise.all([
+    if (!uid) throw new Error("User not found.");
+    const [wallet, linkRows, clickTotals, totals, recent, stats] = await Promise.all([
       this.getWalletSummary(userId),
-      AffiliateLink.find({ affiliateUser: userId }).select(
-        "clickCount conversionCount isActive"
-      ),
-      uid
-        ? Settlement.aggregate([
-            { $match: { affiliateUser: uid, affiliateShare: { $gt: 0 } } },
-            {
-              $group: {
-                _id: null,
-                conversions: { $sum: 1 },
-                revenue: { $sum: "$grossAmount" },
-                commission: { $sum: "$affiliateShare" },
-              },
-            },
-          ])
-        : Promise.resolve([]),
-      uid
-        ? Order.aggregate([
-            { $match: { affiliateUser: uid } },
-            { $sort: { createdAt: 1 } },
-            { $group: { _id: "$user", firstAt: { $first: "$createdAt" } } },
-            { $group: { _id: null, count: { $sum: 1 } } },
-          ])
-        : Promise.resolve([]),
+      AffiliateLink.find({ affiliateUser: uid }).select("status isActive"),
+      AffiliateClick.aggregate([
+        { $match: { affiliateUser: uid } },
+        { $group: { _id: null, clicks: { $sum: 1 }, visitors: { $addToSet: "$visitorId" } } },
+      ]),
+      this._commissionTotals(uid),
+      this.getRecentConversions(userId, 10),
       this.getStats(userId, "30d"),
     ]);
 
-    const totals = settlementTotals[0] || {};
+    const click = clickTotals[0] || { clicks: 0, visitors: [] };
+    const terminated = linkRows.filter((l) => l.status === "TERMINATED" || l.isActive === false).length;
     return {
-      clicks: links.reduce((s, l) => s + (l.clickCount || 0), 0),
-      registrations: (regRows[0] || {}).count || 0,
-      conversions: totals.conversions || 0,
-      revenue: totals.revenue || 0,
-      commission: totals.commission || 0,
-      activeLinks: links.filter((l) => l.isActive !== false).length,
+      links: { total: linkRows.length, active: linkRows.length - terminated, terminated },
+      clicks: click.clicks,
+      uniqueVisitors: click.visitors.filter(Boolean).length,
+      conversions: totals.conversions,
+      attributedOrders: totals.attributedOrders,
+      conversionRate: click.clicks ? Math.round((totals.attributedOrders / click.clicks) * 10000) / 100 : 0,
+      revenue: totals.revenue,
+      commission: {
+        gross: totals.grossCommission,
+        reversed: totals.reversedCommission,
+        net: totals.netCommission,
+        pending: totals.pendingCommission,
+        approved: totals.approvedCommission,
+        paid: wallet.totalWithdrawn,
+      },
       wallet,
+      recent,
       stats,
+    };
+  }
+
+  /** Latest attributed order items with their commission state. */
+  async getRecentConversions(userId, limit = 10) {
+    const rows = await ConversionAudit.find({ affiliateUser: userId, status: { $ne: "REJECTED" } })
+      .sort({ convertedAt: -1 })
+      .limit(Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100))
+      .populate("targetProduct", "name")
+      .populate("order", "orderNumber");
+    return rows.map((c) => this._mapConversion(c));
+  }
+
+  _mapConversion(c) {
+    return {
+      _id: c._id,
+      id: c._id,
+      type: "SALE",
+      status: c.status,
+      orderNumber: c.order?.orderNumber || "",
+      order: c.order ? { _id: c.order._id, orderNumber: c.order.orderNumber } : null,
+      product: c.targetProduct?.name || "Product",
+      linkCode: c.referralCode || "",
+      quantity: c.quantity || 1,
+      orderTotal: c.conversionValue,
+      amount: this._net(c),
+      commissionAmount: c.commissionEarned,
+      reversedAmount: c.reversedAmount || 0,
+      rate: c.conversionValue > 0 ? Math.round((c.commissionEarned / c.conversionValue) * 10000) / 100 : 0,
+      createdAt: c.convertedAt || c.createdAt,
     };
   }
 
@@ -837,48 +940,22 @@ class AffiliateService {
 
   /**
    * GET /affiliates/commissions?limit=200&status=
-   *
-   * Settlement lines are the commission ledger: one row per order item with
-   * the affiliate's share, HELD while escrow is pending and RELEASED once the
-   * funds move to the wallet's available balance.
+   * One row per attributed order item. Statuses: PENDING (escrow held),
+   * APPROVED (released to the wallet), REVERSED (refunded). Partial refunds
+   * keep the original status and show `reversedAmount`.
    */
   async listCommissions(userId, { limit = 200, status } = {}) {
-    const query = { affiliateUser: userId, affiliateShare: { $gt: 0 } };
-    const statusMap = { PENDING: "HELD", AVAILABLE: "RELEASED", PAID: "RELEASED" };
-    if (status && String(status).trim()) {
-      const key = String(status).trim().toUpperCase();
-      if (key === "REVERSED") query.status = { $in: ["REFUNDED", "CANCELLED"] };
-      else if (statusMap[key]) query.status = statusMap[key];
-    }
+    const query = { affiliateUser: userId, status: { $ne: "REJECTED" } };
+    const key = String(status || "").trim().toUpperCase();
+    if (["PENDING", "APPROVED", "REVERSED"].includes(key)) query.status = key;
 
     const capped = Math.min(Math.max(parseInt(limit, 10) || 200, 1), 500);
-    const rows = await Settlement.find(query)
-      .sort({ createdAt: -1 })
+    const rows = await ConversionAudit.find(query)
+      .sort({ convertedAt: -1 })
       .limit(capped)
-      .populate("order", "orderNumber totalAmount affiliateCode");
-
-    return rows.map((s) => ({
-      _id: s._id,
-      id: s._id,
-      type: "SALE",
-      status:
-        s.status === "HELD" ? "PENDING" : s.status === "RELEASED" ? "AVAILABLE" : "REVERSED",
-      order: s.order
-        ? { _id: s.order._id, orderNumber: s.order.orderNumber }
-        : null,
-      orderNumber: s.order ? s.order.orderNumber : "",
-      linkCode: s.order ? s.order.affiliateCode || "" : "",
-      amount: s.affiliateShare,
-      commissionAmount: s.affiliateShare,
-      rate:
-        s.grossAmount > 0
-          ? Math.round((s.affiliateShare / s.grossAmount) * 10000) / 100
-          : 0,
-      orderTotal: s.grossAmount,
-      notes: `Commission on settlement ${s.settlementReference}`,
-      createdAt: s.createdAt,
-      releasedAt: s.releasedAt || null,
-    }));
+      .populate("targetProduct", "name")
+      .populate("order", "orderNumber");
+    return rows.map((c) => this._mapConversion(c));
   }
 
   /** GET /affiliates/campaigns?status=ACTIVE */
