@@ -4,6 +4,7 @@ const Product = require("../models/Product");
 const { normalizePhone } = require("../utils/sms.util");
 const { effectivePrice } = require("../utils/pricing.util");
 const { PROVINCES, DELIVERY_METHODS, computeShippingFee } = require("../config/delivery");
+const affiliateAttribution = require("./affiliateAttribution.service");
 
 const MAX_QTY_PER_LINE = 100;
 const PAYMENT_METHODS = ["MOMO", "AIRTEL"];
@@ -119,7 +120,7 @@ async function reserveStock(lines) {
  * Create a PENDING order for a buyer from product lines. Prices, shipping and
  * totals are computed here, never trusted from the client.
  */
-async function createOrder({ userId, lines: rawLines, delivery, paymentMethod }) {
+async function createOrder({ userId, lines: rawLines, delivery, paymentMethod, visitorId }) {
   const parsed = parseDelivery(delivery);
   const lines = normaliseLines(rawLines);
 
@@ -151,6 +152,15 @@ async function createOrder({ userId, lines: rawLines, delivery, paymentMethod })
       image: product.media?.mainImage || "",
     });
   }
+
+  // Last-click affiliate attribution, resolved from server-side click records
+  // (never from client-supplied affiliate data).
+  const attributions = await affiliateAttribution.resolveAttributions({
+    visitorId,
+    buyerId: userId,
+    productIds: orderItems.map((i) => i.product),
+  });
+  orderItems.forEach((i) => affiliateAttribution.applyAttribution(i, attributions.get(String(i.product))));
 
   const stockLines = orderItems.map((i) => ({ product: i.product, quantity: i.quantity, name: i.name }));
   await reserveStock(stockLines);
