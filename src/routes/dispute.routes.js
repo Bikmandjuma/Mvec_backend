@@ -10,7 +10,7 @@ router.get("/", protect, authorize("super_admin"), disputeController.adminListDi
 router.get("/mine", protect, disputeController.listMyDisputes);
 
 // Open a dispute case for an order
-router.post("/", protect, disputeController.openDispute);
+router.post("/", protect, require("../middleware/rateLimits").write, disputeController.openDispute);
 
 // Attach chat evidence/documents to dispute case
 router.post("/:disputeId/evidence", protect, disputeController.submitEvidence);

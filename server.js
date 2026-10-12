@@ -47,10 +47,17 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" },
   crossOriginEmbedderPolicy: false,
 }));
+// Which websites may call this API from a browser. CORS_ORIGINS is a comma
+// separated list (e.g. "https://mvec.rw,https://www.mvec.rw"). Production
+// falls back to FRONTEND_URL only; development allows any origin so phones on
+// the local network can test.
+const allowedOrigins = (process.env.CORS_ORIGINS || (isProduction ? process.env.FRONTEND_URL || "" : ""))
+  .split(",").map((o) => o.trim().replace(/\/+$/, "")).filter(Boolean);
 app.use(cors({
-  origin: "*",
+  origin: allowedOrigins.length ? allowedOrigins : !isProduction,
   credentials: true,
 }));
+if (process.env.TRUST_PROXY) app.set("trust proxy", Number(process.env.TRUST_PROXY) || 1);
 // Keep the raw body so webhook signatures (Paypack, Airtel) can be verified.
 // The JSON limit is raised well above Express' 100kb default: product payloads
 // (and any client that inlines image data) used to die with a 413 before the
@@ -98,6 +105,7 @@ app.use("/api/webhooks", require("./src/routes/webhook.routes"));
 app.use("/api/vendor", require("./src/routes/vendor.service.routes"));
 app.use("/api/buyer", require("./src/routes/buyer.service.routes"));
 app.use("/api/admin", require("./src/routes/admin.monetization.routes"));
+app.use("/api/admin/disbursements", require("./src/routes/admin.disbursement.routes"));
 app.use("/api/admin/payouts", require("./src/routes/admin.payout.routes"));
 app.use("/api/developer/payouts", require("./src/routes/developer.payout.routes"));
 app.use("/api/reviews", require("./src/routes/review.routes"));
@@ -139,6 +147,12 @@ app.get("/api/events", (req, res) => {
 
 // Swagger documentation route
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+
+// Liveness/readiness probe for the hosting platform and uptime monitors.
+app.get("/health", (req, res) => {
+  const dbUp = mongoose.connection.readyState === 1;
+  res.status(dbUp ? 200 : 503).json({ status: dbUp ? "ok" : "degraded", db: dbUp ? "up" : "down", uptime: Math.round(process.uptime()) });
+});
 
 app.get("/", (req, res) => {
   res.json({

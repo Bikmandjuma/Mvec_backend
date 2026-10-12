@@ -223,7 +223,12 @@ exports.handleAirtelWebhook = async (req, res) => {
 // @access  Public (Provider Verified via X-Paypack-Signature)
 exports.handlePaypackWebhook = async (req, res) => {
   try {
-    // Verify the signature whenever a webhook secret is configured.
+    // Production must verify every callback; without a secret anyone could
+    // post a fake "payment successful" event.
+    if (!process.env.PAYPACK_WEBHOOK_SECRET && process.env.NODE_ENV === "production") {
+      console.error("[Paypack Webhook] PAYPACK_WEBHOOK_SECRET is not set; rejecting callback.");
+      return res.status(503).json({ message: "Webhook verification is not configured." });
+    }
     if (process.env.PAYPACK_WEBHOOK_SECRET) {
       const isValid = paypackService.verifyWebhookSignature(
         req.rawBody,
@@ -236,6 +241,15 @@ exports.handlePaypackWebhook = async (req, res) => {
 
     // Payload: { event_id, event_kind, created_at, data: { ref, kind, amount, fee, status, ... } }
     const { event_kind: eventKind, data = {} } = req.body;
+
+    // Money MVEC sent out (refunds, affiliate withdrawals).
+    if (eventKind === "transaction:processed" && data.kind === "CASHOUT") {
+      await require("../services/disbursement.service").handleCallback({
+        ref: data.ref,
+        status: paypackService.normalizeStatus(data.status),
+      });
+      return res.status(200).json({ success: true, message: "Transfer update recorded." });
+    }
 
     // Only a processed CASHIN carries a final status; ignore everything else.
     if (eventKind !== "transaction:processed" || data.kind !== "CASHIN") {

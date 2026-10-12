@@ -5,6 +5,9 @@ const Vendor = require("../models/Vendor");
 const Supplier = require("../models/Supplier");
 const SupplierTeamMember = require("../models/SupplierTeamMember");
 
+const issuedBeforePasswordChange = (decoded, user) =>
+  Boolean(user?.lastPasswordChangeAt && decoded?.iat && decoded.iat * 1000 < new Date(user.lastPasswordChangeAt).getTime() - 1000);
+
 exports.protect = async (req, res, next) => {
   let token;
 
@@ -25,6 +28,11 @@ exports.protect = async (req, res, next) => {
 
       if (!req.user) {
         return res.status(401).json({ message: "User no longer exists" });
+      }
+
+      // Sessions created before the latest password change are revoked.
+      if (issuedBeforePasswordChange(decoded, req.user)) {
+        return res.status(401).json({ message: "Your password was changed. Please log in again." });
       }
 
       // 4. Proceed to the next middleware or controller
@@ -49,6 +57,7 @@ exports.optionalProtect = async (req, res, next) => {
     if (header && header.startsWith("Bearer")) {
       const decoded = jwt.verify(header.split(" ")[1], process.env.JWT_SECRET);
       req.user = await User.findById(decoded.userId || decoded.id).select("-password");
+      if (issuedBeforePasswordChange(decoded, req.user)) req.user = undefined;
     }
   } catch (error) {
     req.user = undefined;
