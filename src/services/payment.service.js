@@ -145,3 +145,48 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
     throw error;
   }
 };
+/**
+ * Apply a final Paypack result to a payment. Used by both the Paypack webhook
+ * and the status-polling endpoint, so it must be safe to call more than once.
+ *
+ * Payments linked to an order go through processPaymentWebhook (escrow and
+ * commission); standalone payments only change their own status.
+ */
+exports.settlePaypackPayment = async ({ payment, status, amount, fee = 0, payload = {} }) => {
+  if (status === "SUCCESSFUL") {
+    if (payment.parentOrder) {
+      return exports.processPaymentWebhook({
+        provider: "PAYPACK",
+        externalTransactionId: payment.gatewayReference,
+        orderId: payment.parentOrder,
+        paymentId: payment._id,
+        amount,
+        payload,
+        gatewayFee: fee,
+      });
+    }
+
+    if (Number(amount) !== payment.amount) {
+      throw new Error(`Mismatched payment amount. Expected: ${payment.amount}, Received: ${amount}`);
+    }
+
+    // Only a PENDING payment can transition, which makes repeated callbacks no-ops.
+    const updated = await Payment.findOneAndUpdate(
+      { _id: payment._id, status: "PENDING" },
+      { status: "SUCCESS", paidAt: new Date(), gatewayFee: fee, gatewayResponse: payload },
+      { returnDocument: "after" }
+    );
+    return { status: updated ? "SUCCESS" : "ALREADY_PROCESSED", payment: updated };
+  }
+
+  if (status === "FAILED") {
+    const updated = await Payment.findOneAndUpdate(
+      { _id: payment._id, status: "PENDING" },
+      { status: "FAILED", gatewayResponse: payload },
+      { returnDocument: "after" }
+    );
+    return { status: updated ? "FAILED" : "ALREADY_PROCESSED", payment: updated };
+  }
+
+  return { status: "PENDING" };
+};
