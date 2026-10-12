@@ -86,6 +86,7 @@ const buildUserResponse = (u, staffDetails = null) => ({
   businessName: u.businessName || u.companyName || null,
   description: u.description || "",
   logoUrl: u.logoUrl || null,
+  avatarUrl: u.avatarUrl || null,
   category: u.category || "",
   location: u.location || null,
   isOnboarded: u.isOnboarded,
@@ -182,10 +183,25 @@ exports.registerUser = async (req, res) => {
       verificationToken,
       staffInviteToken,
     } = req.body;
-    const accountRole = staffInviteToken ? "buyer" : role;
+    // Only these roles can be chosen at sign-up. Privileged roles
+    // (super_admin, developer, delivery) are assigned by an administrator.
+    const SELF_SERVICE_ROLES = ["buyer", "vendor", "supplier", "affiliate"];
+    const accountRole = staffInviteToken ? "buyer" : (role || "buyer");
+    if (!SELF_SERVICE_ROLES.includes(accountRole)) {
+      return res.status(400).json({ message: "Please choose a valid account type." });
+    }
 
-    if (!Fullname || !password || !gender || !accountRole) {
-      return res.status(400).json({ message: "All fields are required" });
+    if (!Fullname || typeof Fullname !== "string" || !Fullname.trim() || !password) {
+      return res.status(400).json({ message: "Your name and a password are required" });
+    }
+    if (typeof password !== "string" || password.length < 8) {
+      return res.status(400).json({ message: "Password must be at least 8 characters long" });
+    }
+    if (gender && !["male", "female", "other"].includes(gender)) {
+      return res.status(400).json({ message: "Please choose a valid gender or leave it empty" });
+    }
+    if (email && (typeof email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()))) {
+      return res.status(400).json({ message: "Please enter a valid email address or leave it empty" });
     }
 
     if (!phone && !verificationToken) {
@@ -284,10 +300,10 @@ exports.registerUser = async (req, res) => {
 
     // Create a new user
     const newUser = new User({
-      Fullname: Fullname.trim(),
+      Fullname: Fullname.trim().slice(0, 120),
       email: normalizedEmail,
       password: hashedPassword,
-      gender,
+      gender: gender || undefined,
       phone: verifiedPhone,
       role: accountRole,
       companyName: ["vendor", "supplier"].includes(accountRole) && companyName ? companyName.trim() : undefined,
@@ -426,6 +442,56 @@ exports.loginUser = async (req, res) => {
   } catch (error) {
     console.error("Error logging in user:", error);
     return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+// @desc    Update the signed-in user's own profile
+// @route   PATCH /api/auth/me
+// @access  Private
+// Phone number and role are deliberately not editable here: the phone is the
+// login identity (changing it needs OTP verification) and roles are assigned.
+exports.updateProfile = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ message: "Account not found." });
+
+    const { Fullname, fullName, email, gender } = req.body;
+    const name = typeof (Fullname ?? fullName) === "string" ? (Fullname ?? fullName).trim() : undefined;
+    if (name !== undefined) {
+      if (name.length < 2 || name.length > 120) {
+        return res.status(400).json({ message: "Please enter your full name (2 to 120 characters)." });
+      }
+      user.Fullname = name;
+    }
+
+    if (email !== undefined) {
+      const normalizedEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
+      if (normalizedEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+        return res.status(400).json({ message: "Please enter a valid email address or leave it empty." });
+      }
+      if (normalizedEmail && normalizedEmail !== user.email) {
+        const taken = await User.exists({ email: normalizedEmail, _id: { $ne: user._id } });
+        if (taken) return res.status(400).json({ message: "Another account already uses this email." });
+      }
+      if (!normalizedEmail && !user.phone) {
+        return res.status(400).json({ message: "Your account needs an email or a phone number." });
+      }
+      user.email = normalizedEmail || undefined;
+    }
+
+    if (gender !== undefined) {
+      if (gender && !["male", "female", "other"].includes(gender)) {
+        return res.status(400).json({ message: "Please choose a valid gender or leave it empty." });
+      }
+      user.gender = gender || undefined;
+    }
+
+    await user.save();
+    const response = await buildAuthenticatedUserResponse(user);
+    return res.status(200).json({ message: "Profile updated.", user: response });
+  } catch (error) {
+    console.error("Error updating profile:", error);
+    return res.status(500).json({ message: "Unable to update your profile." });
   }
 };
 
@@ -758,6 +824,7 @@ exports.addAddress = async (req, res) => {
       country,
       provinceState,
       cityDistrict,
+      sector,
       street,
       building,
       apartment,
@@ -767,6 +834,14 @@ exports.addAddress = async (req, res) => {
       isDefaultShipping,
       isDefaultBilling,
     } = req.body;
+
+    if (user.addresses.length >= 10) {
+      return res.status(400).json({ message: "You can save up to 10 addresses. Remove one first." });
+    }
+    const addressPhone = normalizePhone(phone);
+    if (!addressPhone) {
+      return res.status(400).json({ message: "Please enter a valid Rwandan phone number for this address." });
+    }
 
     // Unset current default flags if this address is being set as default
     if (isDefaultShipping) {
@@ -784,11 +859,12 @@ exports.addAddress = async (req, res) => {
       country,
       provinceState,
       cityDistrict,
+      sector,
       street,
       building,
       apartment,
       postalCode,
-      phone,
+      phone: addressPhone,
       deliveryInstructions,
       isDefaultShipping: isFirstAddress ? true : Boolean(isDefaultShipping),
       isDefaultBilling: isFirstAddress ? true : Boolean(isDefaultBilling),
@@ -840,6 +916,13 @@ exports.updateAddress = async (req, res) => {
     }
 
     const { isDefaultShipping, isDefaultBilling, _id, ...updateFields } = req.body;
+    if (updateFields.phone !== undefined) {
+      const addressPhone = normalizePhone(updateFields.phone);
+      if (!addressPhone) {
+        return res.status(400).json({ message: "Please enter a valid Rwandan phone number for this address." });
+      }
+      updateFields.phone = addressPhone;
+    }
 
     // Handle default flag switches across other stored addresses
     if (isDefaultShipping) {

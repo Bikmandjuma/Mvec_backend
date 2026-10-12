@@ -10,6 +10,7 @@ const addressSchema = new mongoose.Schema(
     country: { type: String, required: true },
     provinceState: { type: String, required: true },
     cityDistrict: { type: String, required: true },
+    sector: String,
     street: { type: String, required: true },
     building: String,
     apartment: String,
@@ -45,12 +46,10 @@ const userSchema = new mongoose.Schema(
         return !this.googleId && !this.isVendorStaff && !this.isSupplierStaff;
       },
     },
+    // Optional: the sign-up form offers "Prefer not to say".
     gender: {
       type: String,
       enum: ["male", "female", "other"],
-      required: function () {
-        return !this.googleId && !this.isVendorStaff && !this.isSupplierStaff;
-      },
     },
     phone: {
       type: String,
@@ -107,6 +106,7 @@ const userSchema = new mongoose.Schema(
     isOnboarded: { type: Boolean, default: function () { return !["vendor", "supplier"].includes(this.role); } },
     verificationStatus: { type: String, enum: ["UNVERIFIED", "PENDING", "VERIFIED", "REJECTED"], default: function () { return ["vendor", "supplier"].includes(this.role) ? "UNVERIFIED" : "VERIFIED"; } },
 
+    avatarUrl: { type: String, default: "" },
     addresses: [addressSchema],
 
     resetPasswordToken: { type: String },

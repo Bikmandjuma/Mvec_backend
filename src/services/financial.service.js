@@ -272,3 +272,75 @@ exports.releaseEscrowToVendor = async ({ settlementId, session, adminUserId = nu
 
   return settlement;
 };
+/**
+ * Reverse every HELD settlement of an order after the buyer cancels a paid
+ * order. Undoes exactly what lockPaymentInEscrow recorded: the escrow balance,
+ * the pending wallet balances and the settlement itself, and writes a
+ * BUYER_REFUND ledger entry per vendor. Released settlements are never touched.
+ */
+exports.refundHeldEscrowForOrder = async ({ orderId, session }) => {
+  const settlements = await Settlement.find({ order: orderId, status: "HELD" }).session(session);
+  if (!settlements.length) return [];
+
+  const escrowAccount = await getOrCreateLedgerAccount({ accountType: "ESCROW_HOLDING", session });
+  const developerUserId = settlements.some((s) => s.developerShare > 0) ? await findDefaultDeveloper(session) : null;
+  const adminUserId = settlements.some((s) => s.adminShare > 0) ? await findDefaultAdmin(session) : null;
+
+  for (const settlement of settlements) {
+    const vendorAccount = await getOrCreateLedgerAccount({
+      accountType: "VENDOR_PAYABLE",
+      ownerId: settlement.vendor,
+      session,
+    });
+
+    escrowAccount.balance = Math.max(0, (escrowAccount.balance || 0) - settlement.grossAmount);
+
+    await LedgerEntry.create(
+      [
+        {
+          transactionReference: `MVEC-REFUND-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`,
+          debitAccount: vendorAccount._id,
+          creditAccount: escrowAccount._id,
+          amount: settlement.grossAmount,
+          entryType: "BUYER_REFUND",
+          relatedOrder: orderId,
+          description: `Buyer cancellation refund for Order #${orderId}`,
+        },
+      ],
+      { session }
+    );
+
+    await VendorWallet.updateOne(
+      { vendor: settlement.vendor },
+      { $inc: { pendingBalance: -settlement.netAmount } },
+      { session }
+    );
+    if (settlement.developerShare > 0 && developerUserId) {
+      await DeveloperWallet.updateOne(
+        { developerUser: developerUserId },
+        { $inc: { pendingBalance: -settlement.developerShare } },
+        { session }
+      );
+    }
+    if (settlement.adminShare > 0 && adminUserId) {
+      await AdminWallet.updateOne(
+        { adminUser: adminUserId },
+        { $inc: { pendingBalance: -settlement.adminShare } },
+        { session }
+      );
+    }
+    if (settlement.affiliateShare > 0 && settlement.affiliateUser) {
+      await AffiliateWallet.updateOne(
+        { affiliateUser: settlement.affiliateUser },
+        { $inc: { pendingBalance: -settlement.affiliateShare } },
+        { session }
+      );
+    }
+
+    settlement.status = "REFUNDED";
+    await settlement.save({ session });
+  }
+
+  await escrowAccount.save({ session });
+  return settlements;
+};

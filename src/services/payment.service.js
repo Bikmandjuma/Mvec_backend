@@ -4,6 +4,7 @@ const Payment = require("../models/Payment");
 const PaymentWebhookLog = require("../models/PaymentWebhookLog");
 const financialService = require("./financial.service");
 const pricingService = require("./pricing.service");
+const socketService = require("./socket.service");
 
 /**
  * Record a webhook callback that was intentionally ignored (e.g. non-successful
@@ -56,6 +57,13 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
       return { status: "ALREADY_PAID", order };
     }
 
+    // A late payment on a cancelled/expired order must not revive it: its
+    // stock has already been returned. The failure is logged below so an
+    // admin can refund the buyer.
+    if (order.orderStatus === "CANCELLED") {
+      throw new Error(`Order #${orderId} was cancelled before this payment arrived. Refund required.`);
+    }
+
     // 3. Verify Amount
     if (order.totalAmount !== amount) {
       throw new Error(`Mismatched payment amount. Expected: ${order.totalAmount}, Received: ${amount}`);
@@ -64,7 +72,10 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
     // 4. Update Order Status & Legacy Status Field
     order.paymentStatus = "PAID";
     order.orderStatus = "PROCESSING";
-    order.status = "PAID"; // Reconcile top-level order status
+    order.paidAt = new Date();
+    if (!order.deliveryOtp) {
+      order.deliveryOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    }
     await order.save({ session });
 
     // 4b. Update Payment Record Status
@@ -121,6 +132,10 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
 
     await session.commitTransaction();
     session.endSession();
+
+    // Tell the buyer's open payment page (and dashboards) straight away.
+    socketService.emitOrderStatusUpdate(order);
+    socketService.emitToRoom(`user:${order.user}`, "payment_confirmed", { orderId: order._id.toString() });
 
     return { status: "SUCCESS", order, webhookLog };
   } catch (error) {

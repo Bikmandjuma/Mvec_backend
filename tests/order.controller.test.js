@@ -38,206 +38,91 @@ function createMockReqRes(options = {}) {
 
 describe("Order Controller Unit Tests", () => {
   // ─── 1. createCheckoutOrder ────────────────────────────────────────────────
+  // The full checkout path (stock reservation, totals, cart clearing) runs
+  // against a real in-memory database in tests/buyer.flow.test.js. These unit
+  // tests cover the validation that happens before any stock is touched.
   describe("createCheckoutOrder()", () => {
-    it("should successfully place order, deduct stock, mark out-of-stock, and clear cart", async () => {
-      const buyerId = new mongoose.Types.ObjectId().toString();
-      const vendorId = new mongoose.Types.ObjectId().toString();
-      const productId = new mongoose.Types.ObjectId().toString();
+    const validBody = {
+      shippingAddress: { street: "KN 5 Rd", district: "Nyarugenge", province: "Kigali City" },
+      recipient: { name: "Aline Uwase", phone: "0788123456" },
+      deliveryMethod: "standard",
+    };
 
-      const mockProduct = {
-        _id: productId,
-        name: "Wireless Earbuds",
-        vendor: vendorId,
-        price: 30000,
-        discountPrice: 25000,
-        stockQuantity: 2,
-        status: "ACTIVE",
-        save: async function () {
-          return this;
-        },
-      };
-
-      const mockCart = {
-        user: buyerId,
-        items: [
-          {
-            product: { _id: productId, name: "Wireless Earbuds" },
-            quantity: 2,
-          },
-        ],
-        totalAmount: 50000,
-        save: async function () {
-          return this;
-        },
-      };
-
+    it("should reject checkout when the cart is empty or missing", async () => {
       const originalCartFindOne = Cart.findOne;
-      Cart.findOne = () => ({
-        populate: async () => mockCart,
-      });
-
-      const originalProductFindById = Product.findById;
-      Product.findById = async (id) => {
-        if (id.toString() === productId.toString()) return mockProduct;
-        return null;
-      };
-
-      let createdOrderDoc = null;
-      const originalOrderCreate = Order.create;
-      Order.create = async (orderData) => {
-        createdOrderDoc = { ...orderData, _id: new mongoose.Types.ObjectId() };
-        return createdOrderDoc;
-      };
-
-      try {
-        const { req, res } = createMockReqRes({
-          user: { id: buyerId, role: "buyer" },
-          body: {
-            shippingAddress: {
-              street: "KN 5 Rd",
-              city: "Kigali",
-              state: "Kigali City",
-              country: "Rwanda",
-            },
-            paymentMethod: "MOMO",
-          },
-        });
-
-        await orderController.createCheckoutOrder(req, res);
-
-        assert.equal(res.statusCode, 201);
-        assert.equal(res.jsonData.message, "Order placed successfully");
-        assert.ok(res.jsonData.order);
-        assert.equal(res.jsonData.order.totalAmount, 50000);
-        assert.equal(res.jsonData.order.items.length, 1);
-        assert.equal(res.jsonData.order.items[0].price, 25000);
-
-        // Verify stock deducted to 0 and status updated
-        assert.equal(mockProduct.stockQuantity, 0);
-        assert.equal(mockProduct.status, "OUT_OF_STOCK");
-
-        // Verify cart cleared
-        assert.equal(mockCart.items.length, 0);
-        assert.equal(mockCart.totalAmount, 0);
-      } finally {
-        Cart.findOne = originalCartFindOne;
-        Product.findById = originalProductFindById;
-        Order.create = originalOrderCreate;
+      for (const cart of [null, { items: [] }]) {
+        Cart.findOne = async () => cart;
+        try {
+          const { req, res } = createMockReqRes({ body: validBody });
+          await orderController.createCheckoutOrder(req, res);
+          assert.equal(res.statusCode, 400);
+          assert.equal(res.jsonData.message, "Your cart is empty.");
+        } finally {
+          Cart.findOne = originalCartFindOne;
+        }
       }
     });
 
-    it("should reject checkout when shippingAddress is missing or incomplete", async () => {
-      const { req, res } = createMockReqRes({
-        body: { shippingAddress: { street: "KN 5 Rd" } }, // missing city
-      });
-
-      await orderController.createCheckoutOrder(req, res);
-
-      assert.equal(res.statusCode, 400);
-      assert.equal(
-        res.jsonData.message,
-        "Complete shipping address is required.",
-      );
-    });
-
-    it("should reject checkout when cart is empty or null", async () => {
+    it("should reject an incomplete address or an invalid recipient phone before touching stock", async () => {
+      const productId = new mongoose.Types.ObjectId().toString();
       const originalCartFindOne = Cart.findOne;
-      Cart.findOne = () => ({
-        populate: async () => ({ items: [] }),
-      });
-
+      const originalFind = Product.find;
+      let productLookups = 0;
+      Cart.findOne = async () => ({ items: [{ product: productId, quantity: 1 }] });
+      Product.find = async () => { productLookups += 1; return []; };
       try {
-        const { req, res } = createMockReqRes({
-          body: {
-            shippingAddress: { street: "KG 10 St", city: "Kigali" },
-          },
-        });
-
-        await orderController.createCheckoutOrder(req, res);
-
-        assert.equal(res.statusCode, 400);
-        assert.equal(res.jsonData.message, "Your cart is empty.");
+        const cases = [
+          { ...validBody, shippingAddress: { street: "KN 5 Rd" } },
+          { ...validBody, recipient: { name: "Aline", phone: "12345" } },
+          { ...validBody, shippingAddress: { ...validBody.shippingAddress, province: "Atlantis" } },
+        ];
+        for (const body of cases) {
+          const { req, res } = createMockReqRes({ body });
+          await orderController.createCheckoutOrder(req, res);
+          assert.equal(res.statusCode, 400);
+        }
+        assert.equal(productLookups, 0);
       } finally {
         Cart.findOne = originalCartFindOne;
+        Product.find = originalFind;
       }
     });
 
-    it("should reject checkout when product is INACTIVE", async () => {
+    it("should reject checkout when a product is no longer ACTIVE", async () => {
       const productId = new mongoose.Types.ObjectId().toString();
-      const mockCart = {
-        items: [
-          { product: { _id: productId, name: "Smart Watch" }, quantity: 1 },
-        ],
-      };
-
       const originalCartFindOne = Cart.findOne;
-      Cart.findOne = () => ({
-        populate: async () => mockCart,
-      });
-
-      const originalProductFindById = Product.findById;
-      Product.findById = async () => ({
-        _id: productId,
-        name: "Smart Watch",
-        status: "INACTIVE",
-        stockQuantity: 10,
-      });
-
+      const originalFind = Product.find;
+      Cart.findOne = async () => ({ items: [{ product: productId, quantity: 1 }] });
+      Product.find = async () => [{ _id: productId, name: "Smart Watch", status: "INACTIVE", stockQuantity: 10, price: 1000 }];
       try {
-        const { req, res } = createMockReqRes({
-          body: {
-            shippingAddress: { street: "KG 10 St", city: "Kigali" },
-          },
-        });
-
+        const { req, res } = createMockReqRes({ body: validBody });
         await orderController.createCheckoutOrder(req, res);
-
         assert.equal(res.statusCode, 400);
         assert.ok(res.jsonData.message.includes("no longer available"));
       } finally {
         Cart.findOne = originalCartFindOne;
-        Product.findById = originalProductFindById;
+        Product.find = originalFind;
       }
     });
 
     it("should reject checkout when stock is insufficient", async () => {
       const productId = new mongoose.Types.ObjectId().toString();
-      const mockCart = {
-        items: [{ product: { _id: productId, name: "Laptop" }, quantity: 5 }],
-      };
-
       const originalCartFindOne = Cart.findOne;
-      Cart.findOne = () => ({
-        populate: async () => mockCart,
-      });
-
-      const originalProductFindById = Product.findById;
-      Product.findById = async () => ({
-        _id: productId,
-        name: "Laptop",
-        status: "ACTIVE",
-        stockQuantity: 2, // only 2 available, requested 5
-      });
-
+      const originalFind = Product.find;
+      Cart.findOne = async () => ({ items: [{ product: productId, quantity: 5 }] });
+      Product.find = async () => [{ _id: productId, name: "Laptop", status: "ACTIVE", stockQuantity: 2, price: 1000 }];
       try {
-        const { req, res } = createMockReqRes({
-          body: {
-            shippingAddress: { street: "KG 10 St", city: "Kigali" },
-          },
-        });
-
+        const { req, res } = createMockReqRes({ body: validBody });
         await orderController.createCheckoutOrder(req, res);
-
         assert.equal(res.statusCode, 400);
-        assert.ok(res.jsonData.message.includes("Insufficient stock"));
+        assert.ok(res.jsonData.message.includes("Only 2"));
       } finally {
         Cart.findOne = originalCartFindOne;
-        Product.findById = originalProductFindById;
+        Product.find = originalFind;
       }
     });
   });
 
-  // ─── 2. getMyOrders ────────────────────────────────────────────────────────
   describe("getMyOrders()", () => {
     it("should return orders for logged-in buyer sorted by createdAt descending", async () => {
       const userId = new mongoose.Types.ObjectId().toString();
@@ -339,7 +224,11 @@ describe("Order Controller Unit Tests", () => {
       const mockOrder = {
         _id: orderId,
         user: { _id: buyerId },
-        items: [{ vendor: { _id: vendorId, companyName: "TechStore" } }],
+        deliveryOtp: "123456",
+        items: [
+          { vendor: { _id: vendorId, companyName: "TechStore" } },
+          { vendor: { _id: new mongoose.Types.ObjectId(), companyName: "Other" } },
+        ],
       };
 
       const originalFindById = Order.findById;
@@ -358,6 +247,9 @@ describe("Order Controller Unit Tests", () => {
         await orderController.getOrderById(req, res);
 
         assert.equal(res.statusCode, 200);
+        // Vendors see only their own lines and never the buyer's delivery code.
+        assert.equal(res.jsonData.order.deliveryOtp, undefined);
+        assert.equal(res.jsonData.order.items.length, 1);
       } finally {
         Order.findById = originalFindById;
       }
@@ -731,46 +623,22 @@ describe("Order Controller Unit Tests", () => {
 
   // ─── 7. directCheckout ─────────────────────────────────────────────────────
   describe("directCheckout()", () => {
-    it("should create order with dynamic items, preserved image and PENDING status", async () => {
-      const buyerId = new mongoose.Types.ObjectId().toString();
-      let createdData = null;
+    it("should refuse client-supplied items that do not reference a real product", async () => {
+      // Prices and names must always come from the database, never the client.
+      let created = false;
       const originalCreate = Order.create;
-      Order.create = async (data) => {
-        createdData = { ...data, _id: new mongoose.Types.ObjectId() };
-        return createdData;
-      };
-
+      Order.create = async () => { created = true; };
       try {
         const { req, res } = createMockReqRes({
-          user: { id: buyerId, role: "buyer" },
           body: {
-            items: [
-              {
-                name: "Custom Product",
-                price: 15000,
-                qty: 2,
-                image: "https://example.com/item.png",
-              },
-            ],
-            shippingAddress: {
-              street: "KG 1 Ave",
-              city: "Kigali",
-              state: "Kigali City",
-              country: "Rwanda",
-            },
+            items: [{ name: "Custom Product", price: 1, qty: 2 }],
+            shippingAddress: { street: "KG 1 Ave", district: "Gasabo", province: "Kigali City" },
+            recipient: { name: "Aline Uwase", phone: "0788123456" },
           },
         });
-
         await orderController.directCheckout(req, res);
-
-        assert.equal(res.statusCode, 201);
-        assert.equal(res.jsonData.message, "Order placed successfully");
-        assert.ok(createdData);
-        assert.equal(createdData.orderStatus, "PENDING");
-        assert.equal(createdData.paymentStatus, "PENDING");
-        assert.equal(createdData.items[0].name, "Custom Product");
-        assert.equal(createdData.items[0].image, "https://example.com/item.png");
-        assert.equal(createdData.totalAmount, 30000);
+        assert.equal(res.statusCode, 400);
+        assert.equal(created, false);
       } finally {
         Order.create = originalCreate;
       }
