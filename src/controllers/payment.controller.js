@@ -104,6 +104,7 @@ function mobileMoneyHandler(explicitProvider) {
         userId: req.user._id,
         gatewayService: paypackGateway,
         explicitProvider,
+        reqUserId: req.user.id || req.user._id.toString(),
       });
       return res.status(200).json(result);
     } catch (error) {
@@ -127,9 +128,16 @@ exports.initiateAirtelPayment = mobileMoneyHandler("AIRTEL");
 //     server (e.g. local development).
 exports.checkPaymentStatus = async (req, res) => {
   try {
+    if (!mongoose.isValidObjectId(req.params.paymentId)) {
+      return res.status(400).json({ message: "Invalid payment ID." });
+    }
     const payment = await Payment.findById(req.params.paymentId);
     const isOwner = payment && (!payment.user || payment.user.equals(req.user._id));
     if (!payment || (!isOwner && req.user.role !== "super_admin")) {
+      return res.status(404).json({ message: "Payment not found." });
+    }
+    const paymentOrder = await Order.findById(payment.parentOrder).select("user");
+    if (!paymentOrder || paymentOrder.user.toString() !== req.user.id) {
       return res.status(404).json({ message: "Payment not found." });
     }
 
@@ -153,16 +161,35 @@ exports.checkPaymentStatus = async (req, res) => {
 
 // Direct payment confirmation endpoint (for Card, Bank, or dev confirmation)
 exports.confirmPayment = async (req, res) => {
+  if (process.env.NODE_ENV === "production") {
+    return res.status(403).json({ message: "Direct payment confirmation is disabled in production." });
+  }
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
     const { orderId, method = "CARD" } = req.body;
+    if (!mongoose.isValidObjectId(orderId)) {
+      await session.abortTransaction();
+      return res.status(400).json({ message: "Invalid order ID." });
+    }
+    if (!["CARD", "BANK"].includes(method)) {
+      await session.abortTransaction();
+      return res.status(400).json({ message: "Direct confirmation only supports CARD or BANK." });
+    }
 
     const order = await Order.findById(orderId).session(session);
     if (!order) {
       await session.abortTransaction();
       return res.status(404).json({ message: "Order not found." });
+    }
+    if (order.user.toString() !== req.user.id) {
+      await session.abortTransaction();
+      return res.status(404).json({ message: "Order not found." });
+    }
+    if (order.paymentStatus === "PAID") {
+      await session.abortTransaction();
+      return res.status(409).json({ message: "Order is already paid." });
     }
 
     order.paymentStatus = "PAID";
