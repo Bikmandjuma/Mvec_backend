@@ -5,6 +5,7 @@ const settlementSchema = new mongoose.Schema(
     settlementReference: { type: String, required: true, unique: true, index: true },
     order: { type: mongoose.Schema.Types.ObjectId, ref: "Order", required: true },
     vendor: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    orderItemId: { type: mongoose.Schema.Types.ObjectId, default: null },
     grossAmount: { type: Number, required: true },
     commissionAmount: { type: Number, required: true },
     netAmount: { type: Number, required: true },
@@ -23,6 +24,11 @@ const settlementSchema = new mongoose.Schema(
     adminHoldReason: { type: String, default: null },
   },
   { timestamps: true }
+);
+
+settlementSchema.index(
+  { order: 1, orderItemId: 1 },
+  { unique: true, partialFilterExpression: { orderItemId: { $type: "objectId" } } }
 );
 
 module.exports = mongoose.model("Settlement", settlementSchema);
