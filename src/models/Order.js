@@ -99,6 +99,15 @@ const orderSchema = new mongoose.Schema(
       default: "MOMO",
     },
     deliveryOtp: String,
+    // Wrong delivery codes entered; locked after 5 so it cannot be guessed.
+    deliveryOtpAttempts: { type: Number, default: 0 },
+    // Courier assigned by an admin (role "delivery"). Optional: a vendor can
+    // also deliver its own items and confirm with the buyer's code.
+    courier: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    // Vendors whose items were handed over (multi-vendor orders complete when all are in).
+    deliveredVendors: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+    shippedAt: Date,
+    paymentReminderSentAt: Date,
     isDelivered: {
       type: Boolean,
       default: false,

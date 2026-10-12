@@ -91,19 +91,10 @@ exports.generateOtpCode = (length = 6) => {
  * @param {object} [opts] - optional metadata
  * @returns {Promise<void>}
  */
-exports.sendOtpSms = async (phone, code, opts = {}) => {
-  const provider = (process.env.SMS_PROVIDER || "").toLowerCase();
-  const smsFrom = process.env.SMS_FROM_NAME || "MVEC";
-
-  if (provider === "log" || !provider) {
-    // Development fallback: surface the code so it can be tested locally.
-    console.log(`[OTP] ${smsFrom}: verification code for ${phone} is ${code}`);
-    return;
-  }
-
-  // Example adapter hook — replace with a real SMS gateway integration.
-  console.log(
-    `[OTP] SMS provider "${provider}" not implemented; code for ${phone} is ${code}`,
-  );
-  return;
+exports.sendOtpSms = async (phone, code) => {
+  // Delivered through the shared messaging service (Pindo / Africa's Talking,
+  // or printed to the log in development). Throws when SMS is unavailable so
+  // callers can tell the user instead of pretending the code was sent.
+  const { sendSms } = require("../services/messaging.service");
+  await sendSms(phone, `Your MVEC verification code is ${code}. It expires in 5 minutes. Never share it.`);
 };
