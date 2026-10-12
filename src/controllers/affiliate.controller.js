@@ -1,7 +1,7 @@
 const affiliateService = require("../services/affiliate.service");
 
 // "…not found" errors deserve a real 404; everything else is a validation error.
-const statusFor = (error) => (/not found/i.test(error?.message || "") ? 404 : 400);
+const statusFor = (error) => (/not found|invalid or inactive/i.test(error?.message || "") ? 404 : 400);
 const fail = (res, error) =>
   res.status(statusFor(error)).json({ success: false, message: error.message });
 
@@ -17,32 +17,34 @@ exports.generateLink = async (req, res) => {
       label || ""
     );
 
+    const mapped = affiliateService._mapLink(link);
     return res.status(201).json({
       success: true,
       message: "Affiliate referral link created.",
       // `link` is what the app reads; `data` kept for older clients.
-      link,
-      data: link,
+      link: mapped,
+      data: mapped,
     });
   } catch (error) {
-    return res.status(400).json({ success: false, message: error.message });
+    return fail(res, error);
   }
 };
 
 exports.trackClick = async (req, res) => {
   try {
     const { code } = req.params;
-    const visitorIp = req.ip;
-    const buyerUserId = req.user ? req.user.id : null;
-
-    const result = await affiliateService.trackClick(code, visitorIp, buyerUserId);
+    const result = await affiliateService.trackClick(code, {
+      visitorIp: req.ip,
+      visitorId: req.query.visitorId || req.get("x-visitor-id"),
+      buyerUserId: req.user ? req.user.id : null,
+    });
 
     return res.status(200).json({
       success: true,
       data: result,
     });
   } catch (error) {
-    return res.status(400).json({ success: false, message: error.message });
+    return fail(res, error);
   }
 };
 
@@ -180,7 +182,10 @@ exports.getOverview = async (req, res) => {
 
 exports.listLinks = async (req, res) => {
   try {
-    const data = await affiliateService.listLinks(req.user.id);
+    const data = await affiliateService.listLinks(req.user.id, {
+      status: req.query.status,
+      q: req.query.q,
+    });
     return res.status(200).json({ success: true, data });
   } catch (error) {
     return fail(res, error);

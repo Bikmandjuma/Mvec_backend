@@ -4,6 +4,7 @@ const Payment = require("../models/Payment");
 const PaymentWebhookLog = require("../models/PaymentWebhookLog");
 const financialService = require("./financial.service");
 const pricingService = require("./pricing.service");
+const affiliateAttribution = require("./affiliateAttribution.service");
 
 /**
  * Record a webhook callback that was intentionally ignored (e.g. non-successful
@@ -81,10 +82,12 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
     );
 
     // 5. Generate Pricing Snapshots & Lock Escrow Funds per Vendor Item
-    const hasAffiliate = !!(order.affiliateUser && order.affiliateCode);
-    const affiliateUserId = hasAffiliate ? order.affiliateUser : null;
-
     for (const item of order.items) {
+      // Attribution is per order item: only promoted items earn a commission.
+      const aff = affiliateAttribution.itemAffiliate(order, item);
+      const hasAffiliate = !!aff;
+      const affiliateUserId = hasAffiliate ? aff.user : null;
+
       const snapshot = await pricingService.createItemPricingSnapshot({
         orderId: order._id,
         item,
@@ -93,7 +96,7 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
         gatewayFee,
       });
 
-      await financialService.lockPaymentInEscrow({
+      const settlement = await financialService.lockPaymentInEscrow({
         orderId: order._id,
         vendorId: item.vendor,
         grossAmount: snapshot.grossTotal,
@@ -101,7 +104,10 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
         session,
         split: snapshot,
         affiliateUserId,
+        orderItemId: item._id,
       });
+
+      await affiliateAttribution.recordConversion({ order, item, settlement, session });
     }
 
     // 6. Record or Update Idempotency Webhook Log & Explicitly Clear Previous Errors
