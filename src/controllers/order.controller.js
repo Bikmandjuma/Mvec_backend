@@ -121,9 +121,13 @@ exports.getMyOrders = async (req, res) => {
 // @route   GET /api/orders/deliverable
 exports.getDeliverable = async (req, res) => {
   try {
+    // Paid orders, plus confirmed cash-on-delivery orders (paid at the door).
     const query = {
-      paymentStatus: "PAID",
-      orderStatus: { $nin: ["DELIVERED", "COMPLETED", "CANCELLED", "REFUNDED", "FAILED"] },
+      $or: [
+        { paymentStatus: "PAID" },
+        { paymentMethod: "CASH_ON_DELIVERY", paymentStatus: "PENDING", orderStatus: { $ne: "PENDING" } },
+      ],
+      orderStatus: { $nin: ["PENDING", "DELIVERED", "COMPLETED", "CANCELLED", "REFUNDED", "RETURNED", "FAILED"] },
     };
     if (req.user.role === "vendor") query["items.vendor"] = req.user.id;
     if (["delivery", "courier"].includes(req.user.role)) query.courier = req.user.id;
@@ -214,10 +218,15 @@ exports.getVendorOrders = async (req, res) => {
         paidOffline: order.paidOffline,
         paymentMethod: order.paymentMethod,
         shippingAddress: order.shippingAddress,
+        recipient: order.recipient,
         paymentStatus: order.paymentStatus,
         orderStatus: order.orderStatus,
         createdAt: order.createdAt,
+        updatedAt: order.updatedAt,
         items: vendorItems,
+        // Whether this seller already handed its items over (multi-seller orders).
+        deliveredVendors: order.deliveredVendors || [],
+        shippingBreakdown: (order.shippingBreakdown || []).filter((s) => s.vendor && vendorIds.includes(s.vendor.toString())),
         vendorSubtotal: vendorItems.reduce(
           (sum, item) => sum + item.price * item.quantity,
           0,
@@ -232,7 +241,7 @@ exports.getVendorOrders = async (req, res) => {
 
     return res.status(200).json({ orders: filteredOrders });
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    return sendError(res, error, "We could not load your orders right now. Please refresh in a moment.");
   }
 };
 
@@ -263,7 +272,7 @@ async function advanceFulfilment({ order, status, actor }) {
     throw checkoutService.httpError(400, `This order is ${String(order.orderStatus).toLowerCase()} and can no longer change.`);
   }
   if (FULFILMENT_FLOW.indexOf(next) <= current) {
-    throw checkoutService.httpError(400, "An order can only move forward.");
+    throw checkoutService.httpError(400, `This order is already ${String(order.orderStatus).toLowerCase().replace(/_/g, " ")}. Choose a later step.`);
   }
   order.orderStatus = next;
   if (next === "SHIPPED" && !order.shippedAt) order.shippedAt = new Date();

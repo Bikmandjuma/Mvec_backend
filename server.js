@@ -40,7 +40,8 @@ if (isMysql) {
     .catch((err) => console.error("Error connecting to MySQL:", err.message));
 } else {
   mongoose.connect(MONGO_URI)
-    .then(() => console.log("Connected to MongoDB Replica Set successfully"))
+    .then(() => require("./src/config/transactions").ensureTransactionSupport(mongoose.connection))
+    .then((replicaSet) => console.log(`Connected to MongoDB${replicaSet ? " replica set" : " (standalone)"} successfully`))
     .catch((err) => console.error("Error connecting to MongoDB:", err));
 }
 
@@ -84,6 +85,8 @@ app.use(express.json({
   },
 }));
 app.use(morgan("dev"));
+// Plain-language errors with a support reference on every 5xx.
+app.use(require("./src/middleware/friendlyErrors"));
 
 // Uploaded product images are returned as public URLs for storefront display.
 app.use("/uploads", express.static(require("path").resolve(__dirname, "uploads")));
@@ -185,17 +188,15 @@ app.use((req, res, next) => {
 // 3. Global Error Handling Middleware (MUST have 4 arguments: err, req, res, next)
 // Express identifies this as an error handler strictly because it has 4 parameters.
 app.use((err, req, res, next) => {
-  console.error(err.stack);
-  
-  const statusCode = err.statusCode || 500;
-  const message = err.message || "Internal Server Error";
-
-  res.status(statusCode).json({
-    success: false,
-    message,
-    // Show stack trace only in development environment
-    ...(process.env.NODE_ENV === "development" && { stack: err.stack }),
-  });
+  // Requests the server could not read are the caller's problem, not ours.
+  if (err.type === "entity.parse.failed") return res.status(400).json({ message: "The request could not be read. Refresh the page and try again." });
+  if (err.type === "entity.too.large") return res.status(413).json({ message: "What you sent is too large. Use a smaller file or less text." });
+  if (err.code === "LIMIT_FILE_SIZE") return res.status(413).json({ message: "That file is too large. Choose a smaller one and try again." });
+  const statusCode = err.statusCode || err.status || 500;
+  if (statusCode < 500) return res.status(statusCode).json({ message: err.message });
+  console.error(err.stack || err);
+  // friendlyErrors turns technical messages into plain ones and adds a reference.
+  return res.status(statusCode).json({ message: err.message });
 });
 
 // Initialize background cron tasks once DB connection is established

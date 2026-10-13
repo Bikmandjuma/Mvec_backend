@@ -1,9 +1,11 @@
-// Sends refunds and affiliate withdrawals to mobile money through Paypack,
+// Sends refunds and seller/affiliate withdrawals to mobile money through Paypack,
 // confirms them from the provider callback (or by polling), and retries.
 const Disbursement = require("../models/Disbursement");
 const Order = require("../models/Order");
 const AffiliatePayout = require("../models/AffiliatePayout");
 const AffiliateWallet = require("../models/AffiliateWallet");
+const VendorWallet = require("../models/VendorWallet");
+const { Payout } = require("../models/Payout");
 const paypackService = require("./paypack.service");
 const notifications = require("./notification.service");
 
@@ -26,6 +28,17 @@ async function onSuccess(d) {
       await notifications.affiliatePayout(payout.affiliateUser, { amount: payout.amount, status: "COMPLETED" });
     }
   }
+  if (d.kind === "VENDOR_PAYOUT" && d.vendorPayout) {
+    const payout = await Payout.findOneAndUpdate(
+      { _id: d.vendorPayout, status: { $in: ["PENDING", "PROCESSING"] } },
+      { $set: { status: "PAID", transferReference: d.gatewayReference, processedAt: new Date() } },
+      { new: true },
+    );
+    if (payout) {
+      await VendorWallet.updateOne({ vendor: payout.vendor }, { $inc: { totalWithdrawn: payout.amount } });
+      await notifications.vendorPayout(payout.vendor, { amount: payout.amount, status: "PAID" }).catch(() => {});
+    }
+  }
 }
 
 async function onFinalFailure(d) {
@@ -43,6 +56,18 @@ async function onFinalFailure(d) {
     if (payout) {
       await AffiliateWallet.updateOne({ affiliateUser: payout.affiliateUser }, { $inc: { availableBalance: payout.amount } });
       await notifications.affiliatePayout(payout.affiliateUser, { amount: payout.amount, status: "FAILED", reason: "The transfer failed and the amount is back in your balance. Check your number and try again." });
+    }
+  }
+  if (d.kind === "VENDOR_PAYOUT" && d.vendorPayout) {
+    // Give the money back to the seller's available balance.
+    const payout = await Payout.findOneAndUpdate(
+      { _id: d.vendorPayout, status: { $in: ["PENDING", "PROCESSING"] } },
+      { $set: { status: "FAILED", rejectionReason: "The mobile money transfer failed. The amount is back in your balance." } },
+      { new: true },
+    );
+    if (payout) {
+      await VendorWallet.updateOne({ vendor: payout.vendor }, { $inc: { availableBalance: payout.amount } });
+      await notifications.vendorPayout(payout.vendor, { amount: payout.amount, status: "FAILED" }).catch(() => {});
     }
   }
 }
@@ -77,10 +102,10 @@ async function attempt(d) {
 
 module.exports = {
   /** Queue a transfer and try it straight away. Safe to call twice with the same key. */
-  async queue({ kind, recipient, phone, amount, order = null, affiliatePayout = null, idempotencyKey }) {
+  async queue({ kind, recipient, phone, amount, order = null, affiliatePayout = null, vendorPayout = null, idempotencyKey }) {
     const existing = await Disbursement.findOne({ idempotencyKey });
     if (existing) return existing;
-    const d = await Disbursement.create({ kind, recipient, phone, amount: Math.round(amount), order, affiliatePayout, idempotencyKey });
+    const d = await Disbursement.create({ kind, recipient, phone, amount: Math.round(amount), order, affiliatePayout, vendorPayout, idempotencyKey });
     return attempt(d);
   },
 
@@ -128,8 +153,8 @@ module.exports = {
     const d = await Disbursement.findById(id);
     if (!d) throw Object.assign(new Error("Transfer not found."), { statusCode: 404 });
     if (d.status === "SUCCESS") throw Object.assign(new Error("This transfer already succeeded."), { statusCode: 400 });
-    if (d.kind === "AFFILIATE_PAYOUT" && d.attempts >= MAX_ATTEMPTS) {
-      throw Object.assign(new Error("This withdrawal was returned to the affiliate's balance. Ask them to request it again."), { statusCode: 400 });
+    if (["AFFILIATE_PAYOUT", "VENDOR_PAYOUT"].includes(d.kind) && d.attempts >= MAX_ATTEMPTS) {
+      throw Object.assign(new Error("This withdrawal was returned to the user's balance. Ask them to request it again."), { statusCode: 400 });
     }
     d.attempts = Math.min(d.attempts, MAX_ATTEMPTS - 1);
     return attempt(d);
