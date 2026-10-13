@@ -61,7 +61,12 @@ function translate(message) {
 function friendlyErrors(req, res, next) {
   const json = res.json.bind(res);
   res.json = (body) => {
-    if (res.statusCode < 500 || !body || typeof body !== "object" || Array.isArray(body)) return json(body);
+    if (!body || typeof body !== "object" || Array.isArray(body)) return json(body);
+    if (res.statusCode < 500) {
+      // A technical id/validation message on a 4xx still needs plain words.
+      const t = typeof body.message === "string" && /cast to|bsonerror|validation failed/i.test(body.message) ? translate(body.message) : null;
+      return json(t && t.status < 500 ? { ...body, message: t.message } : body);
+    }
 
     const reference = body.reference || crypto.randomBytes(4).toString("hex").toUpperCase();
     const original = body.message || body.error?.message || (typeof body.error === "string" ? body.error : "");

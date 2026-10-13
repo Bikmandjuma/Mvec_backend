@@ -36,7 +36,7 @@ async function dropMongo() {
 }
 
 async function startServer(env, port) {
-  const child = spawn(process.execPath, ["server.js"], { cwd: root, env: { ...process.env, ...env, PORT: String(port), NODE_ENV: "development" }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(process.execPath, ["server.js"], { cwd: root, env: { ...process.env, ...env, PORT: String(port), NODE_ENV: "development", RATE_LIMITS: "off" }, stdio: ["ignore", "pipe", "pipe"] });
   let log = "";
   child.stdout.on("data", (d) => { log += d; });
   child.stderr.on("data", (d) => { log += d; });

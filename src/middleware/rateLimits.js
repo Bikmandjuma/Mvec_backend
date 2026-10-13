@@ -1,7 +1,8 @@
 // Request limits for endpoints attackers like to hammer: guessing passwords
 // or codes, creating accounts, and spamming payment prompts or orders.
 // Limits are per client IP (set TRUST_PROXY=1 behind a load balancer so the
-// real client IP is used). Tests run with NODE_ENV=test and skip the limits.
+// real client IP is used). Tests run with NODE_ENV=test and skip the limits;
+// RATE_LIMITS=off does the same for local end-to-end runs (never in production).
 const rateLimit = require("express-rate-limit");
 
 const make = (windowMinutes, limit, message) =>
@@ -10,7 +11,7 @@ const make = (windowMinutes, limit, message) =>
     limit,
     standardHeaders: "draft-7",
     legacyHeaders: false,
-    skip: () => process.env.NODE_ENV === "test",
+    skip: () => process.env.NODE_ENV === "test" || (process.env.RATE_LIMITS === "off" && process.env.NODE_ENV !== "production"),
     message: { message },
   });
 

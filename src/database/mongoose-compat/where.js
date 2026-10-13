@@ -144,11 +144,67 @@ function fieldCondition(entry, path, value) {
     const wantsMissing = value === null || (isOpObject(value) && value.$exists === false);
     return sequelize.literal(wantsMissing ? "1=1" : "1=0");
   }
+  if (child && isOpObject(value) && Object.keys(value).every((k) => k === "$ne" || k === "$nin")) {
+    // Mongo: $ne / $nin on an array path means "no element matches", which
+    // also holds when the array is empty. So: id NOT IN (rows that do match).
+    const positive = value.$ne !== undefined ? value.$ne : { $in: value.$nin };
+    const matchCond = scalarCondition(field, positive, path);
+    const sql = qg().getWhereConditions(matchCond, child.Model.tableName, child.Model);
+    return sequelize.literal(`${qcol("id")} NOT IN (SELECT ${qcol(child.parentKey)} FROM ${qcol(child.Model.tableName)} WHERE ${sql})`);
+  }
   const cond = isArrayField(field) ? arrayCondition(field, value, path) : scalarCondition(field, value, path);
   if (!child) return cond;
   // Embedded array path -> parent id IN (SELECT parentKey FROM child WHERE cond)
   const sql = qg().getWhereConditions(cond, child.Model.tableName, child.Model);
   return sequelize.literal(`${qcol("id")} IN (SELECT ${qcol(child.parentKey)} FROM ${qcol(child.Model.tableName)} WHERE ${sql})`);
+}
+
+// $expr: comparisons and arithmetic over the document's own fields, e.g.
+// { $gt: [{ $subtract: ["$commissionEarned", "$reversedAmount"] }, 0] }.
+// Anything else throws instead of silently matching nothing.
+const EXPR_CMP = { $gt: ">", $gte: ">=", $lt: "<", $lte: "<=", $eq: "<=>", $ne: "<>" };
+const EXPR_MATH = { $add: "+", $subtract: "-", $multiply: "*", $divide: "/" };
+function exprSql(entry, e) {
+  if (typeof e === "string" && e.startsWith("$")) {
+    const { field, child } = resolvePath(entry, e.slice(1));
+    if (!field || child || isArrayField(field)) throw new Error(`$expr field "${e}" is not supported on MySQL`);
+    return field.kind === "number" ? `COALESCE(${qcol(field.column)}, 0)` : qcol(field.column);
+  }
+  if (e === null || ["number", "string", "boolean"].includes(typeof e)) return esc(e);
+  if (e instanceof Date) return esc(e);
+  const keys = e && typeof e === "object" ? Object.keys(e) : [];
+  if (keys.length === 1 && Array.isArray(e[keys[0]])) {
+    const [op] = keys;
+    const args = e[op].map((a) => exprSql(entry, a));
+    if (EXPR_CMP[op] && args.length === 2) return `(${args[0]} ${EXPR_CMP[op]} ${args[1]})`;
+    if (EXPR_MATH[op] && args.length >= 2) return `(${args.join(` ${EXPR_MATH[op]} `)})`;
+    if (op === "$and") return `(${args.join(" AND ")})`;
+    if (op === "$or") return `(${args.join(" OR ")})`;
+  }
+  throw new Error(`$expr ${JSON.stringify(e)} is not supported on MySQL`);
+}
+
+function exprValue(doc, e) {
+  if (typeof e === "string" && e.startsWith("$")) return getP(doc, e.slice(1));
+  if (!e || typeof e !== "object" || e instanceof Date) return e;
+  const [op] = Object.keys(e);
+  const args = (e[op] || []).map((a) => exprValue(doc, a));
+  const n = (v) => Number(v) || 0;
+  switch (op) {
+    case "$gt": return args[0] > args[1];
+    case "$gte": return args[0] >= args[1];
+    case "$lt": return args[0] < args[1];
+    case "$lte": return args[0] <= args[1];
+    case "$eq": return plainVal(args[0]) === plainVal(args[1]);
+    case "$ne": return plainVal(args[0]) !== plainVal(args[1]);
+    case "$add": return args.reduce((a, b) => n(a) + n(b), 0);
+    case "$subtract": return n(args[0]) - n(args[1]);
+    case "$multiply": return args.reduce((a, b) => n(a) * n(b), 1);
+    case "$divide": return n(args[0]) / n(args[1]);
+    case "$and": return args.every(Boolean);
+    case "$or": return args.some(Boolean);
+    default: throw new Error(`$expr operator ${op} is not supported`);
+  }
 }
 
 function buildWhere(entry, filter = {}) {
@@ -159,6 +215,7 @@ function buildWhere(entry, filter = {}) {
     if (key === "$or") parts.push({ [Op.or]: value.map((f) => buildWhere(entry, f)) });
     else if (key === "$and") parts.push({ [Op.and]: value.map((f) => buildWhere(entry, f)) });
     else if (key === "$nor") parts.push({ [Op.not]: { [Op.or]: value.map((f) => buildWhere(entry, f)) } });
+    else if (key === "$expr") parts.push(sequelize.literal(exprSql(entry, value)));
     else if (key === "$text" || key === "$where" || key === "$comment") throw new Error(`${key} is not supported`);
     else parts.push(fieldCondition(entry, key, value));
   }
@@ -201,6 +258,7 @@ function matchDoc(doc, filter = {}) {
     if (k === "$or") return v.some((f) => matchDoc(doc, f));
     if (k === "$and") return v.every((f) => matchDoc(doc, f));
     if (k === "$nor") return !v.some((f) => matchDoc(doc, f));
+    if (k === "$expr") return Boolean(exprValue(doc, v));
     return matchValue(getP(doc, k), v);
   });
 }
