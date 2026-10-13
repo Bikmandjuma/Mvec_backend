@@ -15,6 +15,7 @@ sequelize.addHook("afterConnect", async (connection) => {
 const models = {
   User: require("./models/User")(sequelize),
   UserAddress: require("./models/UserAddress")(sequelize),
+  UserWishlistItem: require("./models/UserWishlistItem")(sequelize),
   Otp: require("./models/Otp")(sequelize),
   Vendor: require("./models/Vendor")(sequelize),
   Store: require("./models/Store")(sequelize),

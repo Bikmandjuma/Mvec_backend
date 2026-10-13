@@ -125,6 +125,7 @@ module.exports = [
       title: str({ required: true }),
       message: text({ apiDefault: "" }),
       reference: str({ default: "" }),
+      link: str({ len: 500, default: "" }),
       channel: en(["IN_APP", "SMS", "PUSH", "EMAIL"], { default: "IN_APP", required: true }),
       isRead: bool(false),
       readAt: date(),
@@ -173,6 +174,7 @@ module.exports = [
       description: text({ apiDefault: "" }),
       phone: str({ len: 30, required: true }),
       email: str({ len: 190, required: true, lowercase: true }),
+      category: str({ len: 120, default: "" }),
       verificationStatus: en(["UNVERIFIED", "PENDING", "VERIFIED", "REJECTED"], { default: "UNVERIFIED", required: true }),
       ratingAvg: num({ required: true, default: 0 }),
       status: en(["ACTIVE", "SUSPENDED", "BLOCKED", "UNDER_REVIEW"], { default: "ACTIVE", required: true }),
@@ -319,7 +321,22 @@ module.exports = [
       link: ref("affiliate_links", { fk: false, index: true }),
       affiliateCode: str({ len: 60, default: "", index: true }),
       buyerUser: ref("users", { fk: false }),
+      product: ref("products", { fk: false, index: true }),
+      visitorId: str({ len: 120, default: "", index: true }),
       visitorIp: str({ len: 64, default: "" }),
+    },
+  },
+  {
+    // Last affiliate click per visitor and product (drives order attribution).
+    model: "AffiliateAttribution", table: "affiliate_attributions", collection: "affiliateattributions",
+    indexes: [{ fields: ["visitorId", "productId"], unique: true }],
+    fields: {
+      visitorId: str({ len: 120, required: true }),
+      product: ref("products", { required: true, fk: false }),
+      link: ref("affiliate_links", { required: true, fk: false }),
+      affiliateUser: ref("users", { required: true, fk: false, index: true }),
+      affiliateCode: str({ len: 60, required: true }),
+      clickedAt: date({ required: true }),
     },
   },
   {
@@ -334,6 +351,8 @@ module.exports = [
       clickCount: int({ required: true, default: 0 }),
       conversionCount: int({ required: true, default: 0 }),
       isActive: bool(true),
+      status: en(["ACTIVE", "TERMINATED"], { default: "ACTIVE", required: true, index: true }),
+      terminatedAt: date(),
     },
   },
   {
@@ -364,8 +383,16 @@ module.exports = [
   },
   {
     model: "ConversionAudit", table: "conversion_audits", collection: "conversionaudits",
-    indexes: [{ fields: ["affiliateUserId", "convertedAt"] }],
+    indexes: [{ fields: ["affiliateUserId", "convertedAt"] }, { fields: ["orderId", "orderItemId"], unique: true }],
     fields: {
+      orderItemId: { type: "ref", ref: "order_items", fk: false, column: "orderItemId" },
+      settlement: ref("settlements", { fk: false }),
+      buyer: ref("users", { fk: false }),
+      quantity: int({ required: true, default: 1 }),
+      clickedAt: date(),
+      reversedAmount: money({ required: true, default: 0 }),
+      unrecoveredAmount: money({ required: true, default: 0 }),
+      approvedAt: date(),
       affiliateUser: ref("users", { required: true, fk: false }),
       link: ref("affiliate_links", { fk: false }),
       targetProduct: ref("products", { fk: false }),
@@ -373,8 +400,79 @@ module.exports = [
       referralCode: str({ len: 60, default: "" }),
       conversionValue: money({ required: true, default: 0 }),
       commissionEarned: money({ required: true, default: 0 }),
-      status: en(["PENDING", "APPROVED", "PAID", "REJECTED"], { default: "PENDING", required: true, index: true }),
+      status: en(["PENDING", "APPROVED", "PAID", "REJECTED", "REVERSED"], { default: "PENDING", required: true, index: true }),
       convertedAt: date(),
+    },
+    children: {
+      // Commission clawed back after a refund or cancellation.
+      reversals: {
+        model: "ConversionReversal", table: "conversion_reversals", parentKey: "conversionAuditId",
+        fields: {
+          key: str({ len: 120, required: true }),
+          amount: money({ required: true }),
+          reason: str({ len: 300, default: "" }),
+          at: date({ default: "now" }),
+        },
+      },
+    },
+  },
+  {
+    model: "SupplierReview", table: "supplier_reviews", collection: "supplierreviews",
+    indexes: [{ fields: ["supplierId", "vendorId", "wholesaleOrderId"], unique: true }, { fields: ["supplierId", "createdAt"] }],
+    fields: {
+      supplier: ref("suppliers", { required: true, fk: false }),
+      vendor: ref("users", { required: true, fk: false }),
+      wholesaleOrder: ref("wholesale_orders", { required: true, fk: false }),
+      rating: num({ required: true }),
+      comment: text({ apiDefault: "" }),
+      reply: text({ apiDefault: "" }),
+    },
+  },
+  {
+    model: "SupplierSupplyRequest", table: "supplier_supply_requests", collection: "suppliersupplyrequests",
+    indexes: [{ fields: ["supplierId", "createdAt"] }],
+    fields: {
+      supplier: ref("suppliers", { required: true, fk: false, index: true }),
+      reference: str({ len: 60, required: true, unique: true }),
+      neededBy: date({ required: true }),
+      note: text({ apiDefault: "" }),
+      status: en(["SUBMITTED", "UNDER_REVIEW", "APPROVED", "SOURCING", "IN_TRANSIT", "RECEIVED", "REJECTED", "CANCELLED"], { default: "SUBMITTED", required: true, index: true }),
+      decision: text({ apiDefault: "" }),
+    },
+    children: {
+      lines: {
+        model: "SupplierSupplyRequestLine", table: "supplier_supply_request_lines", parentKey: "supplyRequestId",
+        fields: {
+          product: str({ len: 200, required: true }),
+          category: str({ len: 120, default: "General" }),
+          units: num({ required: true }),
+          unit: str({ len: 40, required: true }),
+          unitPrice: money({ required: true }),
+          note: str({ len: 500, default: "" }),
+        },
+      },
+      events: {
+        model: "SupplierSupplyRequestEvent", table: "supplier_supply_request_events", parentKey: "supplyRequestId",
+        fields: {
+          at: date({ default: "now" }),
+          title: str({ len: 200, required: true }),
+          detail: text({ apiDefault: "" }),
+        },
+      },
+    },
+  },
+  {
+    model: "SupplierTeamMember", table: "supplier_team_members", collection: "supplierteammembers",
+    indexes: [{ fields: ["supplierId", "createdAt"] }],
+    fields: {
+      supplier: ref("suppliers", { required: true, fk: false, index: true }),
+      user: ref("users", { fk: false, index: true }),
+      fullName: str({ len: 150, required: true }),
+      phone: str({ len: 30, required: true }),
+      email: str({ len: 190, default: "" }),
+      role: en(["OPERATIONS", "WAREHOUSE", "FULFILMENT", "FINANCE", "VIEWER"], { default: "VIEWER", required: true }),
+      status: en(["ACTIVE", "INVITED", "SUSPENDED"], { default: "ACTIVE", required: true }),
+      note: str({ len: 500, default: "" }),
     },
   },
   {
