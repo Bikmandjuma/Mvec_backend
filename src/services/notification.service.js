@@ -224,6 +224,18 @@ module.exports = {
     });
   },
 
+  async vendorPayout(vendorId, { amount, status }) {
+    await notify(vendorId, {
+      type: "PAYOUT",
+      title: status === "PAID" ? "Withdrawal sent" : "Withdrawal failed",
+      message: status === "PAID"
+        ? `${money(amount)} was sent to your mobile money.`
+        : `The ${money(amount)} transfer failed and the amount is back in your balance. Check your number and try again.`,
+      link: "/vendor/payouts",
+      sms: status === "PAID" ? `MVEC: your ${money(amount)} withdrawal was sent to your mobile money.` : undefined,
+    });
+  },
+
   async affiliatePayout(affiliateUserId, { amount, status, reason }) {
     const titles = { COMPLETED: "Withdrawal sent", FAILED: "Withdrawal failed", REJECTED: "Withdrawal rejected", PROCESSING: "Withdrawal in progress" };
     await notify(affiliateUserId, {

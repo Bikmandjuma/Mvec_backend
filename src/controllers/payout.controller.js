@@ -1,5 +1,9 @@
 // src/controllers/payout.controller.js
+const mongoose = require("mongoose");
 const { Payout, VendorBalance } = require("../models/Payout");
+const VendorWallet = require("../models/VendorWallet");
+const Settlement = require("../models/Settlement");
+const disbursementService = require("../services/disbursement.service");
 const Order = require("../models/Order");
 const { formatRwandanPhone } = require("../utils/momo.util");
 
@@ -8,85 +12,117 @@ const { TOTAL_PLATFORM_FEE_PERCENT } = require("../config/revenueSplit");
 // Helper: Generate unique payout reference number
 const generatePayoutNumber = () => `PAY-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
 
+// The seller's money lives in VendorWallet: escrow releases credit it on
+// delivery (financial.service). VendorBalance is the old, unused ledger.
+const MIN_PAYOUT = 1000;
+const walletOf = async (vendorId) =>
+  (await VendorWallet.findOne({ vendor: vendorId })) || { pendingBalance: 0, availableBalance: 0, totalEarned: 0, totalWithdrawn: 0 };
+
 // @desc    Get Vendor Financial Balance Summary
 // @route   GET /api/payouts/balance
 // @access  Private (Vendor)
 exports.getVendorBalance = async (req, res) => {
   try {
-    const userId = req.user.id || req.user._id;
-    let balance = await VendorBalance.findOne({ vendor: userId });
-    if (!balance) {
-      balance = await VendorBalance.create({ vendor: userId });
-    }
+    const vendorId = req.vendorId || req.targetVendorId || req.user.id;
+    const [wallet, fees] = await Promise.all([
+      walletOf(vendorId),
+      Settlement.aggregate([
+        { $match: { vendor: new mongoose.Types.ObjectId(String(vendorId)), status: "RELEASED" } },
+        { $group: { _id: null, commission: { $sum: "$commissionAmount" } } },
+      ]).catch(() => []),
+    ]);
+    const balance = {
+      pendingBalance: wallet.pendingBalance || 0,
+      availableBalance: wallet.availableBalance || 0,
+      totalEarned: wallet.totalEarned || 0,
+      totalWithdrawn: wallet.totalWithdrawn || 0,
+      withdrawnAmount: wallet.totalWithdrawn || 0,
+      commissionPaid: fees[0]?.commission || 0,
+    };
     return res.status(200).json({ balance, commissionRate: `${TOTAL_PLATFORM_FEE_PERCENT}%` });
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    console.error("Vendor balance failed:", error);
+    return res.status(500).json({ message: "We could not load your balance right now. Your money is safe; refresh in a moment." });
   }
 };
 
-// @desc    Automated Vendor Instant Payout / Withdrawal Request
-// @route   POST /api/payouts/request
-// @access  Private (Vendor)
+// @desc    Withdraw available balance to mobile money
+// @route   POST /api/payouts/request   { amount, payoutDetails: { accountName, accountNumber } }
+// @access  Private (Vendor, staff with canManagePayouts)
 exports.requestPayout = async (req, res) => {
+  const vendorId = req.vendorId || req.targetVendorId || req.user.id;
+  let reserved = 0;
+  let payoutId = null;
   try {
-    const { amount, payoutMethod, payoutDetails } = req.body;
-    const userId = req.user.id || req.user._id;
+    const amount = Math.round(Number(req.body.amount));
+    const payoutDetails = req.body.payoutDetails || {};
 
-    if (!amount || amount <= 0) {
-      return res.status(400).json({ message: "Valid withdrawal amount is required." });
+    if (!Number.isFinite(amount) || amount < MIN_PAYOUT) {
+      return res.status(400).json({ message: `Enter an amount of at least ${MIN_PAYOUT.toLocaleString("en-US")} RWF.` });
     }
-
-    if (!payoutDetails || !payoutDetails.accountName || !payoutDetails.accountNumber) {
-      return res.status(400).json({ message: "Amount and complete payout details are required." });
+    if (!String(payoutDetails.accountName || "").trim() || !payoutDetails.accountNumber) {
+      return res.status(400).json({ message: "Enter the account holder's name and the mobile money number to pay." });
     }
-
-    // Format & validate Rwandan Phone Number for MOMO / AIRTEL
     const phoneInfo = formatRwandanPhone(payoutDetails.accountNumber);
     if (!phoneInfo) {
-      return res.status(400).json({
-        message: "Invalid Rwandan phone number. Must start with 078/079 (MTN) or 073 (Airtel).",
-      });
+      return res.status(400).json({ message: "Enter a Rwandan mobile money number: 078/079 (MTN) or 072/073 (Airtel)." });
     }
 
-    const determinedMethod = payoutMethod || (phoneInfo.provider === "MTN" ? "MOMO" : "AIRTEL");
-    payoutDetails.accountNumber = phoneInfo.formattedNumber;
-    payoutDetails.bankName = phoneInfo.provider === "MTN" ? "MTN MoMo" : "Airtel Money";
-
-    let balance = await VendorBalance.findOne({ vendor: userId });
-    if (!balance || balance.availableBalance < amount) {
-      return res.status(400).json({
-        message: `Insufficient available balance. Available: ${balance ? balance.availableBalance : 0} RWF`,
-      });
+    // Reserve the money first; this fails if the balance is too low, even
+    // when two withdrawals are sent at the same time.
+    const wallet = await VendorWallet.findOneAndUpdate(
+      { vendor: vendorId, availableBalance: { $gte: amount } },
+      { $inc: { availableBalance: -amount } },
+      { new: true },
+    );
+    if (!wallet) {
+      const current = await walletOf(vendorId);
+      return res.status(400).json({ message: `You can withdraw up to ${Number(current.availableBalance || 0).toLocaleString("en-US")} RWF right now. Money from an order becomes available once the buyer confirms delivery.` });
     }
+    reserved = amount;
 
-    // 1. Deduct from available balance & credit lifetime withdrawn amount immediately
-    balance.availableBalance -= amount;
-    balance.withdrawnAmount = (balance.withdrawnAmount || 0) + amount;
-    await balance.save();
-
-    // 2. Automatically create and complete payout record
     const payout = await Payout.create({
-      vendor: userId,
+      vendor: vendorId,
       payoutNumber: generatePayoutNumber(),
       amount,
-      payoutMethod: determinedMethod,
-      payoutDetails,
-      status: "PAID", // Auto-approved and marked as PAID instantly
-      processedAt: new Date(),
+      payoutMethod: phoneInfo.provider === "MTN" ? "MOMO" : "AIRTEL",
+      payoutDetails: {
+        accountName: String(payoutDetails.accountName).trim().slice(0, 100),
+        accountNumber: phoneInfo.formattedNumber,
+        bankName: phoneInfo.provider === "MTN" ? "MTN MoMo" : "Airtel Money",
+      },
+      status: "PROCESSING",
     });
+    payoutId = payout._id;
 
-    // Note: Gateway disbursement API (e.g. Paystack Transfer / MoMo API call) triggers here seamlessly
+    const transfer = await disbursementService.queue({
+      kind: "VENDOR_PAYOUT",
+      recipient: vendorId,
+      phone: phoneInfo.formattedNumber,
+      amount,
+      vendorPayout: payout._id,
+      idempotencyKey: `vendor-payout:${payout._id}`,
+    });
+    reserved = 0; // the disbursement service now owns the money and refunds it on final failure
+    const fresh = await Payout.findById(payout._id);
+    const sent = fresh?.status === "PAID";
 
     return res.status(201).json({
-      message: `Instant payout of ${amount} RWF disbursed to ${payoutDetails.bankName} (${phoneInfo.localNumber}).`,
-      payout,
-      updatedBalance: {
-        availableBalance: balance.availableBalance,
-        withdrawnAmount: balance.withdrawnAmount,
-      },
+      message: sent
+        ? `${amount.toLocaleString("en-US")} RWF was sent to ${phoneInfo.localNumber}.`
+        : transfer?.status === "FAILED"
+          ? `We could not reach the mobile money network yet. Your ${amount.toLocaleString("en-US")} RWF is reserved and we will retry automatically; if it still fails, it returns to your balance.`
+          : `Your ${amount.toLocaleString("en-US")} RWF withdrawal to ${phoneInfo.localNumber} is on its way. You will get a notification when it arrives.`,
+      payout: fresh || payout,
+      updatedBalance: { availableBalance: wallet.availableBalance },
     });
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    if (reserved) {
+      await VendorWallet.updateOne({ vendor: vendorId }, { $inc: { availableBalance: reserved } }).catch(() => {});
+      if (payoutId) await Payout.updateOne({ _id: payoutId }, { $set: { status: "FAILED", rejectionReason: "Could not be started." } }).catch(() => {});
+    }
+    console.error("Vendor payout failed:", error);
+    return res.status(500).json({ message: "Something went wrong on our side while starting your withdrawal. No money left your balance; please try again." });
   }
 };
 
