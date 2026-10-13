@@ -183,7 +183,7 @@ exports.confirmPayment = async (req, res) => {
       await session.abortTransaction();
       return res.status(404).json({ message: "Order not found." });
     }
-    if (order.user.toString() !== req.user.id) {
+    if (!order.user || order.user.toString() !== req.user.id) {
       await session.abortTransaction();
       return res.status(404).json({ message: "Order not found." });
     }

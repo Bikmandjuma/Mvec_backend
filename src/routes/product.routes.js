@@ -9,6 +9,7 @@ const {
   getProductById,
   getProductBySlug,
 } = require("../controllers/product.controller");
+const { adjustStock, moveProductsToStore, listStockMovements } = require("../controllers/inventory.controller");
 const { checkStaffPermission } = require("../middleware/staff.middleware");
 
 const { protect } = require("../middleware/auth.middleware");
@@ -28,6 +29,10 @@ router.use(protect);
 // Registered BEFORE "/:id" so the literal segment never gets swallowed by route params.
 router.get("/vendor/me", authorize("vendor"), getVendorProducts);
 
+// Inventory operations (stock movements history, bulk store moves)
+router.get("/vendor/stock-movements", authorize("vendor"), listStockMovements);
+router.post("/vendor/move-store", checkStaffPermission("canManageProducts"), moveProductsToStore);
+
 // Single product by id (kept after the literal routes to avoid shadowing)
 router.get("/:id", getProductById);
 
@@ -38,6 +43,7 @@ router.get("/:id", getProductById);
 // so it covers all three cases in a single middleware chain.
 router.post("/", checkStaffPermission("canManageProducts"), createProduct);
 router.put("/:id", checkStaffPermission("canManageProducts"), updateProduct);
+router.patch("/:id/stock", checkStaffPermission("canManageProducts"), adjustStock);
 router.delete("/:id", checkStaffPermission("canManageProducts"), deleteProduct);
 
 

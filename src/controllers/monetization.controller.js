@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const Subscription = require("../models/Subscription");
 const BuyerSubscription = require("../models/BuyerSubscription");
 const Advertisement = require("../models/Advertisement");
@@ -430,8 +431,10 @@ exports.updateMyAdvertisementStatus = async (req, res) => {
       return res.status(400).json({ message: "status must be ACTIVE or PAUSED" });
     }
 
+    // The list endpoint exposes publicId as `id`, so accept either identifier.
+    const adId = req.params.id;
     const ad = await Advertisement.findOne({
-      _id: req.params.id,
+      ...(mongoose.isValidObjectId(adId) ? { _id: adId } : { publicId: adId }),
       vendor: vendor._id,
     });
     if (!ad) {

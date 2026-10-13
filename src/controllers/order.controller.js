@@ -8,6 +8,33 @@ const LedgerEntry = require("../models/LedgerEntry");
 const VendorWallet = require("../models/VendorWallet");
 const payoutController = require("./payout.controller");
 const socketService = require("../services/socket.service");
+const shippingService = require("../services/shipping.service");
+
+// Delivery fees are always computed server-side from seller shipping zones.
+// Returns { shipping } or { error } when a seller doesn't deliver to the address.
+const priceShipping = async (lines, shippingAddress, shippingMethod) => {
+  const quote = await shippingService.quoteShipping({ lines, address: shippingAddress, method: shippingMethod });
+  if (!quote.deliverable) {
+    return { error: quote.groups.filter((g) => !g.deliverable).map((g) => g.message).join(" ") };
+  }
+  const { province, district } = quote.address;
+  return {
+    shipping: {
+      shippingFee: quote.shippingFee,
+      shippingMethod: quote.method,
+      shippingBreakdown: quote.groups.map((g) => ({
+        vendor: g.vendor, store: g.store, storeName: g.storeName, zone: g.zone, zoneName: g.zoneName,
+        method: g.method, fee: g.fee, eta: g.eta,
+      })),
+      address: {
+        ...shippingAddress,
+        province: province || shippingAddress.province,
+        district: district || shippingAddress.district || shippingAddress.city,
+        state: province || shippingAddress.state || shippingAddress.province,
+      },
+    },
+  };
+};
 
 // Helper function to generate unique order numbers
 const generateOrderNumber = () => {
@@ -19,7 +46,7 @@ const generateOrderNumber = () => {
 // @access  Private (Buyer/User)
 exports.createCheckoutOrder = async (req, res) => {
   try {
-    const { shippingAddress, paymentMethod = "CARD" } = req.body;
+    const { shippingAddress, paymentMethod = "CARD", shippingMethod = "STANDARD" } = req.body;
 
     if (!shippingAddress || !shippingAddress.street || !shippingAddress.city) {
       return res
@@ -37,6 +64,7 @@ exports.createCheckoutOrder = async (req, res) => {
     }
 
     const orderItems = [];
+    const shippingLines = [];
     let calculatedTotal = 0;
 
     // 2. Validate stock & prepare snapshot items
@@ -57,6 +85,7 @@ exports.createCheckoutOrder = async (req, res) => {
 
       const activePrice = product.discountPrice || product.price;
       calculatedTotal += activePrice * item.quantity;
+      shippingLines.push({ product, quantity: item.quantity, price: activePrice });
 
       orderItems.push({
         product: product._id,
@@ -67,13 +96,20 @@ exports.createCheckoutOrder = async (req, res) => {
       });
     }
 
+    const priced = await priceShipping(shippingLines, shippingAddress, shippingMethod);
+    if (priced.error) return res.status(400).json({ message: priced.error });
+
     // 3. Create the Order document
     const order = await Order.create({
       user: req.user.id,
       orderNumber: generateOrderNumber(),
       items: orderItems,
-      shippingAddress,
-      totalAmount: calculatedTotal,
+      shippingAddress: priced.shipping.address,
+      subtotal: calculatedTotal,
+      shippingFee: priced.shipping.shippingFee,
+      shippingMethod: priced.shipping.shippingMethod,
+      shippingBreakdown: priced.shipping.shippingBreakdown,
+      totalAmount: calculatedTotal + priced.shipping.shippingFee,
       paymentMethod,
     });
 
@@ -108,7 +144,7 @@ exports.createCheckoutOrder = async (req, res) => {
 // @access  Private (Buyer/User)
 exports.directCheckout = async (req, res) => {
   try {
-    const { items, shippingAddress, paymentMethod = "MOMO" } = req.body;
+    const { items, shippingAddress, paymentMethod = "MOMO", shippingMethod = "STANDARD" } = req.body;
 
     if (!shippingAddress || !shippingAddress.street || !shippingAddress.city) {
       return res.status(400).json({ message: "Complete shipping address is required." });
@@ -150,7 +186,7 @@ exports.directCheckout = async (req, res) => {
       const resolvedName = product.name;
       const resolvedImage = product.media?.mainImage || "";
 
-      productsToDecrement.push({ product, qty });
+      productsToDecrement.push({ product, qty, price: resolvedPrice });
 
       orderItems.push({
         product: resolvedProduct,
@@ -162,14 +198,25 @@ exports.directCheckout = async (req, res) => {
       });
     }
 
+    const priced = await priceShipping(
+      productsToDecrement.map(({ product, qty, price }) => ({ product, quantity: qty, price })),
+      shippingAddress,
+      shippingMethod
+    );
+    if (priced.error) return res.status(400).json({ message: priced.error });
+
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
     const order = await Order.create({
       user: req.user.id,
       orderNumber: generateOrderNumber(),
       items: orderItems,
-      shippingAddress,
-      totalAmount: calculatedTotal,
+      shippingAddress: priced.shipping.address,
+      subtotal: calculatedTotal,
+      shippingFee: priced.shipping.shippingFee,
+      shippingMethod: priced.shipping.shippingMethod,
+      shippingBreakdown: priced.shipping.shippingBreakdown,
+      totalAmount: calculatedTotal + priced.shipping.shippingFee,
       paymentMethod,
       paymentStatus: "PENDING",
       orderStatus: "PENDING",
@@ -263,6 +310,10 @@ exports.getVendorOrders = async (req, res) => {
         _id: order._id,
         orderNumber: order.orderNumber,
         user: order.user,
+        source: order.source || "ONLINE",
+        customer: order.customer,
+        paidOffline: order.paidOffline,
+        paymentMethod: order.paymentMethod,
         shippingAddress: order.shippingAddress,
         paymentStatus: order.paymentStatus,
         orderStatus: order.orderStatus,
@@ -272,6 +323,11 @@ exports.getVendorOrders = async (req, res) => {
           (sum, item) => sum + item.price * item.quantity,
           0,
         ),
+        // Delivery fees for this seller's parcels (paid to the seller, no commission).
+        vendorShippingFee: (order.shippingBreakdown || [])
+          .filter((s) => s.vendor && vendorIds.includes(s.vendor.toString()))
+          .reduce((sum, s) => sum + (s.fee || 0), 0),
+        shippingMethod: order.shippingMethod,
       };
     });
 

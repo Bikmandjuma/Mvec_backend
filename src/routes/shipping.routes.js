@@ -5,6 +5,7 @@ const { protect, authorize } = require("../middleware/auth.middleware");
 
 // Public: active, seller-agnostic zones (buyer delivery estimate).
 router.get("/zones", shipping.listZones);
+router.get("/locations", shipping.getLocations);
 
 // Vendors and admins manage zones.
 router.use(protect);
@@ -12,5 +13,7 @@ router.post("/zones", authorize("vendor", "super_admin"), shipping.createZone);
 router.get("/zones/mine", authorize("vendor", "super_admin"), shipping.listZones);
 router.patch("/zones/:id", shipping.updateZone);
 router.delete("/zones/:id", shipping.deleteZone);
+router.post("/quote", shipping.quote);
+router.post("/preview", authorize("vendor", "super_admin"), shipping.preview);
 
 module.exports = router;
