@@ -258,7 +258,7 @@ exports.getHomeFeed = async (req, res) => {
     const [categories, featuredProducts, topVendors] = await Promise.all([
       Category.find({ active: true, parentId: null }).sort({ sortOrder: 1, name: 1 }).limit(8),
       Product.find({ status: "ACTIVE" })
-        .sort({ averageRating: -1, createdAt: -1 })
+        .sort({ createdAt: -1 })
         .limit(10)
         .populate("vendor", "companyName logoUrl"),
       Vendor.find({ verificationStatus: "VERIFIED", status: "ACTIVE" })

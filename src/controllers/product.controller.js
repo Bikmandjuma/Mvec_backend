@@ -340,19 +340,46 @@ exports.getProductBySlug = async (req, res) => {
 // @desc    Get recommended products (sorted by rating and recency)
 // @route   GET /api/products/recommendations
 // @access  Public
+// Personal when signed in: active products from categories the buyer ordered
+// or saved, excluding what they already bought; topped up with popular items.
 exports.getRecommendations = async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit, 10) || 8;
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 8, 1), 24);
+    const PUBLIC_FIELDS = "-costPrice";
+    const populate = (q) => q.populate("vendor", "companyName logoUrl").populate("category", "name slug");
 
-    const featuredProducts = await Product.find({ status: "ACTIVE" })
-      .sort({ averageRating: -1, createdAt: -1 })
-      .limit(limit)
-      .populate("vendor", "companyName logoUrl")
-      .populate("category", "name slug");
-
-    return res.status(200).json({ recommendations: featuredProducts });
+    let picks = [];
+    let personalized = false;
+    if (req.user?.id) {
+      const Order = require("../models/Order");
+      const User = require("../models/User");
+      const [orders, me] = await Promise.all([
+        Order.find({ user: req.user.id, paymentStatus: { $in: ["PAID", "REFUNDED"] } }).select("items").sort({ createdAt: -1 }).limit(20),
+        User.findById(req.user.id).select("wishlist"),
+      ]);
+      const bought = new Set(orders.flatMap((o) => (o.items || []).map((i) => String(i.product))));
+      const categoryIds = [...new Set(orders.flatMap((o) => (o.items || []).map((i) => i.category && String(i.category)).filter(Boolean)))];
+      const savedIds = (me?.wishlist || []).map((w) => String(w.product));
+      if (savedIds.length) {
+        const saved = await Product.find({ _id: { $in: savedIds } }).select("category");
+        saved.forEach((p) => p.category && categoryIds.push(String(p.category)));
+      }
+      if (categoryIds.length) {
+        const found = await populate(Product.find({ status: "ACTIVE", category: { $in: [...new Set(categoryIds)] } }).select(PUBLIC_FIELDS).sort({ createdAt: -1 }).limit(limit * 2));
+        picks = found.filter((p) => !bought.has(String(p._id)) && !savedIds.includes(String(p._id))).slice(0, limit);
+        personalized = picks.length > 0;
+      }
+    }
+    if (picks.length < limit) {
+      const have = new Set(picks.map((p) => String(p._id)));
+      const popular = await populate(Product.find({ status: "ACTIVE" }).select(PUBLIC_FIELDS).sort({ createdAt: -1 }).limit(limit + have.size));
+      picks = picks.concat(popular.filter((p) => !have.has(String(p._id)))).slice(0, limit);
+    }
+    // `recommendations` kept for older clients.
+    return res.status(200).json({ products: picks, recommendations: picks, personalized });
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    console.error("Recommendations failed:", error);
+    return res.status(500).json({ message: "We could not load recommendations right now. Please try again." });
   }
 };
 
