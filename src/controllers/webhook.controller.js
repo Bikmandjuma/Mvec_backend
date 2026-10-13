@@ -282,3 +282,41 @@ exports.handlePaypackWebhook = async (req, res) => {
     return res.status(500).json({ message: error.message });
   }
 };
+
+// @desc    Flutterwave card payment webhook (charge.completed)
+// @route   POST /api/webhooks/flutterwave
+// @access  Public (verified with the dashboard secret hash, then re-checked with Flutterwave's API)
+exports.handleFlutterwaveWebhook = async (req, res) => {
+  const flutterwaveService = require("../services/flutterwave.service");
+  try {
+    if (!flutterwaveService.verifyWebhook(req.headers)) {
+      return res.status(401).json({ message: "Invalid webhook signature" });
+    }
+    const txRef = req.body?.data?.tx_ref;
+    if (!txRef) return res.status(200).json({ success: true, message: "Ignored: no transaction reference." });
+
+    const payment = await Payment.findOne({ transactionReference: txRef, gateway: "FLUTTERWAVE" });
+    if (!payment) return res.status(200).json({ success: true, message: "Ignored: unknown payment." });
+    if (payment.status !== "PENDING") return res.status(200).json({ success: true, message: "Already processed." });
+
+    // Never trust the webhook body: ask Flutterwave for the real status and amount.
+    const result = await flutterwaveService.verifyByReference(txRef);
+    if (result.status === "SUCCESSFUL" && result.currency && result.currency !== "RWF") {
+      return res.status(200).json({ success: false, message: "Unexpected currency; payment left for review." });
+    }
+    const outcome = await paymentService.settleGatewayPayment({
+      payment,
+      provider: "FLUTTERWAVE",
+      status: result.status,
+      amount: result.amount ?? payment.amount,
+      fee: result.fee || 0,
+      payload: result.raw || {},
+      externalTransactionId: result.id,
+    });
+    return res.status(200).json({ success: true, result: outcome?.status || result.status });
+  } catch (error) {
+    console.error("Flutterwave webhook failed:", error);
+    // 500 makes Flutterwave retry later.
+    return res.status(500).json({ message: "Webhook processing failed; it will be retried." });
+  }
+};

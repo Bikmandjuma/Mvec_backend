@@ -892,9 +892,40 @@ paths:
         '502':
           description: Paypack could not be reached or rejected the request
 
+  /payments/pay/card:
+    post:
+      summary: Pay an Order by Card (Visa/Mastercard on Flutterwave's hosted checkout)
+      description: |
+        Returns `checkoutUrl`; send the buyer there. Flutterwave redirects back to
+        `/payment/{orderId}?paymentId=…`, and `/payments/status/{paymentId}` (or the
+        Flutterwave webhook) verifies the result with Flutterwave before the order is paid.
+        Without FLW_SECRET_KEY (development) the payment succeeds immediately.
+      tags: [Payments]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [orderId]
+              properties:
+                orderId:
+                  type: string
+      responses:
+        '200':
+          description: "{ paymentId, status: PENDING | SUCCESS, checkoutUrl }"
+        '400':
+          description: Order already paid or no longer payable
+        '404':
+          description: Not your order
+        '503':
+          description: Card payments not configured (production)
+
   /payments/status/{paymentId}:
     get:
-      summary: Check Payment Status (reconciles with Paypack while pending)
+      summary: Check Payment Status (reconciles with Paypack or Flutterwave while pending)
       tags: [Payments]
       security:
         - BearerAuth: []
@@ -909,6 +940,45 @@ paths:
           description: Current payment status (PENDING, SUCCESS or FAILED) and, for order payments, the order status
         '404':
           description: Payment not found
+
+  /webhooks/flutterwave:
+    post:
+      summary: Flutterwave Card Payment Webhook (verif-hash header, re-verified with Flutterwave)
+      tags: [Payments]
+      parameters:
+        - in: header
+          name: verif-hash
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Processed, ignored or already processed
+        '401':
+          description: Wrong or missing verif-hash
+
+  /buyer/subscription/checkout:
+    post:
+      summary: Pay for Buyer Premium (5,000 RWF / 30 days) by mobile money or card
+      tags: [Buyer Subscription]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                method:
+                  type: string
+                  enum: [momo, card]
+                phoneNumber:
+                  type: string
+                  description: Required for momo
+      responses:
+        '200':
+          description: "{ paymentId, status, checkoutUrl? }; Premium switches on when the payment succeeds"
 
   /webhooks/paypack:
     post:
@@ -1065,7 +1135,7 @@ paths:
   # ==========================================
   # FINANCIAL LEDGER & ESCROW (SUPER ADMIN)
   # ==========================================
-  /financial/ledger:
+  /admin/ledger:
     get:
       summary: Get Double-Entry Ledger Entries (Super Admin Only)
       tags: [Financial Ledger (Admin)]
@@ -1075,7 +1145,7 @@ paths:
         '200':
           description: Audit ledger entries list
 
-  /financial/settlements/{id}/hold:
+  /admin/settlements/{id}/hold:
     patch:
       summary: Place Administrative Hold on Vendor Settlement (Super Admin Only)
       tags: [Financial Ledger (Admin)]
@@ -1090,8 +1160,24 @@ paths:
       responses:
         '200':
           description: Administrative hold applied
+    delete:
+      summary: Lift an Administrative Hold (settlement becomes HELD and releasable again)
+      tags: [Financial Ledger (Admin)]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Hold lifted
+        '400':
+          description: Settlement is not on hold
 
-  /financial/settlements/{id}/release:
+  /admin/settlements/{id}/release:
     post:
       summary: Manually Release Escrow Settlement (Super Admin Only)
       tags: [Financial Ledger (Admin)]

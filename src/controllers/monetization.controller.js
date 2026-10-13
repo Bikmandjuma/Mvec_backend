@@ -1,4 +1,5 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
+const User = require("../models/User");
 const Subscription = require("../models/Subscription");
 const BuyerSubscription = require("../models/BuyerSubscription");
 const Advertisement = require("../models/Advertisement");
@@ -266,11 +267,10 @@ exports.upgradeBuyerSubscription = async (req, res) => {
     const plan = normalizePlan(req.body.plan);
     let subscription = await BuyerSubscription.findOne({ buyer: req.user.id });
 
-    // Premium is a paid plan. Until it has a payment step, buyers cannot
-    // switch it on themselves (otherwise anyone gets it for free).
+    // Premium is switched on only by a payment (POST /api/buyer/subscription/checkout).
     if (plan === "PREMIUM" && !(subscription?.plan === "PREMIUM" && subscription?.status === "ACTIVE")) {
       return res.status(402).json({
-        message: "Premium checkout is not available yet. You have not been charged.",
+        message: "Premium needs a payment. Choose mobile money or card to subscribe; you have not been charged.",
       });
     }
 
@@ -310,6 +310,58 @@ exports.upgradeBuyerSubscription = async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Pay for Premium (5,000 RWF / 30 days) by mobile money or card.
+//          Premium switches on when the payment succeeds.
+// @route   POST /api/buyer/subscription/checkout   { method: "momo" | "card", phoneNumber? }
+// @access  Private (buyer)
+exports.buyerPremiumCheckout = async (req, res) => {
+  const payments = require("./payment.controller");
+  const flutterwave = require("../services/flutterwave.service");
+  const paymentService = require("../services/payment.service");
+  const Payment = require("../models/Payment");
+  const { PREMIUM } = require("../services/buyerSubscription.service");
+  try {
+    const method = String(req.body.method || "momo").toLowerCase();
+    const userId = req.user.id;
+
+    if (method === "momo") {
+      const result = await payments.initiateStandalonePayment({
+        amount: PREMIUM.price, phoneNumber: req.body.phoneNumber, userId,
+        gatewayService: payments.paypackGateway, purpose: "BUYER_PREMIUM",
+      });
+      return res.status(200).json(result);
+    }
+    if (method !== "card") return res.status(400).json({ message: "Choose mobile money or card." });
+
+    if (flutterwave.isSandbox() && process.env.NODE_ENV === "production") {
+      return res.status(503).json({ message: "Card payments are temporarily unavailable. Please pay with mobile money." });
+    }
+    const txRef = `PREM-${userId}-${Date.now()}`;
+    const payment = await Payment.create({
+      user: userId, transactionReference: txRef, method: "CARD", gateway: "FLUTTERWAVE", provider: "CARD",
+      amount: PREMIUM.price, currency: "RWF", status: "PENDING", purpose: "BUYER_PREMIUM",
+    });
+    if (flutterwave.isSandbox()) {
+      const result = await flutterwave.verifyByReference(txRef);
+      await paymentService.settleGatewayPayment({ payment, provider: "FLUTTERWAVE", status: result.status, amount: PREMIUM.price, payload: result.raw, externalTransactionId: result.id });
+      return res.status(200).json({ message: "Card payment confirmed (test mode).", paymentId: payment._id, status: "SUCCESS", checkoutUrl: null });
+    }
+    const buyer = await User.findById(userId).select("Fullname email phone");
+    const frontend = (process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
+    const checkout = await flutterwave.createCheckout({
+      txRef, amount: PREMIUM.price,
+      customer: { email: buyer?.email, phone: buyer?.phone, name: buyer?.Fullname },
+      redirectUrl: `${frontend}/buyer/subscription?paymentId=${payment._id}`,
+      description: "MVEC Premium (30 days)",
+    });
+    return res.status(200).json({ message: "Opening the secure card page…", paymentId: payment._id, status: "PENDING", checkoutUrl: checkout.link });
+  } catch (error) {
+    if (error.statusCode && error.statusCode < 500) return res.status(error.statusCode).json({ message: error.message });
+    console.error("Premium checkout failed:", error);
+    return res.status(502).json({ message: "We could not start the payment right now. You have not been charged; please try again." });
   }
 };
 
@@ -417,7 +469,7 @@ exports.createAdvertisement = async (req, res) => {
     // An ad can only promote one of the vendor's own products.
     let ownProductId = null;
     if (productId) {
-      const owned = mongoose.isValidObjectId(productId)
+      const owned = orm.isValidObjectId(productId)
         ? await Product.exists({ _id: productId, vendor: vendor.user })
         : null;
       if (!owned) {
@@ -466,7 +518,7 @@ exports.updateMyAdvertisementStatus = async (req, res) => {
     // The list endpoint exposes publicId as `id`, so accept either identifier.
     const adId = req.params.id;
     const ad = await Advertisement.findOne({
-      ...(mongoose.isValidObjectId(adId) ? { _id: adId } : { publicId: adId }),
+      ...(orm.isValidObjectId(adId) ? { _id: adId } : { publicId: adId }),
       vendor: vendor._id,
     });
     if (!ad) {
@@ -610,7 +662,7 @@ exports.adminUpdateAdvertisementStatus = async (req, res) => {
       return res.status(400).json({ message: "Invalid advertisement status" });
     }
 
-    if (!mongoose.isValidObjectId(req.params.id)) {
+    if (!orm.isValidObjectId(req.params.id)) {
       return res.status(404).json({ message: "Advertisement campaign not found" });
     }
     const ad = await Advertisement.findById(req.params.id);

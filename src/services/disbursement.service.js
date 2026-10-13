@@ -7,6 +7,7 @@ const AffiliateWallet = require("../models/AffiliateWallet");
 const VendorWallet = require("../models/VendorWallet");
 const { Payout } = require("../models/Payout");
 const paypackService = require("./paypack.service");
+const flutterwaveService = require("./flutterwave.service");
 const notifications = require("./notification.service");
 
 const MAX_ATTEMPTS = 3;
@@ -75,7 +76,9 @@ async function onFinalFailure(d) {
 async function attempt(d) {
   d.attempts += 1;
   try {
-    const result = await paypackService.sendMoney({ amount: d.amount, phone: d.phone });
+    const result = d.channel === "CARD"
+      ? await flutterwaveService.refund({ transactionId: d.cardTransactionId, amount: d.amount })
+      : await paypackService.sendMoney({ amount: d.amount, phone: d.phone });
     d.gatewayReference = result.reference || d.gatewayReference;
     d.lastError = "";
     if (result.status === "SUCCESSFUL") {
@@ -102,11 +105,28 @@ async function attempt(d) {
 
 module.exports = {
   /** Queue a transfer and try it straight away. Safe to call twice with the same key. */
-  async queue({ kind, recipient, phone, amount, order = null, affiliatePayout = null, vendorPayout = null, idempotencyKey }) {
+  async queue({ kind, recipient, phone = null, amount, order = null, affiliatePayout = null, vendorPayout = null, idempotencyKey, channel = "MOMO", cardTransactionId = null }) {
     const existing = await Disbursement.findOne({ idempotencyKey });
     if (existing) return existing;
-    const d = await Disbursement.create({ kind, recipient, phone, amount: Math.round(amount), order, affiliatePayout, vendorPayout, idempotencyKey });
+    const d = await Disbursement.create({ kind, channel, recipient, phone, cardTransactionId, amount: Math.round(amount), order, affiliatePayout, vendorPayout, idempotencyKey });
     return attempt(d);
+  },
+
+  /**
+   * Give a buyer their money back the way they paid: card payments go back to
+   * the card, mobile money to the number that paid (or the recipient's phone).
+   * Returns the transfer, or null when there is nowhere to send it.
+   */
+  async refundPayment({ order, payment, amount, idempotencyKey }) {
+    if (payment?.method === "CARD") {
+      return module.exports.queue({
+        kind: "REFUND", channel: "CARD", recipient: order.user, cardTransactionId: payment.gatewayReference,
+        amount, order: order._id, idempotencyKey,
+      });
+    }
+    const phone = payment?.phoneNumber || order.recipient?.phone;
+    if (!phone) return null;
+    return module.exports.queue({ kind: "REFUND", recipient: order.user, phone, amount, order: order._id, idempotencyKey });
   },
 
   /** Provider callback for a CASHOUT transaction. */
@@ -133,7 +153,9 @@ module.exports = {
     for (const d of due) {
       if (d.status === "SENT" && d.gatewayReference) {
         try {
-          const result = await paypackService.getTransactionStatus(d.gatewayReference);
+          const result = d.channel === "CARD"
+            ? await flutterwaveService.refundStatus(d.gatewayReference)
+            : await paypackService.getTransactionStatus(d.gatewayReference);
           await module.exports.handleCallback({ ref: d.gatewayReference, status: result.status });
           if (result.status === "PENDING") {
             d.nextAttemptAt = new Date(Date.now() + RETRY_DELAY_MS);

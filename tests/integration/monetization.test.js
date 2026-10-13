@@ -1,5 +1,6 @@
-const mongoose = require("mongoose");
-const { MongoMemoryServer } = require("mongodb-memory-server");
+require("../helpers/jest-shim"); // Jest-style API on node:test
+const db = require("../helpers/mysql"); // MySQL test database (first, before models)
+const orm = require("../../src/database/orm");
 const request = require("supertest");
 const jwt = require("jsonwebtoken");
 const express = require("express");
@@ -15,7 +16,6 @@ const Translation = require("../../src/models/Translation");
 
 jest.setTimeout(60000);
 
-let mongoServer;
 let app;
 const JWT_SECRET = "test_monetization_secret_key";
 
@@ -43,28 +43,17 @@ describe("Monetization: Subscriptions, Advertisements & Localization", () => {
     process.env.NODE_ENV = "test";
     process.env.JWT_SECRET = JWT_SECRET;
 
-    mongoServer = await MongoMemoryServer.create({
-      binary: { version: "7.0.0" },
-      replSet: { count: 1 },
-    });
-    const uri = mongoServer.getUri();
-    await mongoose.connect(uri);
+    await db.setup();
 
     app = createTestApp();
   });
 
   afterAll(async () => {
-    await mongoose.disconnect();
-    if (mongoServer) await mongoServer.stop();
+    await db.close();
   });
 
   beforeEach(async () => {
-    await User.deleteMany({});
-    await Vendor.deleteMany({});
-    await Subscription.deleteMany({});
-    await BuyerSubscription.deleteMany({});
-    await Advertisement.deleteMany({});
-    await Translation.deleteMany({});
+    await db.reset();
 
     superAdminUser = await User.create({
       Fullname: "Super Admin",
@@ -268,21 +257,42 @@ describe("Monetization: Subscriptions, Advertisements & Localization", () => {
       expect(res.body.subscription).toBeNull();
     });
 
-    test("POST /api/buyer/subscription activates Premium ad removal", async () => {
-      const res = await request(app)
+    test("Premium is switched on only by a payment", async () => {
+      const direct = await request(app)
         .post("/api/buyer/subscription")
         .set("Authorization", `Bearer ${buyerToken}`)
         .send({ plan: "premium" });
+      expect(direct.status).toBe(402);
+      expect(await BuyerSubscription.findOne({ buyer: buyerUser._id, plan: "PREMIUM" })).toBeNull();
 
-      expect(res.status).toBe(200);
+      // Mobile money in test mode (no Paypack keys) succeeds immediately.
+      const paid = await request(app)
+        .post("/api/buyer/subscription/checkout")
+        .set("Authorization", `Bearer ${buyerToken}`)
+        .send({ method: "momo", phoneNumber: "0788123456" });
+      expect(paid.status).toBe(200);
+      expect(paid.body.status).toBe("SUCCESS");
+
+      const res = await request(app).get("/api/buyer/subscription").set("Authorization", `Bearer ${buyerToken}`);
       expect(res.body.subscription.planKey).toBe("PREMIUM");
-      expect(res.body.subscription.plan).toBe("Buyer Ad Removal");
       expect(res.body.subscription.price).toBe(5000);
       expect(res.body.subscription.billing).toBe("Monthly");
 
       const saved = await BuyerSubscription.findOne({ buyer: buyerUser._id });
       expect(saved.plan).toBe("PREMIUM");
-      expect(saved.price).toBe(5000);
+      const renewal = new Date(saved.renewalDate).getTime();
+
+      // The same payment cannot extend the plan twice; a second payment adds 30 days.
+      const { activatePremium } = require("../../src/services/buyerSubscription.service");
+      await activatePremium({ userId: buyerUser._id, paymentId: paid.body.paymentId });
+      expect(new Date((await BuyerSubscription.findOne({ buyer: buyerUser._id })).renewalDate).getTime()).toBe(renewal);
+      const card = await request(app)
+        .post("/api/buyer/subscription/checkout")
+        .set("Authorization", `Bearer ${buyerToken}`)
+        .send({ method: "card" });
+      expect(card.body.status).toBe("SUCCESS");
+      const extended = new Date((await BuyerSubscription.findOne({ buyer: buyerUser._id })).renewalDate).getTime();
+      expect(extended - renewal).toBe(30 * 24 * 60 * 60 * 1000);
     });
 
     test("POST /api/buyer/subscription cancels back to Free", async () => {

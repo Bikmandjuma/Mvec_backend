@@ -6,6 +6,7 @@ const {
   initiatePaypackPayment,
   initiateMomoPayment,
   initiateAirtelPayment,
+  initiateCardPayment,
   checkPaymentStatus,
   confirmPayment,
 } = require("../controllers/payment.controller");
@@ -20,6 +21,9 @@ router.post("/momo/initiate", protect, limits.payment, initiateMomoPayment);
 
 // Initiate Airtel Money Push Notification (via Paypack)
 router.post("/pay/airtel", protect, limits.payment, initiateAirtelPayment);
+
+// Pay by card on Flutterwave's hosted checkout
+router.post("/pay/card", protect, limits.payment, initiateCardPayment);
 
 // Check payment status (reconciles with Paypack while pending)
 router.get("/status/:paymentId", protect, checkPaymentStatus);

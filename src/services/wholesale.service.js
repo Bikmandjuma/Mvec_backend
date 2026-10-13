@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const WholesaleOrder = require("../models/WholesaleOrder");
 const VendorWallet = require("../models/VendorWallet");
 const Supplier = require("../models/Supplier");
@@ -9,7 +9,7 @@ class WholesaleService {
    * Validate MOQ and create B2B Wholesale Order
    */
   async createWholesaleOrder({ vendorId, supplierId, items }) {
-    if (!mongoose.isValidObjectId(supplierId)) {
+    if (!orm.isValidObjectId(supplierId)) {
       throw new Error("Invalid supplier ID provided.");
     }
 
@@ -23,7 +23,7 @@ class WholesaleService {
     }
     const supplierUserId = supplier.user;
 
-    if (!mongoose.isValidObjectId(vendorId)) {
+    if (!orm.isValidObjectId(vendorId)) {
       throw new Error("Invalid vendor ID provided.");
     }
 
@@ -35,7 +35,7 @@ class WholesaleService {
     }
 
     for (const item of items) {
-      if (!item.productId || !mongoose.isValidObjectId(item.productId)) {
+      if (!item.productId || !orm.isValidObjectId(item.productId)) {
         throw new Error(
           `Invalid product ID for item '${item.productName}'. Only real catalog products can be ordered.`
         );
@@ -105,7 +105,7 @@ class WholesaleService {
    * Hold Vendor Funds in Escrow upon successful B2B Payment
    */
   async holdWholesaleEscrow(orderId) {
-    const session = await mongoose.startSession();
+    const session = await orm.startSession();
     session.startTransaction();
 
     try {
@@ -132,7 +132,7 @@ class WholesaleService {
    * Confirm Physical Receipt and Release Escrow Funds to Supplier
    */
   async confirmReceiptAndRelease(orderId, providedOtp = null) {
-    const session = await mongoose.startSession();
+    const session = await orm.startSession();
     session.startTransaction();
 
     try {

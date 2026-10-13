@@ -1,5 +1,5 @@
 const crypto = require("crypto");
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const AffiliateAttribution = require("../models/AffiliateAttribution");
 const AffiliateLink = require("../models/AffiliateLink");
 const AffiliateWallet = require("../models/AffiliateWallet");
@@ -149,7 +149,7 @@ async function reverseOrderCommission({ orderId, refundAmount = null, key, reaso
   const order = await Order.findById(orderId).select("totalAmount");
   if (!order) throw new Error("Order not found.");
 
-  const session = await mongoose.startSession();
+  const session = await orm.startSession();
   const outcome = [];
   try {
     await session.withTransaction(async () => {

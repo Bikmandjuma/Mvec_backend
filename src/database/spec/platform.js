@@ -31,6 +31,7 @@ const subscription = (owner, prefix, model, table, collection, skipFree) => ({
     startDate: date(),
     renewalDate: date(),
     autoRenew: bool(true),
+    lastPaymentId: str({ len: 24 }), // payment that last activated/extended the plan (idempotency)
   },
 });
 const affiliateAccountDetails = {

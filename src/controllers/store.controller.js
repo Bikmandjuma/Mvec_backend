@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Store = require("../models/Store");
 const Product = require("../models/Product");
 const Staff = require("../models/Staff");
@@ -23,7 +23,7 @@ const resolveOwnerId = async (req) => {
 };
 
 const findOwnedStore = async (req, id) => {
-  if (!mongoose.isValidObjectId(id)) return null;
+  if (!orm.isValidObjectId(id)) return null;
   const ownerId = await resolveOwnerId(req);
   return Store.findOne({ _id: id, vendor: ownerId });
 };
@@ -31,7 +31,7 @@ const findOwnedStore = async (req, id) => {
 // Product counts per store. Products without a store belong to the primary one.
 const productCountsFor = async (vendorId, stores) => {
   const rows = await Product.aggregate([
-    { $match: { vendor: new mongoose.Types.ObjectId(String(vendorId)) } },
+    { $match: { vendor: new orm.Types.ObjectId(String(vendorId)) } },
     { $group: { _id: "$store", count: { $sum: 1 } } },
   ]);
   const byStore = Object.fromEntries(rows.map((r) => [String(r._id), r.count]));

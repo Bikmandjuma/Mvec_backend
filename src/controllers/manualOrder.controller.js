@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const crypto = require("crypto");
 const Order = require("../models/Order");
 const Product = require("../models/Product");
@@ -65,7 +65,7 @@ exports.createManualOrder = async (req, res) => {
     const qtyById = new Map();
     for (const item of items) {
       const qty = Number(item.qty || item.quantity);
-      if (!mongoose.isValidObjectId(item.productId) || !Number.isInteger(qty) || qty < 1) {
+      if (!orm.isValidObjectId(item.productId) || !Number.isInteger(qty) || qty < 1) {
         return res.status(400).json({ message: "Every line needs a product and a whole quantity of at least 1." });
       }
       qtyById.set(String(item.productId), (qtyById.get(String(item.productId)) || 0) + qty);

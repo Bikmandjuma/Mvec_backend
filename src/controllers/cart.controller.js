@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Cart = require("../models/Cart");
 const Product = require("../models/Product");
 const { effectivePrice } = require("../utils/pricing.util");
@@ -64,7 +64,7 @@ exports.addToCart = async (req, res) => {
 
     // Accept old guest carts that stored the public MVEC product code, while
     // keeping Mongo ObjectIds as the canonical cart reference.
-    const product = mongoose.isValidObjectId(productId)
+    const product = orm.isValidObjectId(productId)
       ? await Product.findById(productId)
       : await Product.findOne({ publicId: productId });
     if (!product) {
@@ -143,7 +143,7 @@ exports.updateCartItemQuantity = async (req, res) => {
       return res.status(400).json({ message: "Quantity must be a whole number between 1 and 100" });
     }
 
-    if (!mongoose.isValidObjectId(productId)) {
+    if (!orm.isValidObjectId(productId)) {
       return res.status(404).json({ message: "Item not in cart" });
     }
 
@@ -190,7 +190,7 @@ exports.removeFromCart = async (req, res) => {
   try {
     const { productId } = req.params;
 
-    if (!mongoose.isValidObjectId(productId)) {
+    if (!orm.isValidObjectId(productId)) {
       return res.status(404).json({ message: "Item not in cart" });
     }
 

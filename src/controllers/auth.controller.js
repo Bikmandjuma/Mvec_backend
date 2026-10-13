@@ -1,5 +1,5 @@
 const bcrypt = require("bcryptjs");
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const express = require("express");
 const User = require("../models/User");
 const Otp = require("../models/Otp");
@@ -1273,7 +1273,7 @@ exports.getWishlist = async (req, res) => {
 exports.addToWishlist = async (req, res) => {
   try {
     const ids = [...new Set((Array.isArray(req.body.productIds) ? req.body.productIds : [req.body.productId]).map(String))]
-      .filter((id) => mongoose.isValidObjectId(id))
+      .filter((id) => orm.isValidObjectId(id))
       .slice(0, WISHLIST_MAX);
     if (!ids.length) return res.status(400).json({ message: "Choose a product to save." });
 
@@ -1296,7 +1296,7 @@ exports.addToWishlist = async (req, res) => {
 // @route DELETE /api/auth/wishlist/:productId
 exports.removeFromWishlist = async (req, res) => {
   try {
-    if (!mongoose.isValidObjectId(req.params.productId)) return res.status(404).json({ message: "Product not in your wishlist." });
+    if (!orm.isValidObjectId(req.params.productId)) return res.status(404).json({ message: "Product not in your wishlist." });
     await User.updateOne({ _id: req.user.id }, { $pull: { wishlist: { product: req.params.productId } } });
     return res.status(200).json({ items: await wishlistResponse(req.user.id) });
   } catch (error) {

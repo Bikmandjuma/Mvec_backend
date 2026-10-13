@@ -537,7 +537,8 @@ function updateAssignments(entry, update, current) {
       if (entry.children?.[path]) { childOps.push({ op, path, raw }); continue; }
       const f = entry.fields[path];
       if (!f || !isArrayField(f)) throw new Error(`${op} is only supported on array fields (${path})`);
-      const list = (current?.[f.column] || []).slice();
+      const stored = C.parseJson(current?.[f.column]);
+      const list = (Array.isArray(stored) ? stored : []).slice();
       const items = raw && typeof raw === "object" && raw.$each ? raw.$each : [raw];
       values[f.column] = C.toColumn(f, fn(list, items.map((x) => (f.kind === "refArray" ? idString(x) : C.toJsonValue(x)))));
     }

@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Order = require("../models/Order");
 const Cart = require("../models/Cart");
 const Product = require("../models/Product");
@@ -150,7 +150,7 @@ exports.getDeliverable = async (req, res) => {
 exports.getOrderById = async (req, res) => {
   try {
     const { id } = req.params;
-    if (!id || id === "undefined" || !mongoose.isValidObjectId(id)) {
+    if (!id || id === "undefined" || !orm.isValidObjectId(id)) {
       return res.status(400).json({ message: "A valid order ID is required." });
     }
 
@@ -291,7 +291,7 @@ exports.updateVendorOrderStatus = async (req, res) => {
     if (paymentStatus !== undefined) {
       return res.status(400).json({ message: "Payment status is set by the payment provider and cannot be changed here." });
     }
-    if (!mongoose.isValidObjectId(orderId)) {
+    if (!orm.isValidObjectId(orderId)) {
       return res.status(400).json({ message: "A valid order ID is required." });
     }
     const order = await Order.findById(orderId);
@@ -324,7 +324,7 @@ exports.updateVendorOrderStatus = async (req, res) => {
 exports.updateOrderStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    if (!mongoose.isValidObjectId(id)) return res.status(400).json({ message: "A valid order ID is required." });
+    if (!orm.isValidObjectId(id)) return res.status(400).json({ message: "A valid order ID is required." });
     const order = await Order.findById(id);
     if (!order) return res.status(404).json({ message: "Order not found." });
 
@@ -356,12 +356,12 @@ exports.updateOrderStatus = async (req, res) => {
 // confirms the whole order).
 exports.confirmOrderDelivery = async (req, res) => {
   const { id } = req.params;
-  if (!id || !mongoose.isValidObjectId(id)) {
+  if (!id || !orm.isValidObjectId(id)) {
     return res.status(400).json({ message: "A valid order ID is required." });
   }
   const code = String(req.body.deliveryOtp || "").trim();
 
-  const session = await mongoose.startSession();
+  const session = await orm.startSession();
   session.startTransaction();
   try {
     const order = await Order.findById(id).session(session);
@@ -463,7 +463,7 @@ exports.confirmOrderDelivery = async (req, res) => {
 // @access  Private (assigned courier, Super Admin)
 exports.markOutForDelivery = async (req, res) => {
   try {
-    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ message: "A valid order ID is required." });
+    if (!orm.isValidObjectId(req.params.id)) return res.status(400).json({ message: "A valid order ID is required." });
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ message: "Order not found." });
     if (req.user.role !== "super_admin" && String(order.courier || "") !== String(req.user.id)) {
@@ -483,7 +483,7 @@ exports.assignCourier = async (req, res) => {
   try {
     const { id } = req.params;
     const { courierId } = req.body;
-    if (!mongoose.isValidObjectId(id)) return res.status(400).json({ message: "A valid order ID is required." });
+    if (!orm.isValidObjectId(id)) return res.status(400).json({ message: "A valid order ID is required." });
     const order = await Order.findById(id);
     if (!order) return res.status(404).json({ message: "Order not found." });
     if (order.paymentStatus !== "PAID" || ["DELIVERED", "COMPLETED", "CANCELLED"].includes(order.orderStatus)) {
@@ -491,7 +491,7 @@ exports.assignCourier = async (req, res) => {
     }
     if (courierId) {
       const User = require("../models/User");
-      const courier = mongoose.isValidObjectId(courierId) ? await User.findOne({ _id: courierId, role: "delivery" }) : null;
+      const courier = orm.isValidObjectId(courierId) ? await User.findOne({ _id: courierId, role: "delivery" }) : null;
       if (!courier) return res.status(400).json({ message: "Choose a courier account." });
       order.courier = courier._id;
     } else {
@@ -543,7 +543,7 @@ const SELLER_CANCELLABLE = ["PENDING", "CONFIRMED", "PROCESSING", "READY_FOR_SHI
  * @returns {{ order, isPaid, refundSent }}
  */
 async function cancelOrder({ orderId, actor, reason }) {
-  const session = await mongoose.startSession();
+  const session = await orm.startSession();
   session.startTransaction();
   let order;
   let isPaid = false;
@@ -627,24 +627,16 @@ async function cancelOrder({ orderId, actor, reason }) {
 
   let refundSent = false;
   if (isPaid && !paidOutsideMvec) {
-    const refundPhone = paidWith?.phoneNumber || order.recipient?.phone;
-    if (refundPhone) {
-      const refund = await disbursementService.queue({
-        kind: "REFUND",
-        recipient: order.user,
-        phone: refundPhone,
-        amount: order.totalAmount,
-        order: order._id,
-        idempotencyKey: `refund:${order._id}`,
-      }).catch((err) => { console.error("Refund queue failed:", err.message); return null; });
-      refundSent = refund?.status === "SUCCESS";
-    }
+    const refund = await disbursementService.refundPayment({
+      order, payment: paidWith, amount: order.totalAmount, idempotencyKey: `refund:${order._id}`,
+    }).catch((err) => { console.error("Refund queue failed:", err.message); return null; });
+    refundSent = refund?.status === "SUCCESS";
   }
   await notifications.orderCancelled(order, {
     refunded: isPaid && !paidOutsideMvec,
-    reason: String(order.user) === String(actor.id) ? undefined : `${order.cancellationReason}.${isPaid ? " Your full refund is on its way to your mobile money." : ""}`,
+    reason: String(order.user) === String(actor.id) ? undefined : `${order.cancellationReason}.${isPaid ? ` Your full refund is on its way to your ${paidWith?.method === "CARD" ? "card" : "mobile money"}.` : ""}`,
   }).catch(() => {});
-  return { order, isPaid: isPaid && !paidOutsideMvec, refundSent };
+  return { order, isPaid: isPaid && !paidOutsideMvec, refundSent, refundTo: paidWith?.method === "CARD" ? "card" : "mobile money number" };
 }
 
 // @desc    Cancel an order (buyer, the seller before shipping, or an admin)
@@ -652,16 +644,16 @@ async function cancelOrder({ orderId, actor, reason }) {
 // @access  Private
 exports.cancelOrderByBuyer = async (req, res) => {
   try {
-    if (!mongoose.isValidObjectId(req.params.id)) {
+    if (!orm.isValidObjectId(req.params.id)) {
       return res.status(400).json({ message: "A valid order ID is required." });
     }
     const reason = typeof req.body?.reason === "string" ? req.body.reason.trim().slice(0, 200) : undefined;
-    const { order, isPaid, refundSent } = await cancelOrder({ orderId: req.params.id, actor: req.user, reason });
+    const { order, isPaid, refundSent, refundTo } = await cancelOrder({ orderId: req.params.id, actor: req.user, reason });
     return res.status(200).json({
       message: isPaid
         ? refundSent
-          ? "Order cancelled. The refund was sent to the buyer's mobile money number."
-          : "Order cancelled. The refund is being sent to the buyer's mobile money number."
+          ? `Order cancelled. The refund was sent to the buyer's ${refundTo}.`
+          : `Order cancelled. The refund is being sent to the buyer's ${refundTo}.`
         : "Order cancelled.",
       order,
     });

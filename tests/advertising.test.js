@@ -1,12 +1,11 @@
 // The home page hero and featured strip only show admin-approved, live ad
 // campaigns for the vendor's own products. New products never land there.
+const db = require("./helpers/mysql"); // first: selects the MySQL test database
 const { test, before, after, beforeEach } = require("node:test");
 const assert = require("node:assert/strict");
-const mongoose = require("mongoose");
 const express = require("express");
 const request = require("supertest");
 const jwt = require("jsonwebtoken");
-const { MongoMemoryReplSet } = require("mongodb-memory-server");
 
 process.env.JWT_SECRET = "advertising_test_secret";
 
@@ -15,7 +14,7 @@ const Vendor = require("../src/models/Vendor");
 const Product = require("../src/models/Product");
 const Category = require("../src/models/Category");
 
-let replSet, app;
+let app;
 let vendorToken, otherVendorToken, adminToken;
 let ownProduct, otherProduct, newProduct;
 
@@ -23,8 +22,7 @@ const auth = (t) => ({ Authorization: `Bearer ${t}` });
 const tokenFor = (u) => jwt.sign({ id: u._id.toString() }, process.env.JWT_SECRET);
 
 before(async () => {
-  replSet = await MongoMemoryReplSet.create({ binary: { version: "7.0.0" }, replSet: { count: 1 } });
-  await mongoose.connect(replSet.getUri());
+  await db.setup();
   app = express();
   app.use(express.json());
   app.use("/api/vendor", require("../src/routes/vendor.service.routes"));
@@ -33,12 +31,11 @@ before(async () => {
 });
 
 after(async () => {
-  await mongoose.disconnect();
-  await replSet.stop();
+  await db.close();
 });
 
 beforeEach(async () => {
-  await mongoose.connection.db.dropDatabase();
+  await db.reset();
   const make = (phone, role, extra = {}) => User.create({ Fullname: `${role} ${phone}`, password: "x", phone, role, ...extra });
   const vendorUser = await make("+250788100001", "vendor", { companyName: "A Store" });
   const otherUser = await make("+250788100002", "vendor", { companyName: "B Store" });

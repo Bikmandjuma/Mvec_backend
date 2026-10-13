@@ -36,10 +36,10 @@ module.exports = (sequelize) => {
     timestamps: true,
     // Same rules as the Mongoose schema.
     validate: {
+      // Gender is optional ("Prefer not to say"); staff accounts are set up by invitation.
       requiredUnlessGoogleOrStaff() {
-        if (this.googleId || this.isVendorStaff) return;
+        if (this.googleId || this.isVendorStaff || this.isSupplierStaff) return;
         if (!this.password) throw new Error("Password is required");
-        if (!this.gender) throw new Error("Gender is required");
         if (!this.phone) throw new Error("Phone is required");
       },
       companyForVendors() {

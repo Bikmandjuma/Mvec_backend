@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const ShippingZone = require("../models/ShippingZone");
 const Cart = require("../models/Cart");
 const Product = require("../models/Product");
@@ -42,7 +42,7 @@ function mapZone(z) {
 
 // The list endpoint exposes publicId as `id`, so accept either identifier.
 const findZone = (id) =>
-  mongoose.isValidObjectId(id) ? ShippingZone.findById(id) : ShippingZone.findOne({ publicId: id });
+  orm.isValidObjectId(id) ? ShippingZone.findById(id) : ShippingZone.findOne({ publicId: id });
 
 const allowedStatus = ["ACTIVE", "PAUSED"];
 
@@ -207,7 +207,7 @@ exports.quote = async (req, res) => {
     const { address = {}, method = "STANDARD", items } = req.body;
     let lines = [];
     if (Array.isArray(items) && items.length) {
-      const ids = items.map((i) => i.productId).filter((id) => mongoose.isValidObjectId(id));
+      const ids = items.map((i) => i.productId).filter((id) => orm.isValidObjectId(id));
       const products = await Product.find({ _id: { $in: ids } });
       const byId = Object.fromEntries(products.map((p) => [String(p._id), p]));
       lines = items

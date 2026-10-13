@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Dispute = require("../models/Dispute");
 const DisputeEvidence = require("../models/DisputeEvidence");
 const Order = require("../models/Order");
@@ -10,7 +10,7 @@ class DisputeService {
    * Open a new dispute for an order
    */
   async openDispute({ orderId, raisedById, reason, description, disputedAmount }) {
-    if (!mongoose.isValidObjectId(orderId)) throw new Error("A valid order ID is required.");
+    if (!orm.isValidObjectId(orderId)) throw new Error("A valid order ID is required.");
     const order = await Order.findById(orderId);
     // Only the buyer who placed the order can open a dispute on it.
     if (!order || String(order.user) !== String(raisedById)) throw new Error("Order not found.");
@@ -84,7 +84,7 @@ class DisputeService {
   async resolveDisputeArbitration({ disputeId, adminId, decision, buyerRefundAmount, vendorReleaseAmount, notes }) {
     let refundPayment = null;
     let refundAmount = 0;
-    const session = await mongoose.startSession();
+    const session = await orm.startSession();
     session.startTransaction();
 
     try {
@@ -178,17 +178,9 @@ class DisputeService {
 
       // Send the buyer's share back to the number that paid.
       if (refundAmount > 0) {
-        const phone = refundPayment?.phoneNumber || order.recipient?.phone;
-        if (phone) {
-          await require("./disbursement.service").queue({
-            kind: "REFUND",
-            recipient: order.user,
-            phone,
-            amount: refundAmount,
-            order: order._id,
-            idempotencyKey: `dispute-refund:${dispute._id}`,
-          }).catch((err) => console.error(`Dispute refund ${dispute._id} failed to queue:`, err.message));
-        }
+        await require("./disbursement.service").refundPayment({
+          order, payment: refundPayment, amount: refundAmount, idempotencyKey: `dispute-refund:${dispute._id}`,
+        }).catch((err) => console.error(`Dispute refund ${dispute._id} failed to queue:`, err.message));
       }
 
       return dispute;

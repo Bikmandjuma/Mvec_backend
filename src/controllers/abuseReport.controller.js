@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const AbuseReport = require("../models/AbuseReport");
 const User = require("../models/User");
 const Order = require("../models/Order");
@@ -61,7 +61,7 @@ exports.submitAbuseReport = async (req, res) => {
   try {
     const { targetUserId, reasonCategory, description, evidenceUrl, evidenceUrls, incidentDate, targetStoreId, targetRole, relatedOrderId } = req.body;
 
-    if (!targetUserId || !mongoose.Types.ObjectId.isValid(String(targetUserId))) {
+    if (!targetUserId || !orm.Types.ObjectId.isValid(String(targetUserId))) {
       return res.status(400).json({ message: "A valid target user is required" });
     }
     if (!reasonCategory || !VALID_CATEGORIES.includes(reasonCategory)) {
@@ -81,7 +81,7 @@ exports.submitAbuseReport = async (req, res) => {
 
     let relatedOrder = null;
     if (relatedOrderId) {
-      if (!mongoose.Types.ObjectId.isValid(String(relatedOrderId))) {
+      if (!orm.Types.ObjectId.isValid(String(relatedOrderId))) {
         return res.status(400).json({ message: "Invalid related order id" });
       }
       relatedOrder = await Order.findById(relatedOrderId);
@@ -92,7 +92,7 @@ exports.submitAbuseReport = async (req, res) => {
 
     let targetStore = null;
     if (targetStoreId) {
-      if (!mongoose.Types.ObjectId.isValid(String(targetStoreId))) {
+      if (!orm.Types.ObjectId.isValid(String(targetStoreId))) {
         return res.status(400).json({ message: "Invalid target store id" });
       }
       targetStore = await Store.findById(targetStoreId);
@@ -169,7 +169,7 @@ exports.listAbuseReports = async (req, res) => {
 exports.getAbuseReport = async (req, res) => {
   try {
     const { id } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+    if (!orm.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid report id" });
     }
 
@@ -201,7 +201,7 @@ exports.updateAbuseReport = async (req, res) => {
     const { id } = req.params;
     const { status, adminNotes } = req.body;
 
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+    if (!orm.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid report id" });
     }
     if (status !== undefined && !VALID_STATUSES.includes(status)) {

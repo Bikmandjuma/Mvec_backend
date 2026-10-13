@@ -1,6 +1,6 @@
 const Product = require("../models/Product");
 const Category = require("../models/Category");
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const { resolveOwnedStore } = require("../utils/vendorStore.util");
 
 // http(s)://<host>/uploads/<file> — the upload route used to return an absolute
@@ -79,7 +79,7 @@ exports.getAllProducts = async (req, res) => {
     // This route is public: only live products are ever listed, whatever
     // status the caller asks for. Vendors see their drafts via /vendor/me.
     const query = { status: "ACTIVE" };
-    if (req.query.vendorId && mongoose.isValidObjectId(String(req.query.vendorId))) {
+    if (req.query.vendorId && orm.isValidObjectId(String(req.query.vendorId))) {
       query.vendor = String(req.query.vendorId);
     }
     if (search && String(search).trim()) {
@@ -123,7 +123,7 @@ exports.getVendorProducts = async (req, res) => {
     const vendorId = req.vendorId || req.targetVendorId || req.user.id;
     const query = { $or: [{ vendor: vendorId }, { vendor: req.user.id }] };
     if (req.query.store === "primary") query.store = null;
-    else if (mongoose.isValidObjectId(req.query.store)) query.store = req.query.store;
+    else if (orm.isValidObjectId(req.query.store)) query.store = req.query.store;
     const products = await Product.find(query)
       .populate("category", "name")
       .populate("store", "storeName slug isPrimary");
@@ -141,7 +141,7 @@ exports.createProduct = async (req, res) => {
   try {
     const vendorId = req.vendorId || req.targetVendorId || req.user.id;
     const payload = normalizeProductPayload(req.body, req);
-    if (!mongoose.Types.ObjectId.isValid(payload.category)) {
+    if (!orm.Types.ObjectId.isValid(payload.category)) {
       return res.status(400).json({ message: "Select a valid category from the category list." });
     }
     if (!(await Category.exists({ _id: payload.category }))) {
@@ -210,7 +210,7 @@ exports.updateProduct = async (req, res) => {
     // 2. Prepare payload copy
     const updates = normalizeProductPayload(req.body, req);
     if (updates.category !== undefined) {
-      if (!mongoose.Types.ObjectId.isValid(updates.category)) {
+      if (!orm.Types.ObjectId.isValid(updates.category)) {
         return res.status(400).json({ message: "Select a valid category from the category list." });
       }
       if (!(await Category.exists({ _id: updates.category }))) {
@@ -297,7 +297,7 @@ exports.getProductById = async (req, res) => {
     // Public route: only live products. Storefront links may use the public
     // id (MVEC-PRD-…); dashboards use the database id.
     const { id } = req.params;
-    const product = await Product.findOne(mongoose.isValidObjectId(id) ? { _id: id } : { publicId: String(id) })
+    const product = await Product.findOne(orm.isValidObjectId(id) ? { _id: id } : { publicId: String(id) })
       .populate("vendor", "Fullname companyName")
       .populate("category", "name slug");
 

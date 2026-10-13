@@ -1,5 +1,5 @@
 const bcrypt = require("bcryptjs");
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 
 const Staff = require("../models/Staff");
 const Store = require("../models/Store");
@@ -252,13 +252,9 @@ exports.addStaffMember = async (req, res) => {
       });
     }
 
+    // Staff join the primary store when there is one; a seller can also
+    // build the team before creating a store.
     const store = await storeForOwner(ownerId);
-
-    if (!store) {
-      return res.status(404).json({
-        message: "You must create a store before adding staff.",
-      });
-    }
 
     const permissions = permissionsFor(role, req.body.permissions);
 
@@ -297,7 +293,7 @@ exports.addStaffMember = async (req, res) => {
         email: normalizedEmail,
         password: hashedPassword,
         role: "vendor",
-        companyName: store.storeName,
+        companyName: store?.storeName || req.user.companyName || name,
         isVendorStaff: true,
         status: "ACTIVE",
         ...(phone ? { phone } : {}),
@@ -310,7 +306,7 @@ exports.addStaffMember = async (req, res) => {
         role,
         permissions,
         status: "ACTIVE",
-        store: store._id,
+        ...(store ? { store: store._id } : {}),
       });
 
       await createdStaff.populate("user", "Fullname email phone");
@@ -351,7 +347,7 @@ exports.addStaffMember = async (req, res) => {
       invitationTokenHash: tokenHash,
       invitationExpiresAt: expiresAt,
 
-      store: store._id,
+      ...(store ? { store: store._id } : {}),
     });
 
     try {
@@ -497,12 +493,6 @@ exports.getStoreStaff = async (req, res) => {
     const ownerId = req.ownerId || req.vendorId || req.user.id;
     const store = await storeForOwner(ownerId);
 
-    if (!store) {
-      return res.status(404).json({
-        message: "Store not found.",
-      });
-    }
-
     const [staffList, owner] = await Promise.all([
       Staff.find({
         vendorOwner: ownerId,
@@ -523,7 +513,7 @@ exports.getStoreStaff = async (req, res) => {
       permission_role: "OWNER",
       status: "ACTIVE",
       active: true,
-      store_id: store._id,
+      store_id: store?._id || null,
       vendor_id: ownerId,
       user_id: owner._id,
       permissions: Object.keys(PERMISSIONS),
@@ -546,7 +536,7 @@ exports.getStoreStaff = async (req, res) => {
 exports.updateStaffMember = async (req, res) => {
   try {
     const ownerId = req.ownerId || req.vendorId || req.user.id;
-    const isObjectId = mongoose.Types.ObjectId.isValid(req.params.id);
+    const isObjectId = orm.Types.ObjectId.isValid(req.params.id);
 
     if (!isObjectId) {
       return res.status(404).json({
@@ -638,7 +628,7 @@ exports.updateStaffMember = async (req, res) => {
 exports.removeStaffMember = async (req, res) => {
   try {
     const ownerId = req.ownerId || req.vendorId || req.user.id;
-    const isObjectId = mongoose.Types.ObjectId.isValid(req.params.id);
+    const isObjectId = orm.Types.ObjectId.isValid(req.params.id);
 
     if (!isObjectId) {
       return res.status(404).json({

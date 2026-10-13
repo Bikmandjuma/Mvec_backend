@@ -27,15 +27,31 @@ const STEPS = {
       email_verified: !!u.email_verified, role: u.role || "buyer", isSellerEnabled: !!u.isSellerEnabled,
       status: u.status || "ACTIVE", companyName: u.companyName ?? null, resetPasswordToken: u.resetPasswordToken ?? null,
       resetPasswordExpires: u.resetPasswordExpires ?? null, isVendorStaff: !!u.isVendorStaff,
-      lastPasswordChangeAt: u.lastPasswordChangeAt ?? null, createdAt: u.createdAt || new Date(), updatedAt: u.updatedAt || new Date(),
+      lastPasswordChangeAt: u.lastPasswordChangeAt ?? null,
+      businessName: u.businessName || "", description: u.description ?? null, logoUrl: u.logoUrl || "", category: u.category || "",
+      location: json(u.location),
+      isOnboarded: u.isOnboarded ?? !["vendor", "supplier"].includes(u.role),
+      verificationStatus: u.verificationStatus || (["vendor", "supplier"].includes(u.role) ? "UNVERIFIED" : "VERIFIED"),
+      avatarUrl: u.avatarUrl || "", resetPasswordCode: u.resetPasswordCode ?? null, resetPasswordCodeExpires: u.resetPasswordCodeExpires ?? null,
+      resetPasswordAttempts: u.resetPasswordAttempts || 0, isSupplierStaff: !!u.isSupplierStaff,
+      createdAt: u.createdAt || new Date(), updatedAt: u.updatedAt || new Date(),
     }),
+  },
+  wishlist: {
+    collection: "users",
+    model: "UserWishlistItem",
+    replaceChildrenOf: "userId",
+    expand: (u) => (u.wishlist || []).filter((w) => w && w.product).map((w, i) => ({
+      id: derivedId(str(u._id), "wishlist", i), userId: str(u._id), productId: str(w.product),
+      savedPrice: w.savedPrice || 0, savedAt: w.savedAt || u.updatedAt || new Date(),
+    })),
   },
   addresses: {
     collection: "users",
     model: "UserAddress",
     expand: (u) => (u.addresses || []).map((a) => ({
       id: str(a._id), userId: str(u._id), type: a.type || "HOME", country: a.country || "Rwanda",
-      provinceState: a.provinceState || "", cityDistrict: a.cityDistrict || "", street: a.street || "",
+      provinceState: a.provinceState || "", cityDistrict: a.cityDistrict || "", sector: a.sector ?? null, street: a.street || "",
       building: a.building ?? null, apartment: a.apartment ?? null, postalCode: a.postalCode ?? null,
       phone: a.phone || u.phone || "", deliveryInstructions: a.deliveryInstructions ?? null,
       isDefaultShipping: !!a.isDefaultShipping, isDefaultBilling: !!a.isDefaultBilling,
@@ -50,7 +66,7 @@ const STEPS = {
       slug: v.slug ?? null, logoUrl: v.logoUrl ?? null, bannerUrl: v.bannerUrl ?? null, description: v.description || "",
       phone: v.phone || "", email: v.email || "", commissionRate: v.commissionRate || 0,
       verificationStatus: v.verificationStatus || "UNVERIFIED", ratingAvg: v.ratingAvg || 0, status: v.status || "ACTIVE",
-      location: json(v.location), createdAt: v.createdAt || new Date(), updatedAt: v.updatedAt || new Date(),
+      location: json(v.location), category: v.category || "", createdAt: v.createdAt || new Date(), updatedAt: v.updatedAt || new Date(),
     }),
   },
   stores: {
@@ -75,6 +91,7 @@ const STEPS = {
       const p = s.permissions || {};
       return {
         id: str(s._id), storeId: str(s.store || s.vendor_id), vendorOwnerId: str(s.vendorOwner), userId: str(s.user || s.user_id),
+        email: s.email || "", invitationTokenHash: s.invitationTokenHash ?? null, invitationExpiresAt: s.invitationExpiresAt ?? null,
         role: s.role || s.permission_role || "ORDER_MANAGER",
         canViewDashboard: p.canViewDashboard !== false, canManageProducts: !!p.canManageProducts, canManageOrders: p.canManageOrders !== false,
         canManagePayouts: !!p.canManagePayouts, canManageStaff: !!p.canManageStaff, canViewAnalytics: !!p.canViewAnalytics,
@@ -134,6 +151,7 @@ const STEPS = {
 const getPath = (obj, dotted) => dotted.split(".").reduce((o, k) => (o === null || o === undefined ? undefined : o[k]), obj);
 const specValue = (field, value) => {
   if (value === undefined || value === null) {
+    if (field.default === "now") return new Date();
     if (field.type === "json") return field.default === undefined ? null : field.default;
     return field.default === undefined ? null : field.default;
   }

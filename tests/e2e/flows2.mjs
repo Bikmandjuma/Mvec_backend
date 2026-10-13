@@ -94,7 +94,7 @@ export async function runMoreFlows(base, { adminEmail, adminPassword }) {
   rec("admin ledger", await ADM.call("GET", "/admin/ledger"), (d) => ({ n: (d?.entries || d?.data || d?.ledger || []).length }));
 
   // ── Wholesale ────────────────────────────────────────────────────────────
-  const sup = rec("supplier onboard", await SUP.call("POST", "/suppliers/onboard", { businessName: "Delta Supply", phone: "0788400002", email: "delta@e2e.test" }), (d) => ({ status: (d?.supplier || d?.data)?.verificationStatus }));
+  const sup = rec("supplier onboard", await SUP.call("POST", "/suppliers/onboard", { businessName: "Delta Supply", phone: "0788400002", email: "delta@e2e.test", description: "Bulk lighting", logoUrl: "/uploads/delta.png", category: "Electronics", location: { province: "Kigali City", district: "Gasabo" } }), (d) => ({ status: (d?.supplier || d?.data)?.verificationStatus }));
   const supplierId = (sup.data?.supplier || sup.data?.data)?._id;
   rec("admin verifies supplier", await ADM.call("PATCH", `/admin/suppliers/${supplierId}/verify`, { decision: "VERIFIED" }), (d) => ({ status: d?.supplier?.verificationStatus }));
   const wp = rec("wholesale product", await SUP.call("POST", "/suppliers/me/products", { name: "Bulk Bulbs", wholesalePrice: 1000, moq: 5, stockQuantity: 50 }), (d) => ({ status: d?.product?.status, moq: d?.product?.moq }));
