@@ -1,13 +1,13 @@
 // End-to-end checks for the buyer journey: sign-up, cart, checkout, payment,
-// cancellation, expiry, disputes and the public catalogue. Runs against an
-// in-memory MongoDB replica set (transactions need one), never a real DB.
+// cancellation, expiry, disputes and the public catalogue. Runs against the
+// MySQL test database (tests/helpers/mysql.js), never a real DB.
+const db = require("./helpers/mysql"); // first: selects the MySQL test database
 const { test, before, after, beforeEach } = require("node:test");
 const assert = require("node:assert/strict");
-const mongoose = require("mongoose");
+const orm = require("../src/database/orm");
 const express = require("express");
 const request = require("supertest");
 const jwt = require("jsonwebtoken");
-const { MongoMemoryReplSet } = require("mongodb-memory-server");
 
 process.env.NODE_ENV = "test";
 process.env.JWT_SECRET = "buyer_flow_test_secret";
@@ -26,7 +26,6 @@ const Review = require("../src/models/Review");
 const Category = require("../src/models/Category");
 const { cancelExpiredUnpaidOrders } = require("../src/workers/slaWorker");
 
-let replSet;
 let app;
 let buyer, otherBuyer, vendorUser;
 let buyerToken, otherToken, vendorToken;
@@ -42,8 +41,7 @@ const delivery = {
 };
 
 before(async () => {
-  replSet = await MongoMemoryReplSet.create({ binary: { version: "7.0.0" }, replSet: { count: 1 } });
-  await mongoose.connect(replSet.getUri());
+  await db.setup();
   app = express();
   app.use(express.json());
   app.use("/api/auth", require("../src/routes/auth.routes"));
@@ -57,13 +55,11 @@ before(async () => {
 });
 
 after(async () => {
-  await mongoose.disconnect();
-  await replSet.stop();
+  await db.close();
 });
 
 beforeEach(async () => {
-  await mongoose.connection.db.dropDatabase();
-  await Promise.all([Order.syncIndexes(), Payment.syncIndexes(), User.syncIndexes()]);
+  await db.reset();
   vendorUser = await User.create({ Fullname: "Kigali Tech", password: "x", phone: "+250788000001", role: "vendor", companyName: "Kigali Tech" });
   buyer = await User.create({ Fullname: "Aline Uwase", password: "x", phone: "+250788000002", role: "buyer" });
   otherBuyer = await User.create({ Fullname: "Jean Paul", password: "x", phone: "+250788000003", role: "buyer" });
@@ -211,7 +207,7 @@ test("unpaid orders can be cancelled and expire after 30 minutes", async () => {
 
   const b = await request(app).post("/api/orders/direct-checkout").set(auth(buyerToken)).send({ ...delivery, items: [{ productId: String(product._id), quantity: 2 }] });
   assert.equal((await Product.findById(product._id)).status, "OUT_OF_STOCK");
-  await Order.collection.updateOne({ _id: new mongoose.Types.ObjectId(b.body.order.id) }, { $set: { createdAt: new Date(Date.now() - 31 * 60 * 1000) } });
+  await Order.updateOne({ _id: b.body.order.id }, { $set: { createdAt: new Date(Date.now() - 31 * 60 * 1000) } });
   await cancelExpiredUnpaidOrders();
   const expired = await Order.findById(b.body.order.id);
   assert.equal(expired.orderStatus, "CANCELLED");

@@ -2,14 +2,14 @@
 // session revocation, fulfilment rules, delivery codes, couriers, automatic
 // refunds, notifications, disputes, wishlist and affiliate withdrawals.
 // In-memory replica set; Paypack runs in simulation mode; SMS is captured.
+const db = require("./helpers/mysql"); // first: selects the MySQL test database
 const { test, before, after, beforeEach } = require("node:test");
 const assert = require("node:assert/strict");
-const mongoose = require("mongoose");
+const orm = require("../src/database/orm");
 const express = require("express");
 const request = require("supertest");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
-const { MongoMemoryReplSet } = require("mongodb-memory-server");
 
 process.env.NODE_ENV = "test";
 process.env.JWT_SECRET = "automation_test_secret";
@@ -34,7 +34,7 @@ const AffiliatePayout = require("../src/models/AffiliatePayout");
 const Dispute = require("../src/models/Dispute");
 const { sendPaymentReminders } = require("../src/workers/slaWorker");
 
-let replSet, app;
+let app;
 let buyer, vendor, vendorB, admin, courier, affiliate;
 let product, productB;
 const token = (u) => jwt.sign({ id: String(u._id) }, process.env.JWT_SECRET);
@@ -45,8 +45,7 @@ const delivery = {
 };
 
 before(async () => {
-  replSet = await MongoMemoryReplSet.create({ binary: { version: "7.0.0" }, replSet: { count: 1 } });
-  await mongoose.connect(replSet.getUri());
+  await db.setup();
   app = express();
   app.use(express.json());
   app.use("/api/auth", require("../src/routes/auth.routes"));
@@ -59,13 +58,11 @@ before(async () => {
 });
 
 after(async () => {
-  await mongoose.disconnect();
-  await replSet.stop();
+  await db.close();
 });
 
 beforeEach(async () => {
-  await mongoose.connection.db.dropDatabase();
-  await Promise.all([Order.syncIndexes(), User.syncIndexes(), Disbursement.syncIndexes()]);
+  await db.reset();
   sentSms.length = 0;
   const pw = await bcrypt.hash("password123", 10);
   const mk = (phone, role, extra = {}) => User.create({ Fullname: `${role} user`, password: pw, phone, role, ...extra });
@@ -217,7 +214,7 @@ test("dispute refund reverses escrow and pays the buyer; vendor release cannot b
 
 test("unpaid orders get one payment reminder", async () => {
   const res = await request(app).post("/api/orders/direct-checkout").set(auth(buyer)).send({ ...delivery, items: [{ productId: String(product._id), quantity: 1 }] });
-  await Order.collection.updateOne({ _id: new mongoose.Types.ObjectId(res.body.order.id) }, { $set: { createdAt: new Date(Date.now() - 22 * 60 * 1000) } });
+  await Order.updateOne({ _id: res.body.order.id }, { $set: { createdAt: new Date(Date.now() - 22 * 60 * 1000) } });
   await sendPaymentReminders();
   await sendPaymentReminders();
   assert.equal(await Notification.countDocuments({ recipient: buyer._id, type: "PAYMENT" }), 1);

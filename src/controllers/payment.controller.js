@@ -1,15 +1,17 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Order = require("../models/Order");
 const Payment = require("../models/Payment");
 const { formatRwandanPhone } = require("../utils/momo.util");
 const paymentService = require("../services/payment.service");
 const paypackService = require("../services/paypack.service");
+const flutterwaveService = require("../services/flutterwave.service");
+const User = require("../models/User");
 const socketService = require("../services/socket.service");
 
 const DUPLICATE_PUSH_WINDOW_MS = 2 * 60 * 1000;
 
 async function initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService, explicitProvider = null, reqUserId }) {
-  if (!mongoose.isValidObjectId(orderId)) {
+  if (!orm.isValidObjectId(orderId)) {
     throw Object.assign(new Error("A valid order ID is required."), { statusCode: 400 });
   }
 
@@ -132,7 +134,7 @@ async function initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService
  * to an order (used by the mobile app for top-ups and manual collections).
  * Orders are always paid with an orderId so the server sets the amount.
  */
-async function initiateStandalonePayment({ amount, phoneNumber, userId, gatewayService, explicitProvider = null }) {
+async function initiateStandalonePayment({ amount, phoneNumber, userId, gatewayService, explicitProvider = null, purpose = null }) {
   const value = Number(amount);
   if (!Number.isInteger(value) || value <= 0) {
     throw Object.assign(new Error("Enter an amount in whole Rwandan francs, for example 1000."), { statusCode: 400 });
@@ -162,6 +164,7 @@ async function initiateStandalonePayment({ amount, phoneNumber, userId, gatewayS
     status: "PENDING",
     gateway: gatewayService.name,
     gatewayResponse: { phase: "initiated" },
+    purpose,
   });
 
   try {
@@ -180,6 +183,7 @@ async function initiateStandalonePayment({ amount, phoneNumber, userId, gatewayS
     payment.paidAt = new Date();
   }
   await payment.save();
+  if (payment.status === "SUCCESS") await paymentService.fulfilStandalonePayment(payment);
 
   return {
     message: `Payment prompt sent to ${phoneInfo.localNumber}. Please approve it on your phone.`,
@@ -231,12 +235,67 @@ exports.initiateMomoPayment = mobileMoneyHandler("MTN");
 // 1b. Initiate Airtel Money USSD Push Payment (via Paypack)
 exports.initiateAirtelPayment = mobileMoneyHandler("AIRTEL");
 
+// 1d. Pay an order by card (Visa/Mastercard) on Flutterwave's hosted checkout.
+//     Returns the checkout link; the buyer comes back to /payment/:orderId and
+//     the status check (or the webhook) verifies the result with Flutterwave.
+exports.initiateCardPayment = async (req, res) => {
+  try {
+    const { orderId } = req.body;
+    if (!orm.isValidObjectId(orderId)) return res.status(400).json({ message: "A valid order ID is required." });
+    if (flutterwaveService.isSandbox() && process.env.NODE_ENV === "production") {
+      return res.status(503).json({ message: "Card payments are temporarily unavailable. Please pay with mobile money." });
+    }
+
+    const order = await Order.findById(orderId);
+    if (!order || String(order.user) !== String(req.user.id)) return res.status(404).json({ message: "Order not found." });
+    if (order.paymentStatus === "PAID") return res.status(400).json({ message: "This order is already paid." });
+    if (order.orderStatus !== "PENDING") return res.status(400).json({ message: "This order can no longer be paid. Please place a new order." });
+
+    const buyer = await User.findById(req.user.id).select("Fullname email phone");
+    const txRef = `CARD-${order._id}-${Date.now()}`;
+    const payment = await Payment.create({
+      parentOrder: order._id,
+      user: order.user,
+      transactionReference: txRef,
+      method: "CARD",
+      gateway: "FLUTTERWAVE",
+      provider: "CARD",
+      amount: order.totalAmount,
+      status: "PENDING",
+    });
+
+    if (flutterwaveService.isSandbox()) {
+      // Local development: no Flutterwave keys, the card payment succeeds at once.
+      const result = await flutterwaveService.verifyByReference(txRef);
+      await paymentService.settleGatewayPayment({
+        payment, provider: "FLUTTERWAVE", status: result.status, amount: order.totalAmount, fee: 0,
+        payload: result.raw, externalTransactionId: result.id,
+      });
+      return res.status(200).json({ message: "Card payment confirmed (test mode).", paymentId: payment._id, status: "SUCCESS", checkoutUrl: null });
+    }
+
+    const frontend = (process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
+    const checkout = await flutterwaveService.createCheckout({
+      txRef,
+      amount: order.totalAmount,
+      customer: { email: buyer?.email || order.recipient?.email, phone: order.recipient?.phone || buyer?.phone, name: order.recipient?.name || buyer?.Fullname },
+      redirectUrl: `${frontend}/payment/${order._id}?paymentId=${payment._id}`,
+      description: `Order ${order.orderNumber}`,
+    });
+    return res.status(200).json({ message: "Opening the secure card page…", paymentId: payment._id, status: "PENDING", checkoutUrl: checkout.link });
+  } catch (error) {
+    if (error.statusCode && error.statusCode < 500) return res.status(error.statusCode).json({ message: error.message });
+    console.error("Card payment failed:", error);
+    return res.status(502).json({ message: "We could not open the card payment page right now. No money was taken. Please try again or pay with mobile money." });
+  }
+};
+
 // 1c. Check a payment's status, reconciling with Paypack while it is still pending.
 //     Lets clients poll for completion when the Paypack webhook cannot reach the
 //     server (e.g. local development).
 exports.checkPaymentStatus = async (req, res) => {
   try {
-    if (!mongoose.isValidObjectId(req.params.paymentId)) {
+    if (!orm.isValidObjectId(req.params.paymentId)) {
       return res.status(400).json({ message: "Invalid payment ID." });
     }
     const payment = await Payment.findById(req.params.paymentId);
@@ -263,6 +322,22 @@ exports.checkPaymentStatus = async (req, res) => {
       });
     }
 
+    if (payment.status === "PENDING" && payment.gateway === "FLUTTERWAVE") {
+      const result = await flutterwaveService.verifyByReference(payment.transactionReference);
+      if (result.status === "SUCCESSFUL" && result.currency && result.currency !== "RWF") {
+        throw Object.assign(new Error("Card payment in an unexpected currency"), { statusCode: 409 });
+      }
+      await paymentService.settleGatewayPayment({
+        payment,
+        provider: "FLUTTERWAVE",
+        status: result.status,
+        amount: result.amount ?? payment.amount,
+        fee: result.fee || 0,
+        payload: result.raw || {},
+        externalTransactionId: result.id,
+      });
+    }
+
     const fresh = await Payment.findById(payment._id);
     const order = fresh.parentOrder
       ? await Order.findById(fresh.parentOrder).select("paymentStatus orderStatus totalAmount")
@@ -270,7 +345,7 @@ exports.checkPaymentStatus = async (req, res) => {
     return res.status(200).json({ payment: fresh, order });
   } catch (error) {
     console.error("Payment status check failed:", error);
-    return res.status(502).json({ message: "We could not check the payment with the mobile money network right now. Your payment is safe; try again in a minute." });
+    return res.status(502).json({ message: "We could not check the payment with the payment provider right now. Your payment is safe; try again in a minute." });
   }
 };
 
@@ -279,12 +354,12 @@ exports.confirmPayment = async (req, res) => {
   if (process.env.NODE_ENV === "production") {
     return res.status(403).json({ message: "Direct payment confirmation is disabled in production." });
   }
-  const session = await mongoose.startSession();
+  const session = await orm.startSession();
   session.startTransaction();
 
   try {
     const { orderId, method = "CARD" } = req.body;
-    if (!mongoose.isValidObjectId(orderId)) {
+    if (!orm.isValidObjectId(orderId)) {
       await session.abortTransaction();
       return res.status(400).json({ message: "Invalid order ID." });
     }
@@ -347,3 +422,7 @@ exports.confirmPayment = async (req, res) => {
     return res.status(500).json({ message: "Payment confirmation failed", error: error.message });
   }
 };
+
+// Shared with other controllers that take payments (e.g. buyer Premium).
+exports.initiateStandalonePayment = initiateStandalonePayment;
+exports.paypackGateway = paypackGateway;

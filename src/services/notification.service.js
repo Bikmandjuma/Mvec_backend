@@ -42,6 +42,15 @@ const orderLink = (order) => `/orders/${idOf(order)}`;
 module.exports = {
   notify,
 
+  async premiumActivated(userId, until) {
+    await notify(userId, {
+      type: "SUBSCRIPTION",
+      title: "Premium is active",
+      message: `Thank you! Ads are hidden until ${new Date(until).toLocaleDateString("en-GB")}.`,
+      link: "/buyer/subscription",
+    });
+  },
+
   async orderPlaced(order) {
     await notify(order.user, {
       title: `Order ${order.orderNumber} placed`,

@@ -1,5 +1,5 @@
 const cron = require("node-cron");
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Order = require("../models/Order");
 const Product = require("../models/Product");
 const Payment = require("../models/Payment");
@@ -36,7 +36,7 @@ const cancelExpiredUnpaidOrders = async () => {
       });
       if (inFlight) continue;
 
-      const session = await mongoose.startSession();
+      const session = await orm.startSession();
       session.startTransaction();
 
       try {

@@ -1,19 +1,16 @@
-// End-to-end affiliate flow against a real database. MongoDB (default): an
-// in-memory replica set. MySQL: DB_DRIVER=mysql NODE_ENV=test with a migrated
-// *_test database. Run with: node --test tests/integration/affiliate.flow.test.js
+// End-to-end affiliate flow against the MySQL test database (tests/helpers/mysql.js).
+// Run with: node --test tests/integration/affiliate.flow.test.js
+const db = require("../helpers/mysql"); // first: selects the MySQL test database
 const assert = require("node:assert/strict");
 const { before, after, beforeEach, describe, test } = require("node:test");
-const { execSync } = require("node:child_process");
 
 process.env.NODE_ENV = "test";
 process.env.JWT_SECRET = "affiliate_flow_test_secret";
 
-const mongoose = require("mongoose");
+const orm = require("../../src/database/orm");
 const express = require("express");
 const request = require("supertest");
 const jwt = require("jsonwebtoken");
-const { MongoMemoryReplSet } = require("mongodb-memory-server");
-const { isMysql } = require("../../src/database/driver");
 
 const User = require("../../src/models/User");
 const Category = require("../../src/models/Category");
@@ -30,7 +27,6 @@ const financialService = require("../../src/services/financial.service");
 const attribution = require("../../src/services/affiliateAttribution.service");
 const affiliateService = require("../../src/services/affiliate.service");
 
-let replSet;
 let app;
 const DAY = 24 * 60 * 60 * 1000;
 const token = (u) => jwt.sign({ userId: u._id, role: u.role }, process.env.JWT_SECRET);
@@ -52,16 +48,7 @@ describe("affiliate flow", () => {
   let vendor, buyer, affA, affB, admin, cat, mouse, keyboard, draft;
 
   before(async () => {
-    if (isMysql) {
-      const { sequelize } = require("../../src/database");
-      if (!/_test$/.test(sequelize.config.database)) throw new Error(`Refusing to run against ${sequelize.config.database}; use a *_test database.`);
-      await sequelize.authenticate();
-    } else {
-    const bin = execSync("command -v mongod", { encoding: "utf8" }).trim();
-    replSet = await MongoMemoryReplSet.create({ binary: { systemBinary: bin }, replSet: { count: 1, name: "rs0" } });
-    await mongoose.connect(replSet.getUri("test"), { directConnection: true });
-    await Promise.all([User, Settlement, ConversionAudit, Order, AffiliateLink, AffiliateAttribution].map((m) => m.init()));
-    }
+    await db.setup();
 
     app = express();
     app.use(express.json());
@@ -69,17 +56,10 @@ describe("affiliate flow", () => {
     app.use("/api/orders", require("../../src/routes/order.routes"));
   });
 
-  after(async () => {
-    if (isMysql) return require("../../src/database").sequelize.close();
-    await mongoose.disconnect();
-    if (replSet) await replSet.stop();
-  });
+  after(() => db.close());
 
   beforeEach(async () => {
-    // Children before parents (MySQL enforces foreign keys).
-    for (const m of [ConversionAudit, AffiliateAttribution, AffiliateClick, AffiliateWallet, AffiliateLink, Settlement, Order, Product, Category, User]) {
-      await m.deleteMany({});
-    }
+    await db.reset();
     vendor = await mkUser("vendor");
     buyer = await mkUser("buyer");
     affA = await mkUser("affiliate");
@@ -130,7 +110,7 @@ describe("affiliate flow", () => {
   test("link creation validates product, role and ownership", async () => {
     assert.equal((await createLink(affA, mouse._id)).status, 201);
     assert.equal((await createLink(affA, draft._id)).status, 400);
-    assert.equal((await createLink(affA, new mongoose.Types.ObjectId())).status, 404);
+    assert.equal((await createLink(affA, new orm.Types.ObjectId())).status, 404);
     assert.equal((await createLink(affA, "not-an-id")).status, 400);
     assert.equal((await createLink(buyer, mouse._id)).status, 403);
     const again = await createLink(affA, mouse._id);
@@ -297,14 +277,14 @@ describe("affiliate flow", () => {
     const { order } = await promotedOrder();
     await pay(order);
     const settlement = await Settlement.findOne({ affiliateShare: { $gt: 0 } });
-    const session = await mongoose.startSession();
+    const session = await orm.startSession();
     await session.withTransaction(() => financialService.releaseEscrowToVendor({ settlementId: settlement._id, session }));
     await session.endSession();
     assert.equal((await audit()).status, "PENDING");
     assert.equal((await wallet()).availableBalance, 0);
 
     await Order.updateOne({ _id: order._id }, { orderStatus: "DELIVERED", isDelivered: true });
-    const s2 = await mongoose.startSession();
+    const s2 = await orm.startSession();
     const approved = await s2.withTransaction(() =>
       financialService.approveAffiliateCommissionsForOrder({ orderId: order._id, session: s2 })
     ).then(() => null);
@@ -321,7 +301,7 @@ describe("affiliate flow", () => {
     assert.equal((await audit()).status, "REVERSED");
     assert.equal((await wallet()).pendingBalance, 0);
     assert.equal((await deliver(order, admin)).status, 400);
-    const s = await mongoose.startSession();
+    const s = await orm.startSession();
     await s.withTransaction(() => financialService.approveAffiliateCommissionsForOrder({ orderId: order._id, session: s }));
     await s.endSession();
     assert.equal((await wallet()).availableBalance, 0);

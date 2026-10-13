@@ -1,6 +1,6 @@
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
-const mongoose = require("mongoose");
+const orm = require("../src/database/orm");
 const LedgerEntry = require("../src/models/LedgerEntry");
 const Settlement = require("../src/models/Settlement");
 const LedgerAccount = require("../src/models/LedgerAccount");
@@ -40,13 +40,13 @@ describe("Financial Controller & Service Unit & Performance Tests", () => {
     it("should retrieve paginated ledger entries sorted with populated accounts and order", async () => {
       const mockEntries = [
         {
-          _id: new mongoose.Types.ObjectId(),
+          _id: new orm.Types.ObjectId(),
           transactionReference: "MVEC-TXN-1001",
           amount: 50000,
           entryType: "PAYMENT_ESCROW_LOCK",
           debitAccount: { accountNumber: "ACC-ESCROW-001" },
           creditAccount: { accountNumber: "ACC-VENDOR-123" },
-          relatedOrder: { _id: new mongoose.Types.ObjectId() },
+          relatedOrder: { _id: new orm.Types.ObjectId() },
           createdAt: new Date("2026-09-01T10:00:00Z"),
         },
       ];
@@ -143,7 +143,7 @@ describe("Financial Controller & Service Unit & Performance Tests", () => {
   // ─── 2. FUNCTIONALITY TESTS: placeAdminHold ────────────────────────────────
   describe("placeAdminHold() Functionality", () => {
     it("should place a HELD settlement on ADMIN_HOLD with reason", async () => {
-      const settlementId = new mongoose.Types.ObjectId();
+      const settlementId = new orm.Types.ObjectId();
       const mockSettlement = {
         _id: settlementId,
         status: "HELD",
@@ -189,7 +189,7 @@ describe("Financial Controller & Service Unit & Performance Tests", () => {
     });
 
     it("should use default reason if no reason is provided in request body", async () => {
-      const settlementId = new mongoose.Types.ObjectId();
+      const settlementId = new orm.Types.ObjectId();
       const mockSettlement = {
         _id: settlementId,
         status: "HELD",
@@ -223,7 +223,7 @@ describe("Financial Controller & Service Unit & Performance Tests", () => {
       Settlement.findById = async () => null;
 
       try {
-        const validId = new mongoose.Types.ObjectId().toString();
+        const validId = new orm.Types.ObjectId().toString();
         const { req, res } = createMockReqRes({
           params: { id: validId },
           body: { reason: "test" },
@@ -240,7 +240,7 @@ describe("Financial Controller & Service Unit & Performance Tests", () => {
 
     it("should return 400 when settlement is not in HELD status (e.g. already RELEASED)", async () => {
       const mockSettlement = {
-        _id: new mongoose.Types.ObjectId(),
+        _id: new orm.Types.ObjectId(),
         status: "RELEASED",
         save: async function () {
           return this;
@@ -280,7 +280,7 @@ describe("Financial Controller & Service Unit & Performance Tests", () => {
     });
 
     it("should successfully release escrow funds for a HELD settlement and commit transaction", async () => {
-      const settlementId = new mongoose.Types.ObjectId().toString();
+      const settlementId = new orm.Types.ObjectId().toString();
       const mockReleasedSettlement = {
         _id: settlementId,
         status: "RELEASED",
@@ -292,8 +292,8 @@ describe("Financial Controller & Service Unit & Performance Tests", () => {
       let transactionCommitted = false;
       let sessionEnded = false;
 
-      const originalStartSession = mongoose.startSession;
-      mongoose.startSession = async () => ({
+      const originalStartSession = orm.startSession;
+      orm.startSession = async () => ({
         startTransaction: () => {},
         commitTransaction: async () => {
           transactionCommitted = true;
@@ -323,15 +323,15 @@ describe("Financial Controller & Service Unit & Performance Tests", () => {
         assert.equal(transactionCommitted, true, "Transaction should be committed");
         assert.equal(sessionEnded, true, "Session should be ended");
       } finally {
-        mongoose.startSession = originalStartSession;
+        orm.startSession = originalStartSession;
         financialService.releaseEscrowToVendor = originalRelease;
       }
     });
 
-    it("should successfully release escrow funds for an ADMIN_HOLD settlement (admin override resolved)", async () => {
-      const settlementId = new mongoose.Types.ObjectId();
-      const vendorId = new mongoose.Types.ObjectId();
-      const orderId = new mongoose.Types.ObjectId();
+    it("refuses to release a settlement on admin hold until the hold is lifted", async () => {
+      const settlementId = new orm.Types.ObjectId();
+      const vendorId = new orm.Types.ObjectId();
+      const orderId = new orm.Types.ObjectId();
 
       const mockSettlement = {
         _id: settlementId,
@@ -394,16 +394,11 @@ describe("Financial Controller & Service Unit & Performance Tests", () => {
       VendorWallet.findOneAndUpdate = async () => ({});
 
       try {
-        const released = await financialService.releaseEscrowToVendor({
-          settlementId: settlementId.toString(),
-          session: {},
-        });
-
-        assert.equal(released.status, "RELEASED");
-        assert.ok(released.releasedAt instanceof Date);
-        assert.equal(mockEscrow.balance, 0, "Escrow balance should be reduced by grossAmount");
-        assert.equal(mockVendor.balance, 90000, "Vendor balance should be credited netAmount");
-        assert.equal(mockPlatform.balance, 10000, "Platform balance should be credited commissionAmount");
+        await assert.rejects(
+          financialService.releaseEscrowToVendor({ settlementId: settlementId.toString(), session: {} }),
+          /admin hold/,
+        );
+        assert.equal(mockEscrow.balance, 100000, "nothing moves while the hold is active");
       } finally {
         Settlement.findById = origSettlementFindById;
         LedgerAccount.findOne = origLedgerAccountFindOne;
@@ -416,8 +411,8 @@ describe("Financial Controller & Service Unit & Performance Tests", () => {
       let transactionAborted = false;
       let sessionEnded = false;
 
-      const originalStartSession = mongoose.startSession;
-      mongoose.startSession = async () => ({
+      const originalStartSession = orm.startSession;
+      orm.startSession = async () => ({
         startTransaction: () => {},
         commitTransaction: async () => {},
         abortTransaction: async () => {
@@ -435,7 +430,7 @@ describe("Financial Controller & Service Unit & Performance Tests", () => {
 
       try {
         const { req, res } = createMockReqRes({
-          params: { id: new mongoose.Types.ObjectId().toString() },
+          params: { id: new orm.Types.ObjectId().toString() },
         });
 
         await financialController.manualEscrowRelease(req, res);
@@ -445,7 +440,7 @@ describe("Financial Controller & Service Unit & Performance Tests", () => {
         assert.equal(res.statusCode, 400);
         assert.ok(res.jsonData.message.includes("not eligible"));
       } finally {
-        mongoose.startSession = originalStartSession;
+        orm.startSession = originalStartSession;
         financialService.releaseEscrowToVendor = originalRelease;
       }
     });
@@ -455,13 +450,13 @@ describe("Financial Controller & Service Unit & Performance Tests", () => {
   describe("Performance & Load Benchmarking", () => {
     it("should benchmark getLedgerEntries handling 1,000 entries within 50ms", async () => {
       const mockEntries = Array.from({ length: 1000 }, (_, i) => ({
-        _id: new mongoose.Types.ObjectId(),
+        _id: new orm.Types.ObjectId(),
         transactionReference: `MVEC-TXN-PERF-${i}`,
         debitAccount: { accountNumber: "ACC-ESCROW-001" },
         creditAccount: { accountNumber: `ACC-VENDOR-${i % 10}` },
         amount: (i + 1) * 1000,
         entryType: i % 2 === 0 ? "PAYMENT_ESCROW_LOCK" : "ESCROW_RELEASE_VENDOR",
-        relatedOrder: { _id: new mongoose.Types.ObjectId() },
+        relatedOrder: { _id: new orm.Types.ObjectId() },
         createdAt: new Date(Date.now() - i * 60000),
       }));
 
@@ -530,7 +525,7 @@ describe("Financial Controller & Service Unit & Performance Tests", () => {
 
         const promises = Array.from({ length: CONCURRENT_OPS }, (_, i) => {
           const { req, res } = createMockReqRes({
-            params: { id: new mongoose.Types.ObjectId().toString() },
+            params: { id: new orm.Types.ObjectId().toString() },
             body: { reason: `Concurrent hold batch ${i}` },
           });
           return financialController.placeAdminHold(req, res);
@@ -550,8 +545,8 @@ describe("Financial Controller & Service Unit & Performance Tests", () => {
     });
 
     it("should handle high concurrent throughput for manualEscrowRelease (500 concurrent operations)", async () => {
-      const originalStartSession = mongoose.startSession;
-      mongoose.startSession = async () => ({
+      const originalStartSession = orm.startSession;
+      orm.startSession = async () => ({
         startTransaction: () => {},
         commitTransaction: async () => {},
         abortTransaction: async () => {},
@@ -570,7 +565,7 @@ describe("Financial Controller & Service Unit & Performance Tests", () => {
 
         const promises = Array.from({ length: CONCURRENT_OPS }, (_, i) => {
           const { req, res } = createMockReqRes({
-            params: { id: new mongoose.Types.ObjectId().toString() },
+            params: { id: new orm.Types.ObjectId().toString() },
           });
           return financialController.manualEscrowRelease(req, res);
         });
@@ -584,7 +579,7 @@ describe("Financial Controller & Service Unit & Performance Tests", () => {
         assert.ok(totalMs < 500, `500 concurrent releases took ${totalMs}ms (expected < 500ms)`);
         assert.ok(opsPerSec > 1000, `Throughput was ${opsPerSec.toFixed(0)} ops/sec (expected > 1000 ops/sec)`);
       } finally {
-        mongoose.startSession = originalStartSession;
+        orm.startSession = originalStartSession;
         financialService.releaseEscrowToVendor = originalRelease;
       }
     });

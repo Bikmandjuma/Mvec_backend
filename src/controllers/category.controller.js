@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const jwt = require("jsonwebtoken");
 const Category = require("../models/Category");
 const Product = require("../models/Product");
@@ -64,7 +64,7 @@ exports.createCategory = async (req, res) => {
     // Validate parent exists if provided
     let parent = null;
     if (parentId) {
-      if (!mongoose.Types.ObjectId.isValid(parentId)) {
+      if (!orm.Types.ObjectId.isValid(parentId)) {
         return res.status(400).json({ message: "Invalid parentId" });
       }
       parent = await Category.findById(parentId);
@@ -175,7 +175,7 @@ exports.updateCategory = async (req, res) => {
       if (parentId === id) {
         return res.status(422).json({ message: "A category cannot be its own parent" });
       }
-      if (!mongoose.Types.ObjectId.isValid(parentId)) {
+      if (!orm.Types.ObjectId.isValid(parentId)) {
         return res.status(400).json({ message: "Invalid parentId" });
       }
       const parent = await Category.findById(parentId);

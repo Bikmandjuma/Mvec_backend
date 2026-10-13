@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Order = require("../models/Order");
 const Payment = require("../models/Payment");
 const PaymentWebhookLog = require("../models/PaymentWebhookLog");
@@ -35,14 +35,14 @@ exports.recordIgnoredWebhook = async ({ provider, externalTransactionId, amount 
 /**
  * Process payment callback idempotently
  */
-exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderId, paymentId = null, amount, payload, gatewayFee = 0 }) => {
+exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderId, paymentId = null, amount, payload, gatewayFee = 0, paymentMethod = null }) => {
   // 1. Idempotency Check: Prevent duplicate processing if already handled
   const existingLog = await PaymentWebhookLog.findOne({ externalTransactionId });
   if (existingLog && existingLog.status === "PROCESSED") {
     return { status: "ALREADY_PROCESSED", log: existingLog };
   }
 
-  const session = await mongoose.startSession();
+  const session = await orm.startSession();
   session.startTransaction();
 
   try {
@@ -73,6 +73,7 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
     // 4. Update Order Status & Legacy Status Field
     order.paymentStatus = "PAID";
     order.orderStatus = "PROCESSING";
+    if (paymentMethod) order.paymentMethod = paymentMethod;
     order.paidAt = new Date();
     if (!order.deliveryOtp) {
       order.deliveryOtp = Math.floor(100000 + Math.random() * 900000).toString();
@@ -186,12 +187,15 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
  * Payments linked to an order go through processPaymentWebhook (escrow and
  * commission); standalone payments only change their own status.
  */
-exports.settlePaypackPayment = async ({ payment, status, amount, fee = 0, payload = {} }) => {
+// Applies a gateway result (SUCCESSFUL / FAILED / PENDING) to a payment: order
+// payments go through escrow, standalone payments are marked directly.
+exports.settleGatewayPayment = async ({ payment, provider, status, amount, fee = 0, payload = {}, externalTransactionId = null }) => {
   if (status === "SUCCESSFUL") {
     if (payment.parentOrder) {
       return exports.processPaymentWebhook({
-        provider: "PAYPACK",
-        externalTransactionId: payment.gatewayReference,
+        provider,
+        paymentMethod: payment.method === "CARD" ? "CARD" : null,
+        externalTransactionId: externalTransactionId || payment.gatewayReference,
         orderId: payment.parentOrder,
         paymentId: payment._id,
         amount,
@@ -207,9 +211,10 @@ exports.settlePaypackPayment = async ({ payment, status, amount, fee = 0, payloa
     // Only a PENDING payment can transition, which makes repeated callbacks no-ops.
     const updated = await Payment.findOneAndUpdate(
       { _id: payment._id, status: "PENDING" },
-      { status: "SUCCESS", paidAt: new Date(), gatewayFee: fee, gatewayResponse: payload },
+      { status: "SUCCESS", paidAt: new Date(), gatewayFee: fee, gatewayResponse: payload, ...(externalTransactionId ? { gatewayReference: externalTransactionId } : {}) },
       { returnDocument: "after" }
     );
+    if (updated) await exports.fulfilStandalonePayment(updated);
     return { status: updated ? "SUCCESS" : "ALREADY_PROCESSED", payment: updated };
   }
 
@@ -224,3 +229,12 @@ exports.settlePaypackPayment = async ({ payment, status, amount, fee = 0, payloa
 
   return { status: "PENDING" };
 };
+
+// Deliver what a successful standalone payment paid for.
+exports.fulfilStandalonePayment = async (payment) => {
+  if (payment.purpose === "BUYER_PREMIUM" && payment.user) {
+    await require("./buyerSubscription.service").activatePremium({ userId: payment.user, paymentId: payment._id });
+  }
+};
+
+exports.settlePaypackPayment = (args) => exports.settleGatewayPayment({ ...args, provider: "PAYPACK" });

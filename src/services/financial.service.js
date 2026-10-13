@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const LedgerAccount = require("../models/LedgerAccount");
 const LedgerEntry = require("../models/LedgerEntry");
 const Settlement = require("../models/Settlement");
@@ -192,8 +192,11 @@ exports.releaseEscrowToVendor = async ({ settlementId, session, adminUserId = nu
     throw new Error("Settlement not found.");
   }
 
+  // An admin hold blocks every release until the hold is lifted.
   if (settlement.status !== "HELD") {
-    throw new Error(`Settlement is not eligible for release with status: ${settlement.status}`);
+    throw new Error(settlement.status === "ADMIN_HOLD"
+      ? "Settlement is not eligible for release while on admin hold. Lift the hold first."
+      : `Settlement is not eligible for release with status: ${settlement.status}`);
   }
 
   const escrowAccount = await getOrCreateLedgerAccount({ accountType: "ESCROW_HOLDING", session });

@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Supplier = require("../models/Supplier");
 const SupplierTeamMember = require("../models/SupplierTeamMember");
 const Product = require("../models/Product");
@@ -184,7 +184,7 @@ exports.getSupplierProducts = async (req, res) => {
   try {
     const { id } = req.params;
 
-    if (!mongoose.isValidObjectId(id)) {
+    if (!orm.isValidObjectId(id)) {
       return res.status(404).json({ message: "Supplier not found" });
     }
 
@@ -248,6 +248,7 @@ exports.adminVerifySupplier = async (req, res) => {
     if (!["VERIFIED", "REJECTED"].includes(decision)) {
       return res.status(400).json({ message: "decision must be VERIFIED or REJECTED" });
     }
+    if (!orm.isValidObjectId(req.params.id)) return res.status(400).json({ message: "A valid supplier ID is required." });
 
     const supplier = await Supplier.findById(req.params.id);
     if (!supplier) {

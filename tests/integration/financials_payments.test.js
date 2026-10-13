@@ -1,5 +1,6 @@
-const mongoose = require("mongoose");
-const { MongoMemoryReplSet, MongoMemoryServer } = require("mongodb-memory-server");
+require("../helpers/jest-shim"); // Jest-style API on node:test
+const db = require("../helpers/mysql"); // MySQL test database (first, before models)
+const orm = require("../../src/database/orm");
 const request = require("supertest");
 const jwt = require("jsonwebtoken");
 const express = require("express");
@@ -28,7 +29,6 @@ const paypackService = require("../../src/services/paypack.service");
 
 jest.setTimeout(60000);
 
-let mongoServer;
 let app;
 const JWT_SECRET = "test_integration_secret_key";
 
@@ -84,17 +84,6 @@ function sendPaypackWebhook(ref, amount, { fee = 0, status = "successful" } = {}
     });
 }
 
-const canRunTransactions = async (mongoose) => {
-  try {
-    const session = await mongoose.startSession();
-    session.startTransaction();
-    await session.abortTransaction();
-    session.endSession();
-    return true;
-  } catch (err) {
-    return false;
-  }
-};
 
 const systemMongodPath = () => {
   try {
@@ -105,42 +94,6 @@ const systemMongodPath = () => {
   }
 };
 
-async function startMongo() {
-  let lastErr;
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    try {
-      let uri;
-      let stop;
-      const mongodPath = systemMongodPath();
-      if (mongodPath) {
-        const replSet = await MongoMemoryReplSet.create({
-          binary: { systemBinary: mongodPath },
-          replSet: { count: 1, name: "rs0" },
-        });
-        uri = replSet.getUri("test");
-        stop = () => replSet.stop();
-      } else {
-        const server = await MongoMemoryServer.create({
-          binary: { version: "7.0.0" },
-          replSet: { count: 1 },
-        });
-        uri = server.getUri();
-        stop = () => server.stop();
-      }
-      await mongoose.connect(uri, { directConnection: true });
-      if (await canRunTransactions(mongoose)) {
-        return { uri, stop };
-      }
-      await mongoose.disconnect();
-      await stop();
-      throw new Error("MongoMemoryServer did not provide transaction support");
-    } catch (err) {
-      lastErr = err;
-      await new Promise((r) => setTimeout(r, 1500));
-    }
-  }
-  throw lastErr;
-}
 
 describe("Financials & Payments Integration Suite", () => {
   let superAdminUser, vendorUser, buyerUser, developerUser, affiliateUser;
@@ -160,8 +113,8 @@ describe("Financials & Payments Integration Suite", () => {
     });
 
     try {
-      // startMongo connects mongoose and verifies a replica set topology is present.
-      mongoServer = await startMongo();
+      // MySQL test database (transactions are MySQL transactions).
+      await db.setup();
       mongoReady = true;
       app = createTestApp();
     } catch (err) {
@@ -173,31 +126,14 @@ describe("Financials & Payments Integration Suite", () => {
   });
 
   afterAll(async () => {
-    await mongoose.disconnect();
-    if (mongoServer) await mongoServer.stop();
+    await db.close();
   });
 
   beforeEach(async () => {
     if (!mongoReady) {
       return;
     }
-    await User.deleteMany({});
-    await Order.deleteMany({});
-    await Payment.deleteMany({});
-    await Product.deleteMany({});
-    await Category.deleteMany({});
-    await PricingSnapshot.deleteMany({});
-    await Settlement.deleteMany({});
-    await LedgerEntry.deleteMany({});
-    await LedgerAccount.deleteMany({});
-    await VendorWallet.deleteMany({});
-    await AdminWallet.deleteMany({});
-    await DeveloperWallet.deleteMany({});
-    await AffiliateWallet.deleteMany({});
-    await AdminPayout.deleteMany({});
-    await DeveloperPayout.deleteMany({});
-    await PaymentWebhookLog.deleteMany({});
-    await CommissionRule.deleteMany({});
+    await db.reset();
 
     superAdminUser = await User.create({
       Fullname: "Super Admin",
@@ -311,7 +247,7 @@ describe("Financials & Payments Integration Suite", () => {
       expect(payment.gatewayReference).toBe(response.body.gatewayReference);
       expect(payment.provider).toBe("MTN");
       expect(payment.amount).toBe(30000);
-      expect(payment.parentOrder).toBeUndefined();
+      expect(payment.parentOrder ?? null).toBeNull(); // standalone payment: no order
       expect(String(payment.user)).toBe(String(buyerUser._id));
     });
 
@@ -677,8 +613,9 @@ describe("Financials & Payments Integration Suite", () => {
       expect(adminWalletAfter.totalEarned).toBe(2500);
 
       const affiliateWalletAfter = await AffiliateWallet.findOne({ affiliateUser: affiliateUser._id });
-      expect(affiliateWalletAfter.pendingBalance).toBe(0);
-      expect(affiliateWalletAfter.availableBalance).toBe(500);
+      // Affiliate commission is approved only by confirmed delivery, never by a manual escrow release.
+      expect(affiliateWalletAfter.pendingBalance).toBe(500);
+      expect(affiliateWalletAfter.availableBalance).toBe(0);
 
       const gatewayAccount = await LedgerAccount.findOne({ accountType: "GATEWAY_FEES" });
       expect(gatewayAccount).toBeTruthy();

@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const bcrypt = require("bcryptjs");
 const User = require("../models/User");
 const crypto = require("crypto");
@@ -330,7 +330,7 @@ exports.requestPayout = async (req, res) => {
     payoutDestination = phone.formattedNumber;
   }
 
-  const session = await mongoose.startSession();
+  const session = await orm.startSession();
   try {
     let created;
     await session.withTransaction(async () => {
@@ -641,7 +641,7 @@ exports.adminUpdatePayout = async (req, res) => {
   if (!["PROCESSING", "PAID", "REJECTED", "FAILED"].includes(status)) {
     return res.status(400).json({ message: "Choose PROCESSING, PAID, REJECTED, or FAILED." });
   }
-  const session = await mongoose.startSession();
+  const session = await orm.startSession();
   try {
     let updated;
     await session.withTransaction(async () => {

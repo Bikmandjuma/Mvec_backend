@@ -1,5 +1,5 @@
 // src/controllers/payout.controller.js
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const { Payout, VendorBalance } = require("../models/Payout");
 const VendorWallet = require("../models/VendorWallet");
 const Settlement = require("../models/Settlement");
@@ -27,7 +27,7 @@ exports.getVendorBalance = async (req, res) => {
     const [wallet, fees] = await Promise.all([
       walletOf(vendorId),
       Settlement.aggregate([
-        { $match: { vendor: new mongoose.Types.ObjectId(String(vendorId)), status: "RELEASED" } },
+        { $match: { vendor: new orm.Types.ObjectId(String(vendorId)), status: "RELEASED" } },
         { $group: { _id: null, commission: { $sum: "$commissionAmount" } } },
       ]).catch(() => []),
     ]);

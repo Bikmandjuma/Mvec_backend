@@ -1,7 +1,11 @@
 // MySQL row <-> Mongo-shaped document conversion.
-const { Types } = require("mongoose");
+const { ObjectId } = require("bson");
 
-const { ObjectId } = Types;
+// Like Mongoose: an ObjectId's `_id` is itself, so `value._id || value` works
+// for both populated documents and plain ids throughout the app.
+if (!Object.getOwnPropertyDescriptor(ObjectId.prototype, "_id")) {
+  Object.defineProperty(ObjectId.prototype, "_id", { get() { return this; }, configurable: true });
+}
 const HEX24 = /^[a-f0-9]{24}$/i;
 
 const isObjectId = (v) => v instanceof ObjectId || (v && v._bsontype === "ObjectId");
@@ -34,8 +38,15 @@ const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)
 // JSON column values: ObjectIds / docs become plain id strings.
 const toJsonValue = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v, (k, x) => (isDoc(x) ? idString(x) : x))));
 
+// MariaDB stores JSON as LONGTEXT and returns it as a string; MySQL returns objects.
+const parseJson = (v) => {
+  if (typeof v !== "string") return v;
+  try { return JSON.parse(v); } catch { return v; }
+};
+
 // DB column value -> API value for a field.
 function fromColumn(field, value) {
+  if (field.kind === "json" || field.kind === "refArray") value = parseJson(value);
   switch (field.kind) {
     case "ref": return value === null || value === undefined ? null : toObjectId(value);
     case "refArray": return (Array.isArray(value) ? value : []).map(toObjectId);
@@ -83,6 +94,19 @@ function rowToData(entry, row, childRows = {}) {
 }
 
 // Document data -> { columns, children } for writing.
+// `doc.x = undefined` unsets x (Mongoose semantics) -> NULL. A field that was
+// never loaded (left out by select()) has no key at all and is left alone.
+function explicitlyUnset(data, dotted) {
+  const parts = dotted.split(".");
+  let cur = data;
+  for (const p of parts.slice(0, -1)) {
+    if (!cur || typeof cur !== "object") return false;
+    cur = cur[p];
+  }
+  const last = parts[parts.length - 1];
+  return Boolean(cur) && typeof cur === "object" && Object.prototype.hasOwnProperty.call(cur, last) && cur[last] === undefined;
+}
+
 function dataToColumns(entry, data) {
   const columns = {};
   const aliases = [];
@@ -91,6 +115,7 @@ function dataToColumns(entry, data) {
     if (field.alias) { aliases.push(field); continue; }
     const v = toColumn(field, getPath(data, field.path));
     if (v !== undefined) columns[field.column] = v;
+    else if (explicitlyUnset(data, field.path)) columns[field.column] = null;
   }
   // Alias fields (e.g. Staff.user_id) fill their column only when the primary is unset.
   for (const field of aliases) {
@@ -118,4 +143,4 @@ function dataToColumns(entry, data) {
 // Stable string for change detection.
 const fingerprint = (value) => JSON.stringify(value, (k, x) => (x instanceof Date ? x.toISOString() : x));
 
-module.exports = { ObjectId, HEX24, isObjectId, isDoc, idString, toObjectId, getPath, setPath, clone, fromColumn, toColumn, rowToData, dataToColumns, fingerprint };
+module.exports = { parseJson, ObjectId, HEX24, isObjectId, isDoc, idString, toObjectId, getPath, setPath, clone, fromColumn, toColumn, rowToData, dataToColumns, fingerprint };

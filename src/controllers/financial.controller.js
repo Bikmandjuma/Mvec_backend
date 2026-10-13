@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Settlement = require("../models/Settlement");
 const LedgerEntry = require("../models/LedgerEntry");
 const financialService = require("../services/financial.service");
@@ -16,7 +16,7 @@ exports.getLedgerEntries = async (req, res) => {
     if (req.query.entryType) {
       filter.entryType = req.query.entryType;
     }
-    if (req.query.relatedOrder && mongoose.Types.ObjectId.isValid(req.query.relatedOrder)) {
+    if (req.query.relatedOrder && orm.Types.ObjectId.isValid(req.query.relatedOrder)) {
       filter.relatedOrder = req.query.relatedOrder;
     }
     if (req.query.startDate || req.query.endDate) {
@@ -61,7 +61,7 @@ exports.placeAdminHold = async (req, res) => {
     const { id } = req.params;
     const { reason } = req.body;
 
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+    if (!orm.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid settlement ID format." });
     }
 
@@ -90,23 +90,50 @@ exports.placeAdminHold = async (req, res) => {
   }
 };
 
+// @desc    Lift an administrative hold (the settlement is HELD again and can be
+//          released by delivery confirmation or manually)
+// @route   DELETE /api/admin/settlements/:id/hold   { note? }
+// @access  Private (Super Admin)
+exports.liftAdminHold = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!orm.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid settlement ID format." });
+    }
+    const settlement = await Settlement.findOneAndUpdate(
+      { _id: id, status: "ADMIN_HOLD" },
+      { $set: { status: "HELD", adminHoldReason: `${(req.body?.note || "Hold lifted").toString().trim().slice(0, 300)}` } },
+      { new: true },
+    );
+    if (!settlement) {
+      const exists = await Settlement.exists({ _id: id });
+      return res.status(exists ? 400 : 404).json({ message: exists ? "This settlement is not on hold." : "Settlement not found." });
+    }
+    return res.status(200).json({ message: "Hold lifted. The settlement can be released again.", settlement });
+  } catch (error) {
+    console.error("Error lifting admin hold:", error);
+    return res.status(500).json({ message: "We could not lift the hold right now. Please try again." });
+  }
+};
+
 // @desc    Manual Escrow Release Override
 // @route   POST /api/admin/settlements/:id/release
 // @access  Private (Super Admin)
 exports.manualEscrowRelease = async (req, res) => {
   const { id } = req.params;
 
-  if (!mongoose.Types.ObjectId.isValid(id)) {
+  if (!orm.Types.ObjectId.isValid(id)) {
     return res.status(400).json({ message: "Invalid settlement ID format." });
   }
 
-  const session = await mongoose.startSession();
+  const session = await orm.startSession();
   session.startTransaction();
 
   try {
     const settlement = await financialService.releaseEscrowToVendor({
       settlementId: id,
       session,
+      adminUserId: req.user?.id || req.user?._id || null,
     });
 
     await session.commitTransaction();

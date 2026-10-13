@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const AffiliateLink = require("../models/AffiliateLink");
 const AffiliateWallet = require("../models/AffiliateWallet");
 const AffiliatePayout = require("../models/AffiliatePayout");
@@ -163,7 +163,7 @@ class AffiliateService {
       throw new Error(`Minimum withdrawal threshold is RWF ${MINIMUM_PAYOUT_RWF.toLocaleString()}. Requested: RWF ${amount.toLocaleString()}`);
     }
 
-    const session = await mongoose.startSession();
+    const session = await orm.startSession();
     session.startTransaction();
 
     try {
@@ -226,7 +226,7 @@ class AffiliateService {
    * Super Admin Process & Approve Payout
    */
   async processAdminPayout({ payoutId, adminId, status, transactionReference, rejectionReason }) {
-    const session = await mongoose.startSession();
+    const session = await orm.startSession();
     session.startTransaction();
 
     try {
@@ -449,13 +449,13 @@ class AffiliateService {
   // ═════════════════════════════════════════════════════════════════════════
 
   _oid(userId) {
-    return mongoose.Types.ObjectId.isValid(String(userId))
-      ? new mongoose.Types.ObjectId(String(userId))
+    return orm.Types.ObjectId.isValid(String(userId))
+      ? new orm.Types.ObjectId(String(userId))
       : null;
   }
 
   _isValidId(id) {
-    return mongoose.Types.ObjectId.isValid(String(id || ""));
+    return orm.Types.ObjectId.isValid(String(id || ""));
   }
 
   /** `7d` | `30d` | `90d` (or any `<n>d`) → number of days, default 30. */

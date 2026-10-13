@@ -1,6 +1,8 @@
-const mongoose = require("mongoose");
+require("../helpers/jest-shim"); // Jest-style API on node:test
+const db = require("../helpers/mysql"); // MySQL test database (first, before models)
+const paypackService = require("../../src/services/paypack.service");
+const orm = require("../../src/database/orm");
 const crypto = require("crypto");
-const { MongoMemoryServer } = require("mongodb-memory-server");
 const request = require("supertest");
 const jwt = require("jsonwebtoken");
 const express = require("express");
@@ -22,7 +24,6 @@ const PaymentWebhookLog = require("../../src/models/PaymentWebhookLog");
 jest.setTimeout(120000);
 
 const JWT_SECRET = "momo_test_secret_key";
-let mongoServer;
 let app;
 
 function createTestApp() {
@@ -36,48 +37,24 @@ function createTestApp() {
   return testApp;
 }
 
-const canRunTransactions = (mongoose) => {
-  const conn = mongoose.connection;
-  return conn && conn.db && conn.db.getMongo && conn.db.getMongo().getTopology
-    ? conn.db.getMongo().getTopology().description.type !== "Single"
-    : false;
-};
 
-async function startMongo() {
-  let lastErr;
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    try {
-      const server = await MongoMemoryServer.create({
-        binary: { version: "7.0.0" },
-        replSet: { count: 1 },
-      });
-      await mongoose.connect(server.getUri());
-      // Confirm the memory server actually gave us a replica set (this has been
-      // flaky in some environments and silently falls back to a standalone node).
-      if (canRunTransactions(mongoose)) {
-        return server;
-      }
-      await mongoose.disconnect();
-      await server.stop();
-      throw new Error("MongoMemoryServer did not provide a replica set topology");
-    } catch (err) {
-      lastErr = err;
-      await new Promise((r) => setTimeout(r, 1500));
-    }
-  }
-  throw lastErr;
-}
 
 describe("MoMo USSD Push Webhook Integration", () => {
   let buyer, vendor, category, product, buyerToken;
   let mongoReady = false;
 
   beforeAll(async () => {
+    // Behave like live Paypack: the push stays PENDING until the webhook arrives.
+    jest.spyOn(paypackService, "isSandbox").mockReturnValue(false);
+    jest.spyOn(paypackService, "triggerUssdPush").mockImplementation(async ({ amount }) => {
+      const ref = `PP-${require("crypto").randomUUID()}`;
+      return { success: true, reference: ref, status: "PENDING", raw: { ref, amount, status: "pending" } };
+    });
     process.env.NODE_ENV = "test";
     process.env.JWT_SECRET = JWT_SECRET;
     try {
-      // startMongo connects mongoose and verifies a replica set topology is present.
-      mongoServer = await startMongo();
+      // MySQL test database (transactions are MySQL transactions).
+      await db.setup();
       mongoReady = true;
       app = createTestApp();
     } catch (err) {
@@ -89,27 +66,14 @@ describe("MoMo USSD Push Webhook Integration", () => {
   });
 
   afterAll(async () => {
-    await mongoose.disconnect();
-    if (mongoServer) await mongoServer.stop();
+    await db.close();
   });
 
   beforeEach(async () => {
     if (!mongoReady) {
       return;
     }
-    await Promise.all([
-      User.deleteMany({}),
-      Order.deleteMany({}),
-      Payment.deleteMany({}),
-      Product.deleteMany({}),
-      Category.deleteMany({}),
-      PricingSnapshot.deleteMany({}),
-      Settlement.deleteMany({}),
-      LedgerEntry.deleteMany({}),
-      LedgerAccount.deleteMany({}),
-      VendorWallet.deleteMany({}),
-      PaymentWebhookLog.deleteMany({}),
-    ]);
+    await db.reset();
 
     buyer = await User.create({ Fullname: "Alice", email: "alice@mv.rw", password: "pass123", phone: "0788123999", gender: "female", role: "buyer" });
     vendor = await User.create({ Fullname: "Tech Vendor", email: "tech@mv.rw", password: "pass123", phone: "0788000002", gender: "male", role: "vendor", companyName: "Tech Ltd" });
@@ -128,7 +92,7 @@ describe("MoMo USSD Push Webhook Integration", () => {
       shippingAddress: { street: "KN 5 Rd", city: "Kigali", state: "Kigali", country: "Rwanda" },
       totalAmount: 30000,
       paymentStatus: "PENDING",
-      orderStatus: "PROCESSING",
+      orderStatus: "PENDING", // unpaid orders wait in PENDING
     });
 
     // 1. Initiation
@@ -140,7 +104,7 @@ describe("MoMo USSD Push Webhook Integration", () => {
     expect(initRes.status).toBe(200);
     expect(initRes.body.paymentRef).toBeDefined();
     expect(initRes.body.paymentId).toBeDefined();
-    expect(initRes.body.gatewayReference).toMatch(/^MVEC/);
+    expect(initRes.body.gatewayReference).toBeTruthy(); // Paypack reference (SANDBOX-… without keys)
 
     const payment = await Payment.findById(initRes.body.paymentId);
     expect(payment.status).toBe("PENDING");
@@ -207,7 +171,7 @@ describe("MoMo USSD Push Webhook Integration", () => {
     process.env.NODE_ENV = "production";
     process.env.MOMO_WEBHOOK_SECRET = "prod-secret";
 
-    const payload = { financialTransactionId: "GT-SIG-1", externalId: "ORD-SIG", amount: 100, status: "SUCCESSFUL" };
+    const payload = { financialTransactionId: "GT-SIG-1", externalId: "ORD-SIG", amount: 500, status: "SUCCESSFUL" };
     const signature = crypto.createHmac("sha256", "prod-secret").update(JSON.stringify(payload)).digest("hex");
 
     const order = await Order.create({
@@ -217,7 +181,7 @@ describe("MoMo USSD Push Webhook Integration", () => {
       shippingAddress: { street: "KN 5 Rd", city: "Kigali", state: "Kigali", country: "Rwanda" },
       totalAmount: 500,
       paymentStatus: "PENDING",
-      orderStatus: "PROCESSING",
+      orderStatus: "PENDING",
     });
     const payment = await Payment.create({
       parentOrder: order._id,

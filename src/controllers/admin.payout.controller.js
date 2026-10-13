@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const AdminWallet = require("../models/AdminWallet");
 const AdminPayout = require("../models/AdminPayout");
 const { formatRwandanPhone } = require("../utils/momo.util");
@@ -25,7 +25,7 @@ exports.getAdminBalance = async (req, res) => {
 // @route   POST /api/admin/payouts/request
 // @access  Private (Admin/Super Admin)
 exports.requestAdminPayout = async (req, res) => {
-  const session = await mongoose.startSession();
+  const session = await orm.startSession();
   session.startTransaction();
 
   try {
@@ -33,15 +33,21 @@ exports.requestAdminPayout = async (req, res) => {
     const userId = req.user.id || req.user._id;
 
     if (!amount || amount <= 0) {
+      await session.abortTransaction();
+      session.endSession();
       return res.status(400).json({ message: "Valid withdrawal amount is required." });
     }
 
     if (!accountDetails || !accountDetails.accountName || !accountDetails.accountNumber) {
+      await session.abortTransaction();
+      session.endSession();
       return res.status(400).json({ message: "Complete payout details (accountName, accountNumber) are required." });
     }
 
     const phoneInfo = formatRwandanPhone(accountDetails.accountNumber);
     if (!phoneInfo) {
+      await session.abortTransaction();
+      session.endSession();
       return res.status(400).json({
         message: "Invalid Rwandan phone number. Must start with 078/079 (MTN) or 073 (Airtel).",
       });
@@ -53,6 +59,8 @@ exports.requestAdminPayout = async (req, res) => {
 
     let wallet = await AdminWallet.findOne({ adminUser: userId }).session(session);
     if (!wallet || wallet.availableBalance < amount) {
+      await session.abortTransaction();
+      session.endSession();
       return res.status(400).json({
         message: `Insufficient available balance. Available: ${wallet ? wallet.availableBalance : 0} RWF`,
       });

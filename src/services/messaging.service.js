@@ -11,7 +11,9 @@ const nodemailer = require("nodemailer");
 
 const isProduction = () => process.env.NODE_ENV === "production";
 
+// Tests never send real email (they stub the transport when they need it).
 function emailConfigured() {
+  if (process.env.NODE_ENV === "test") return false;
   return Boolean(process.env.EMAIL_USER && process.env.EMAIL_PASS);
 }
 

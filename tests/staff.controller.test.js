@@ -1,6 +1,7 @@
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
-const mongoose = require("mongoose");
+const db = require("./helpers/mysql"); // test database (store lookups are real)
+const orm = require("../src/database/orm");
 const Staff = require("../src/models/Staff");
 const User = require("../src/models/User");
 const authController = require("../src/controllers/auth.controller");
@@ -11,7 +12,7 @@ function createMockReqRes({ body = {}, user } = {}) {
     body,
     params: {},
     user: user || {
-      id: new mongoose.Types.ObjectId().toString(),
+      id: new orm.Types.ObjectId().toString(),
       role: "vendor",
     },
   };
@@ -32,8 +33,8 @@ function createMockReqRes({ body = {}, user } = {}) {
 
 describe("Vendor account team", () => {
   it("creates staff without requiring an associated store", async () => {
-    const ownerId = new mongoose.Types.ObjectId().toString();
-    const memberId = new mongoose.Types.ObjectId();
+    const ownerId = new orm.Types.ObjectId().toString();
+    const memberId = new orm.Types.ObjectId();
     const originalUserFindOne = User.findOne;
     const originalStaffFindOne = Staff.findOne;
     const originalStaffCreate = Staff.create;
@@ -60,7 +61,7 @@ describe("Vendor account team", () => {
     Staff.create = async (record) => {
       createdRecord = record;
       return {
-        _id: new mongoose.Types.ObjectId(),
+        _id: new orm.Types.ObjectId(),
         ...record,
         deleteOne: async () => {},
       };
@@ -112,7 +113,7 @@ describe("Vendor account team", () => {
     let removed = false;
 
     User.findOne = async () => ({
-      _id: new mongoose.Types.ObjectId(),
+      _id: new orm.Types.ObjectId(),
       email: "teammate@example.rw",
     });
     Staff.findOne = async () => null;
@@ -147,6 +148,8 @@ describe("Vendor account team", () => {
   });
 
   it("creates an invitation for an email with no account yet", async () => {
+    await db.setup();
+    const owner = new orm.Types.ObjectId().toString();
     const originalUserFindOne = User.findOne;
     const originalStaffFindOne = Staff.findOne;
     const originalStaffCreate = Staff.create;
@@ -157,14 +160,14 @@ describe("Vendor account team", () => {
     User.findOne = async () => null;
     Staff.findOne = async (query) => {
       assert.deepEqual(query, {
-        vendorOwner: "vendor-owner",
+        vendorOwner: owner,
         email: "new.member@example.rw",
       });
       return null;
     };
     Staff.create = async (record) => {
       createdRecord = record;
-      return { _id: new mongoose.Types.ObjectId(), ...record };
+      return { _id: new orm.Types.ObjectId(), ...record };
     };
     authController.getTransporter = () => ({
       sendMail: async ({ to }) => {
@@ -174,7 +177,7 @@ describe("Vendor account team", () => {
 
     try {
       const { req, res } = createMockReqRes({
-        user: { id: "vendor-owner", role: "vendor" },
+        user: { id: owner, role: "vendor" },
         body: { email: "New.Member@Example.RW", role: "ORDER_MANAGER" },
       });
 
@@ -194,42 +197,41 @@ describe("Vendor account team", () => {
   });
 
   it("lists staff by vendor account without requiring a store", async () => {
-    const ownerId = new mongoose.Types.ObjectId().toString();
-    const member = { _id: new mongoose.Types.ObjectId() };
+    await db.setup();
+    const ownerId = new orm.Types.ObjectId().toString();
+    const member = { _id: new orm.Types.ObjectId(), role: "ORDER_MANAGER", status: "ACTIVE", user: { Fullname: "Member", email: "m@example.rw" } };
     const originalStaffFind = Staff.find;
+    const originalUserFindById = User.findById;
 
     Staff.find = (query) => {
       assert.deepEqual(query, { vendorOwner: ownerId });
-      return {
-        populate: async (path, fields) => {
-          assert.equal(path, "user");
-          assert.equal(fields, "Fullname email role");
-          return [member];
-        },
-      };
+      return { populate: () => ({ sort: async () => [member] }) };
     };
+    User.findById = () => ({ select: async () => ({ _id: ownerId, Fullname: "Owner", email: "o@example.rw", createdAt: new Date() }) });
 
     try {
-      const { req, res } = createMockReqRes({
-        user: { id: ownerId, role: "vendor" },
-      });
-
+      const { req, res } = createMockReqRes({ user: { id: ownerId, role: "vendor" } });
       await staffController.getStoreStaff(req, res);
 
-      assert.equal(res.statusCode, 200);
-      assert.deepEqual(res.jsonData.staff, [member]);
+      assert.equal(res.statusCode, 200, JSON.stringify(res.jsonData));
+      const rows = res.jsonData.staff || res.jsonData.data;
+      assert.equal(rows[0].role, "OWNER", "the owner is listed first");
+      assert.ok(rows.some((r) => String(r._id || r.id) === String(member._id)), "members follow");
     } finally {
       Staff.find = originalStaffFind;
+      User.findById = originalUserFindById;
     }
   });
 
   it("allows staff records without a store reference", async () => {
     const staff = new Staff({
-      vendorOwner: new mongoose.Types.ObjectId(),
-      user: new mongoose.Types.ObjectId(),
+      vendorOwner: new orm.Types.ObjectId(),
+      user: new orm.Types.ObjectId(),
     });
 
     await assert.doesNotReject(staff.validate());
     assert.equal(staff.store, undefined);
   });
 });
+
+require("node:test").after(() => db.close());

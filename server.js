@@ -1,8 +1,5 @@
 const express = require("express");
 const http = require("http");
-const mongoose = require("mongoose");
-// Expose `id` alongside `_id` in every JSON response; the frontend reads `id`.
-mongoose.set("toJSON", { virtuals: true });
 const dotenv = require("dotenv");
 const helmet = require("helmet");
 const morgan = require("morgan");
@@ -15,35 +12,15 @@ const swaggerUi = require("swagger-ui-express");
 const YAML = require("yamljs");
 const swaggerDocument = YAML.load("./swagger.yaml");
 
-// Load all models into mongoose entry
-const routes = require("./src/routes/auth.routes");
-const User = require("./src/models/User");
-const Category = require("./src/models/Category");
-const Product = require("./src/models/Product");
 const { initBackgroundWorkers } = require("./src/workers/slaWorker");
 
 dotenv.config();
 
-// Ensure directConnection or explicit replicaSet options are provided
-const MONGO_URI = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/your_database_name?replicaSet=rs0&directConnection=true";
-
-// DB_DRIVER=mysql runs the same app on MySQL (src/database); MongoDB is the default.
-const { isMysql } = require("./src/database/driver");
-
-if (isMysql) {
-  const { sequelize } = require("./src/database");
-  sequelize.authenticate()
-    .then(() => {
-      console.log(`Connected to MySQL database "${sequelize.config.database}" successfully`);
-      initBackgroundWorkers();
-    })
-    .catch((err) => console.error("Error connecting to MySQL:", err.message));
-} else {
-  mongoose.connect(MONGO_URI)
-    .then(() => require("./src/config/transactions").ensureTransactionSupport(mongoose.connection))
-    .then((replicaSet) => console.log(`Connected to MongoDB${replicaSet ? " replica set" : " (standalone)"} successfully`))
-    .catch((err) => console.error("Error connecting to MongoDB:", err));
-}
+// All data lives in MySQL (src/database). Run directly, the server refuses to
+// start without a reachable, fully migrated database. Required by tests, it
+// only exports the app (tests manage their own test database).
+const { connectDatabase } = require("./src/database/startup");
+const isMain = require.main === module;
 
 const app = express();
 
@@ -167,8 +144,8 @@ app.get("/api/events", (req, res) => {
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
 // Liveness/readiness probe for the hosting platform and uptime monitors.
-app.get("/health", (req, res) => {
-  const dbUp = mongoose.connection.readyState === 1;
+app.get("/health", async (req, res) => {
+  const dbUp = await require("./src/database").sequelize.authenticate().then(() => true, () => false);
   res.status(dbUp ? 200 : 503).json({ status: dbUp ? "ok" : "degraded", db: dbUp ? "up" : "down", uptime: Math.round(process.uptime()) });
 });
 
@@ -199,43 +176,26 @@ app.use((err, req, res, next) => {
   return res.status(statusCode).json({ message: err.message });
 });
 
-// Initialize background cron tasks once DB connection is established
-if (!isMysql) mongoose.connection.once("open", () => {
-  console.log("Connected to MongoDB.");
-  rebuildSparseUserIndexes();
-  initBackgroundWorkers();
-});
-
-// The users.email / users.phone unique indexes were created non-sparse, so
-// every account missing one of them indexed as `null` and collided with the
-// next one (phone-only sign-ups, Google accounts). Mongoose only creates
-// indexes, so an existing deployment must drop the old option before the
-// sparse schema indexes can be rebuilt.
-async function rebuildSparseUserIndexes() {
-  try {
-    const collection = mongoose.connection.collection("users");
-    const existing = await collection.indexes();
-    const stale = ["email_1", "phone_1"].filter((name) => {
-      const index = existing.find((i) => i.name === name);
-      return index && index.unique && !index.sparse;
-    });
-    for (const name of stale) {
-      await collection.dropIndex(name);
-      console.log(`Rebuilding users.${name} as a sparse unique index.`);
-    }
-    if (stale.length) await User.syncIndexes();
-  } catch (err) {
-    console.error("Could not rebuild user indexes:", err.message);
-  }
-}
-
 const PORT = process.env.PORT || 4000;
 const HOST = process.env.HOST || "0.0.0.0";
 
 const httpServer = http.createServer(app);
 socketService.init(httpServer);
 
-httpServer.listen(PORT, HOST, () => {
-  console.log(`🚀 Server listening on ${HOST}:${PORT}`);
-  console.log(`🏠 Local access: http://localhost:${PORT}`);
-});
+if (isMain) {
+  connectDatabase()
+    .then((name) => {
+      console.log(`Connected to MySQL database "${name}"`);
+      initBackgroundWorkers();
+      httpServer.listen(PORT, HOST, () => {
+        console.log(`🚀 Server listening on ${HOST}:${PORT}`);
+        console.log(`🏠 Local access: http://localhost:${PORT}`);
+      });
+    })
+    .catch((err) => {
+      console.error(`\n[database] ${err.message}\n`);
+      process.exit(1);
+    });
+}
+
+module.exports = app;

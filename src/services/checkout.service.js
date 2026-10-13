@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Order = require("../models/Order");
 const Product = require("../models/Product");
 const { normalizePhone } = require("../utils/sms.util");
@@ -74,7 +74,7 @@ function normaliseLines(rawLines) {
   const merged = new Map();
   for (const line of rawLines) {
     const productId = String(line?.productId || "");
-    if (!mongoose.isValidObjectId(productId)) throw httpError(400, "Every checkout item must reference a valid product.");
+    if (!orm.isValidObjectId(productId)) throw httpError(400, "Every checkout item must reference a valid product.");
     const qty = Number(line.quantity ?? line.qty);
     if (!Number.isInteger(qty) || qty < 1) throw httpError(400, "Product quantity must be a positive whole number.");
     merged.set(productId, (merged.get(productId) || 0) + qty);
