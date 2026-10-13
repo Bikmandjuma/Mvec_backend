@@ -4,7 +4,11 @@ const Product = require("../models/Product");
 const { normalizePhone } = require("../utils/sms.util");
 const { effectivePrice } = require("../utils/pricing.util");
 const affiliateAttribution = require("./affiliateAttribution.service");
-const { PROVINCES, DELIVERY_METHODS, computeShippingFee } = require("../config/delivery");
+const { PROVINCES, RWANDA_LOCATIONS, provinceOfDistrict } = require("../config/rwandaLocations");
+const shippingService = require("./shipping.service");
+
+// Buyers pick a delivery speed; sellers price it with their shipping zones.
+const DELIVERY_METHODS = { standard: "STANDARD", express: "EXPRESS", pickup: "PICKUP" };
 
 const MAX_QTY_PER_LINE = 100;
 const PAYMENT_METHODS = ["MOMO", "AIRTEL"];
@@ -20,29 +24,35 @@ const generateDeliveryOtp = () => Math.floor(100000 + Math.random() * 900000).to
  * Accepts the current shape ({ street, district, sector, province }) and the
  * legacy one ({ street, city, state }) so older clients keep working.
  */
-function parseDelivery({ shippingAddress = {}, recipient = {}, deliveryMethod }) {
+function parseDelivery({ shippingAddress = {}, recipient = {}, deliveryMethod, shippingMethod }) {
   const street = clean(shippingAddress.street || shippingAddress.address);
-  const district = clean(shippingAddress.district || shippingAddress.city, 80);
+  const districtInput = clean(shippingAddress.district || shippingAddress.city, 80);
   const sector = clean(shippingAddress.sector, 80);
-  const province = clean(shippingAddress.province || shippingAddress.state, 80) || "Kigali City";
+  const provinceInput = clean(shippingAddress.province || shippingAddress.state, 80);
 
-  if (street.length < 3) throw httpError(400, "Please enter your street or a nearby landmark.");
-  if (!district) throw httpError(400, "Please enter your district.");
-  if (!PROVINCES.includes(province)) throw httpError(400, "Please choose a valid province.");
+  if (street.length < 3) throw httpError(400, "Enter your street, house number or a nearby landmark so the courier can find you.");
+  if (!districtInput) throw httpError(400, "Choose the district you want the order delivered to.");
+  const province = provinceOfDistrict(districtInput) || provinceInput;
+  if (!PROVINCES.includes(province)) throw httpError(400, "Choose a valid province.");
+  // Use the official district spelling; reject a district from another province.
+  const district = (RWANDA_LOCATIONS[province] || []).find((d) => d.toLowerCase() === districtInput.toLowerCase());
+  if (!district) throw httpError(400, `${districtInput} is not a district of ${province}. Choose your district from the list.`);
 
-  const method = DELIVERY_METHODS.includes(deliveryMethod) ? deliveryMethod : "standard";
+  const requested = String(shippingMethod || deliveryMethod || "standard").toLowerCase();
+  const method = DELIVERY_METHODS[requested] ? requested : "standard";
 
   const name = clean(recipient.name, 120);
-  if (name.length < 2) throw httpError(400, "Please enter the name of the person receiving the order.");
+  if (name.length < 2) throw httpError(400, "Enter the name of the person receiving the order.");
   const phone = normalizePhone(recipient.phone);
-  if (!phone) throw httpError(400, "Please enter a valid Rwandan phone number for delivery (e.g. 0788123456).");
+  if (!phone) throw httpError(400, "Enter a valid Rwandan phone number for delivery, for example 0788 123 456.");
   const email = clean(recipient.email, 160).toLowerCase();
-  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw httpError(400, "Please enter a valid email address or leave it empty.");
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw httpError(400, "Enter a valid email address or leave it empty.");
 
   return {
     shippingAddress: {
       street,
       city: district,
+      district,
       sector: sector || undefined,
       province,
       state: province,
@@ -51,7 +61,7 @@ function parseDelivery({ shippingAddress = {}, recipient = {}, deliveryMethod })
     },
     recipient: { name, phone, email: email || undefined },
     deliveryMethod: method,
-    shippingFee: computeShippingFee({ province, method }),
+    shippingMethod: DELIVERY_METHODS[method],
   };
 }
 
@@ -153,6 +163,21 @@ async function createOrder({ userId, lines: rawLines, delivery, paymentMethod, v
     });
   }
 
+  // Delivery is priced by each seller's shipping zones (per store parcel).
+  const quote = await shippingService.quoteShipping({
+    lines: orderItems.map((i) => ({ product: byId.get(String(i.product)), quantity: i.quantity, price: i.price })),
+    address: parsed.shippingAddress,
+    method: parsed.shippingMethod,
+  });
+  if (!quote.deliverable) {
+    throw httpError(400, `${quote.groups.filter((g) => !g.deliverable).map((g) => g.message).join(" ")} Remove those items or choose another address.`);
+  }
+  const shippingFee = quote.shippingFee;
+  const shippingBreakdown = quote.groups.map((g) => ({
+    vendor: g.vendor, store: g.store, storeName: g.storeName, zone: g.zone, zoneName: g.zoneName,
+    method: g.method, fee: g.fee, eta: g.eta,
+  }));
+
   // Last-click affiliate attribution, resolved from server-side click records
   // (never from client-supplied affiliate data).
   const attributions = await affiliateAttribution.resolveAttributions({
@@ -173,9 +198,11 @@ async function createOrder({ userId, lines: rawLines, delivery, paymentMethod, v
       shippingAddress: parsed.shippingAddress,
       recipient: parsed.recipient,
       deliveryMethod: parsed.deliveryMethod,
+      shippingMethod: quote.method === "PICKUP" ? "PICKUP" : parsed.shippingMethod,
+      shippingBreakdown,
       subtotal,
-      shippingFee: parsed.shippingFee,
-      totalAmount: subtotal + parsed.shippingFee,
+      shippingFee,
+      totalAmount: subtotal + shippingFee,
       paymentMethod: PAYMENT_METHODS.includes(paymentMethod) ? paymentMethod : "MOMO",
       paymentStatus: "PENDING",
       orderStatus: "PENDING",

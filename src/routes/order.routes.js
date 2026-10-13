@@ -31,6 +31,8 @@ router.get("/my-orders", getMyOrders);
 // Keep this before /:id; otherwise "deliverable" is parsed as an order ID.
 router.get("/deliverable", authorize("delivery", "courier", "vendor", "supplier", "super_admin"), getDeliverable);
 router.get("/vendor/orders", authorize("vendor"), getVendorOrders);
+// Seller records an order taken outside the online checkout (staff need the orders permission).
+router.post("/vendor/manual", authorize("vendor"), checkStaffPermission("canManageOrders"), limits.checkout, require("../controllers/manualOrder.controller").createManualOrder);
 router.get("/:id", getOrderById);
 router.post("/:id/cancel", protect, cancelOrderByBuyer);
 router.patch(

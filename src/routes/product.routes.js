@@ -10,9 +10,10 @@ const {
   getProductBySlug,
   getRecommendations,
 } = require("../controllers/product.controller");
+const { adjustStock, moveProductsToStore, listStockMovements } = require("../controllers/inventory.controller");
 const { checkStaffPermission } = require("../middleware/staff.middleware");
 
-const { protect } = require("../middleware/auth.middleware");
+const { protect, optionalProtect } = require("../middleware/auth.middleware");
 const { authorize, requireOnboarded } = require("../middleware/auth.middleware");
 
 // Public route for Buyers & Admin to browse products
@@ -26,7 +27,7 @@ router.get("/slug/:slug", getProductBySlug);
 
 // Single live product by id (public so guests can open product pages).
 // "/vendor/me" has two segments, so it is never captured by this route.
-router.get("/:id", getProductById);
+router.get("/:id", optionalProtect, getProductById);
 
 
 // Protected routes (Require authentication)
@@ -36,6 +37,9 @@ router.use(protect);
 // Registered BEFORE "/:id" so the literal segment never gets swallowed by route params.
 router.get("/vendor/me", authorize("vendor"), getVendorProducts);
 
+// Inventory operations (stock movements history, bulk store moves)
+router.get("/vendor/stock-movements", authorize("vendor"), listStockMovements);
+router.post("/vendor/move-store", requireOnboarded, checkStaffPermission("canManageProducts"), moveProductsToStore);
 
 
 // Vendors and super_admins can always manage their own products.
@@ -44,6 +48,7 @@ router.get("/vendor/me", authorize("vendor"), getVendorProducts);
 // so it covers all three cases in a single middleware chain.
 router.post("/", requireOnboarded, checkStaffPermission("canManageProducts"), createProduct);
 router.put("/:id", requireOnboarded, checkStaffPermission("canManageProducts"), updateProduct);
+router.patch("/:id/stock", requireOnboarded, checkStaffPermission("canManageProducts"), adjustStock);
 router.delete("/:id", requireOnboarded, checkStaffPermission("canManageProducts"), deleteProduct);
 
 

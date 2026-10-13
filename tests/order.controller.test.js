@@ -6,6 +6,20 @@ const Cart = require("../src/models/Cart");
 const Product = require("../src/models/Product");
 const payoutController = require("../src/controllers/payout.controller");
 const orderController = require("../src/controllers/order.controller");
+const shippingService = require("../src/services/shipping.service");
+
+// Stand-in for the zone-based quote (the real one queries the database).
+const stubQuote = (fee, deliverable = true) => async ({ lines, address }) => ({
+  address: { province: address.state, district: address.city },
+  method: "STANDARD",
+  deliverable,
+  shippingFee: deliverable ? fee : 0,
+  groups: [{
+    vendor: String(lines[0].product.vendor), store: null, storeName: "Test Store", zone: null,
+    zoneName: "Test zone", method: "STANDARD", fee: deliverable ? fee : 0, eta: "1 day", deliverable,
+    message: deliverable ? null : "Test Store doesn't deliver to Kigali yet.",
+  }],
+});
 
 // Helper to construct mock Express req & res
 function createMockReqRes(options = {}) {
@@ -74,7 +88,7 @@ describe("Order Controller Unit Tests", () => {
         const cases = [
           { ...validBody, shippingAddress: { street: "KN 5 Rd" } },
           { ...validBody, recipient: { name: "Aline", phone: "12345" } },
-          { ...validBody, shippingAddress: { ...validBody.shippingAddress, province: "Atlantis" } },
+          { ...validBody, shippingAddress: { ...validBody.shippingAddress, district: "Atlantis", province: "Atlantis" } },
         ];
         for (const body of cases) {
           const { req, res } = createMockReqRes({ body });

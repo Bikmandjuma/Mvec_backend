@@ -55,6 +55,24 @@ function createTestApp() {
   return testApp;
 }
 
+// Creates a pending Paypack payment linked to an order, as the order checkout would.
+async function createOrderPayment(order) {
+  const ref = require("crypto").randomUUID();
+  await Payment.create({
+    parentOrder: order._id,
+    user: order.user,
+    transactionReference: `ORD-${order._id}-${Date.now()}`,
+    gatewayReference: ref,
+    gateway: "PAYPACK",
+    method: "MOMO",
+    provider: "MTN",
+    phoneNumber: "250788123456",
+    amount: order.totalAmount,
+    status: "PENDING",
+  });
+  return ref;
+}
+
 // Simulates Paypack's "transaction:processed" callback for a cashin.
 function sendPaypackWebhook(ref, amount, { fee = 0, status = "successful" } = {}) {
   return request(app)
@@ -274,39 +292,12 @@ describe("Financials & Payments Integration Suite", () => {
   });
 
   describe("1. Payment Initiation Test", () => {
-    test("Should initiate Paypack payment and create a pending Payment record", async () => {
+    test("Should initiate Paypack payment from amount and phone and create a pending Payment record", async () => {
       if (!mongoReady) return;
-      const order = await Order.create({
-        user: buyerUser._id,
-        orderNumber: "ORD-TEST-001",
-        items: [
-          {
-            product: sampleProduct._id,
-            vendor: vendorUser._id,
-            category: electronicsCategory._id,
-            name: "Wireless Mouse",
-            price: 15000,
-            quantity: 2,
-          },
-        ],
-        shippingAddress: {
-          street: "KN 5 Rd",
-          city: "Kigali",
-          state: "Kigali",
-          country: "Rwanda",
-        },
-        totalAmount: 30000,
-        paymentStatus: "PENDING",
-        orderStatus: "PROCESSING",
-      });
-
       const response = await request(app)
         .post("/api/payments/pay")
         .set("Authorization", `Bearer ${buyerToken}`)
-        .send({
-          orderId: order._id.toString(),
-          phoneNumber: "0788123456",
-        });
+        .send({ amount: 30000, phoneNumber: "0788123456" });
 
       expect(response.status).toBe(200);
       expect(response.body.paymentRef).toBeDefined();
@@ -320,54 +311,85 @@ describe("Financials & Payments Integration Suite", () => {
       expect(payment.gatewayReference).toBe(response.body.gatewayReference);
       expect(payment.provider).toBe("MTN");
       expect(payment.amount).toBe(30000);
+      expect(payment.parentOrder).toBeUndefined();
+      expect(String(payment.user)).toBe(String(buyerUser._id));
+    });
+
+    test("Should reject a missing or invalid amount", async () => {
+      if (!mongoReady) return;
+      for (const amount of [undefined, 0, -500, 10.5, "abc"]) {
+        const response = await request(app)
+          .post("/api/payments/pay")
+          .set("Authorization", `Bearer ${buyerToken}`)
+          .send({ amount, phoneNumber: "0788123456" });
+        expect(response.status).toBe(400);
+      }
+    });
+
+    test("Should complete a standalone payment via webhook exactly once", async () => {
+      if (!mongoReady) return;
+      const initResponse = await request(app)
+        .post("/api/payments/pay")
+        .set("Authorization", `Bearer ${buyerToken}`)
+        .send({ amount: 2500, phoneNumber: "0788123456" });
+      const paymentRef = initResponse.body.gatewayReference;
+
+      const webhookResponse = await sendPaypackWebhook(paymentRef, 2500, { fee: 58 });
+      expect(webhookResponse.status).toBe(200);
+      expect(webhookResponse.body.result.status).toBe("SUCCESS");
+
+      const payment = await Payment.findById(initResponse.body.paymentId);
+      expect(payment.status).toBe("SUCCESS");
+      expect(payment.gatewayFee).toBe(58);
+      expect(payment.paidAt).toBeTruthy();
+
+      const duplicateResponse = await sendPaypackWebhook(paymentRef, 2500, { fee: 58 });
+      expect(duplicateResponse.status).toBe(200);
+      expect(duplicateResponse.body.result.status).toBe("ALREADY_PROCESSED");
+    });
+
+    test("Should mark a standalone payment FAILED when Paypack reports failure", async () => {
+      if (!mongoReady) return;
+      const initResponse = await request(app)
+        .post("/api/payments/pay")
+        .set("Authorization", `Bearer ${buyerToken}`)
+        .send({ amount: 1000, phoneNumber: "0733123456" });
+
+      await sendPaypackWebhook(initResponse.body.gatewayReference, 1000, { status: "failed" });
+
+      const statusResponse = await request(app)
+        .get(`/api/payments/status/${initResponse.body.paymentId}`)
+        .set("Authorization", `Bearer ${buyerToken}`);
+      expect(statusResponse.status).toBe(200);
+      expect(statusResponse.body.payment.status).toBe("FAILED");
+      expect(statusResponse.body.payment.provider).toBe("AIRTEL");
+    });
+
+    test("Should hide a payment's status from other users", async () => {
+      if (!mongoReady) return;
+      const initResponse = await request(app)
+        .post("/api/payments/pay")
+        .set("Authorization", `Bearer ${buyerToken}`)
+        .send({ amount: 1000, phoneNumber: "0788123456" });
+
+      const response = await request(app)
+        .get(`/api/payments/status/${initResponse.body.paymentId}`)
+        .set("Authorization", `Bearer ${vendorToken}`);
+      expect(response.status).toBe(404);
     });
   });
 
   describe("1b. Airtel Payment Initiation Test", () => {
     test("Should initiate Airtel Money payment with an Airtel number", async () => {
       if (!mongoReady) return;
-      const order = await Order.create({
-        user: buyerUser._id,
-        orderNumber: "ORD-TEST-001B",
-        items: [
-          {
-            product: sampleProduct._id,
-            vendor: vendorUser._id,
-            category: electronicsCategory._id,
-            name: "Wireless Mouse",
-            price: 15000,
-            quantity: 1,
-          },
-        ],
-        shippingAddress: {
-          street: "KN 5 Rd",
-          city: "Kigali",
-          state: "Kigali",
-          country: "Rwanda",
-        },
-        totalAmount: 15000,
-        paymentStatus: "PENDING",
-        orderStatus: "PROCESSING",
-      });
-
       const response = await request(app)
         .post("/api/payments/pay/airtel")
         .set("Authorization", `Bearer ${buyerToken}`)
-        .send({
-          orderId: order._id.toString(),
-          phoneNumber: "0738123456",
-        });
+        .send({ amount: 15000, phoneNumber: "0738123456" });
 
       expect(response.status).toBe(200);
-      expect(response.body.paymentRef).toBeDefined();
-      expect(response.body.paymentId).toBeDefined();
-      expect(response.body.gatewayReference).toBeDefined();
-
       const payment = await Payment.findById(response.body.paymentId);
-      expect(payment).toBeTruthy();
       expect(payment.status).toBe("PENDING");
-      expect(payment.gateway).toBe("PAYPACK");
-      expect(payment.gatewayReference).toBe(response.body.gatewayReference);
       expect(payment.provider).toBe("AIRTEL");
       expect(payment.method).toBe("AIRTEL");
       expect(payment.amount).toBe(15000);
@@ -375,37 +397,10 @@ describe("Financials & Payments Integration Suite", () => {
 
     test("Should reject Airtel initiation when an MTN number is provided", async () => {
       if (!mongoReady) return;
-      const order = await Order.create({
-        user: buyerUser._id,
-        orderNumber: "ORD-TEST-001C",
-        items: [
-          {
-            product: sampleProduct._id,
-            vendor: vendorUser._id,
-            category: electronicsCategory._id,
-            name: "Wireless Mouse",
-            price: 15000,
-            quantity: 1,
-          },
-        ],
-        shippingAddress: {
-          street: "KN 5 Rd",
-          city: "Kigali",
-          state: "Kigali",
-          country: "Rwanda",
-        },
-        totalAmount: 15000,
-        paymentStatus: "PENDING",
-        orderStatus: "PROCESSING",
-      });
-
       const response = await request(app)
         .post("/api/payments/pay/airtel")
         .set("Authorization", `Bearer ${buyerToken}`)
-        .send({
-          orderId: order._id.toString(),
-          phoneNumber: "0788123456",
-        });
+        .send({ amount: 15000, phoneNumber: "0788123456" });
 
       expect(response.status).toBe(400);
     });
@@ -438,15 +433,7 @@ describe("Financials & Payments Integration Suite", () => {
         orderStatus: "PROCESSING",
       });
 
-      const initResponse = await request(app)
-        .post("/api/payments/pay")
-        .set("Authorization", `Bearer ${buyerToken}`)
-        .send({
-          orderId: order._id.toString(),
-          phoneNumber: "0788123456",
-        });
-
-      const paymentRef = initResponse.body.gatewayReference;
+      const paymentRef = await createOrderPayment(order);
 
       const webhookResponse = await sendPaypackWebhook(paymentRef, 30000);
 
@@ -521,15 +508,7 @@ describe("Financials & Payments Integration Suite", () => {
         orderStatus: "PROCESSING",
       });
 
-      const initResponse = await request(app)
-        .post("/api/payments/pay")
-        .set("Authorization", `Bearer ${buyerToken}`)
-        .send({
-          orderId: order._id.toString(),
-          phoneNumber: "0788123456",
-        });
-
-      const paymentRef = initResponse.body.gatewayReference;
+      const paymentRef = await createOrderPayment(order);
 
       await sendPaypackWebhook(paymentRef, 10000);
 
@@ -589,15 +568,7 @@ describe("Financials & Payments Integration Suite", () => {
         orderStatus: "PROCESSING",
       });
 
-      const initResponse = await request(app)
-        .post("/api/payments/pay")
-        .set("Authorization", `Bearer ${buyerToken}`)
-        .send({
-          orderId: order._id.toString(),
-          phoneNumber: "0788123456",
-        });
-
-      const paymentRef = initResponse.body.gatewayReference;
+      const paymentRef = await createOrderPayment(order);
 
       await sendPaypackWebhook(paymentRef, 30000);
 
@@ -652,15 +623,7 @@ describe("Financials & Payments Integration Suite", () => {
         orderStatus: "PROCESSING",
       });
 
-      const initResponse = await request(app)
-        .post("/api/payments/pay")
-        .set("Authorization", `Bearer ${buyerToken}`)
-        .send({
-          orderId: order._id.toString(),
-          phoneNumber: "0788123456",
-        });
-
-      const paymentRef = initResponse.body.gatewayReference;
+      const paymentRef = await createOrderPayment(order);
 
       const webhookResponse = await sendPaypackWebhook(paymentRef, 100000, { fee: 1000 });
 

@@ -28,38 +28,27 @@ const resolveRequester = async (req) => {
   }
 };
 
-// ─── PRODUCT COUNTS (read live from the products collection) ───────────────
+// ─── PRODUCT COUNTS ─────────────────────────────────────────────────────────
 // Returns each category as a plain object enriched with:
-//   productCount   - every product in this category (marketplace-wide)
-//   myProductCount - only the requesting user's products (when identified)
+//   productCount   - live (ACTIVE) marketplace products in this category
+//   myProductCount - all of the requesting vendor's products (when identified)
+// Plain finds + counting in JS so it runs the same on MongoDB and MySQL.
 const attachProductCounts = async (categories, requester) => {
-  const rows = categories.map((cat) => cat.toObject ? cat.toObject() : { ...cat });
+  const rows = categories.map((cat) => (cat.toJSON ? cat.toJSON() : { ...cat }));
   if (!rows.length) return rows;
+  const ids = rows.map((cat) => cat._id);
+  const tally = (list) => list.reduce((m, p) => m.set(String(p.category), (m.get(String(p.category)) || 0) + 1), new Map());
 
-  const group = {
-    _id: "$category",
-    productCount: { $sum: 1 },
-  };
-  if (requester?._id) {
-    group.myProductCount = {
-      $sum: { $cond: [{ $eq: ["$vendor", requester._id] }, 1, 0] },
-    };
-  }
+  const live = tally(await Product.find({ category: { $in: ids }, status: "ACTIVE" }).select("category").lean());
+  const mine = requester?._id
+    ? tally(await Product.find({ category: { $in: ids }, vendor: requester._id }).select("category").lean())
+    : null;
 
-  const counts = await Product.aggregate([
-    { $match: { category: { $in: rows.map((cat) => cat._id) } } },
-    { $group: group },
-  ]);
-  const countsByCategory = new Map(counts.map((c) => [String(c._id), c]));
-
-  return rows.map((cat) => {
-    const catCounts = countsByCategory.get(String(cat._id)) || {};
-    return {
-      ...cat,
-      productCount: Number(catCounts.productCount) || 0,
-      ...(requester?._id ? { myProductCount: Number(catCounts.myProductCount) || 0 } : {}),
-    };
-  });
+  return rows.map((cat) => ({
+    ...cat,
+    productCount: live.get(String(cat._id)) || 0,
+    ...(mine ? { myProductCount: mine.get(String(cat._id)) || 0 } : {}),
+  }));
 };
 
 // ─── CREATE CATEGORY ──────────────────────────────────────────────────────
@@ -73,25 +62,31 @@ exports.createCategory = async (req, res) => {
     }
 
     // Validate parent exists if provided
+    let parent = null;
     if (parentId) {
       if (!mongoose.Types.ObjectId.isValid(parentId)) {
         return res.status(400).json({ message: "Invalid parentId" });
       }
-      const parent = await Category.findById(parentId);
+      parent = await Category.findById(parentId);
       if (!parent) {
         return res.status(404).json({ message: "Parent category not found" });
       }
     }
 
-    const slug = slugify(name);
+    // Subcategory slugs are prefixed with the parent so "Accessories" can
+    // exist under both Phones and Fashion.
+    const slug = parent ? `${parent.slug}-${slugify(name)}` : slugify(name);
 
     const existing = await Category.findOne({ slug });
+    if (existing && !existing.active) {
+      return res.status(409).json({ message: `"${existing.name}" was disabled by MVEC and can't be used. Choose another category.` });
+    }
     if (existing) {
       // Return the existing category so the form can auto-select it rather than error
       return res.status(200).json({
         alreadyExisted: true,
         message: `Category "${existing.name}" already exists and has been selected.`,
-        category: { id: existing._id, name: existing.name, slug: existing.slug },
+        category: { id: existing._id, _id: existing._id, name: existing.name, slug: existing.slug, parentId: existing.parentId },
       });
     }
 
@@ -112,7 +107,8 @@ exports.createCategory = async (req, res) => {
 };
 
 // ─── GET ALL CATEGORIES (flat, optionally nested tree) ────────────────────
-// @route   GET /api/categories?tree=true
+// @route   GET /api/categories?tree=true&withCounts=true
+// withCounts adds productCount (active marketplace products) to each category.
 exports.getCategories = async (req, res) => {
   try {
     const requester = await resolveRequester(req);
@@ -193,7 +189,8 @@ exports.updateCategory = async (req, res) => {
 
     if (name && name.trim()) {
       category.name = name.trim();
-      category.slug = slugify(name);
+      const parentDoc = category.parentId ? await Category.findById(category.parentId) : null;
+      category.slug = parentDoc ? `${parentDoc.slug}-${slugify(name)}` : slugify(name);
 
       const existing = await Category.findOne({ slug: category.slug, _id: { $ne: id } });
       if (existing) {
