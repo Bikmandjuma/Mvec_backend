@@ -71,6 +71,19 @@ back to MongoDB.
 - Live data: public, vendor, buyer and admin endpoints return the same JSON from MongoDB and
   from a fresh MySQL copy.
 
+## Testing on MySQL without touching real data
+
+Use a throwaway server or a `*_test` database, never the real one:
+
+```
+DB_PORT=3307 DB_DATABASE=ikiguzi NODE_ENV=test npx sequelize-cli db:migrate --env test   # creates tables in ikiguzi_test
+DB_PORT=3307 DB_DATABASE=ikiguzi NODE_ENV=test DB_DRIVER=mysql node --test tests/integration/affiliate.flow.test.js
+RATE_LIMITS=off npm run test:e2e   # MongoDB vs MySQL, throwaway databases
+```
+
+`20261013000100-ikiguzi-buyer-affiliate-supplier` only adds tables, columns and indexes,
+widens enums and relaxes NOT NULL; it drops nothing. Its `down` removes what it added.
+
 ## Differences to know
 
 - **Text comparison**: equality and unique indexes are case-insensitive in MySQL
