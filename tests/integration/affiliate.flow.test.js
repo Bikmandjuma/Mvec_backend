@@ -94,8 +94,9 @@ describe("affiliate flow", () => {
         items,
         visitorId,
         paymentMethod: "MOMO",
-        shippingAddress: { street: "KN 1 Ave", district: "Gasabo", province: "Kigali City" },
-        recipient: { name: "Jean Buyer", phone: "0788123456" },
+        // Kigali standard delivery is free, so order totals equal item totals.
+        shippingAddress: { street: "KN 1 Rd", district: "Nyarugenge", province: "Kigali City" },
+        recipient: { name: "Test Buyer", phone: "0788123456" },
       });
   const pay = (order, ref = `ext-${order._id}`) =>
     paymentService.processPaymentWebhook({

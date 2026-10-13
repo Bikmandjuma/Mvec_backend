@@ -29,6 +29,8 @@ const notificationSchema = new mongoose.Schema(
     title: { type: String, required: true },
     message: { type: String, default: "" },
     reference: { type: String, default: "" }, // order/product/payout id or code
+    // In-app page the notification opens (e.g. /orders/<id>).
+    link: { type: String, default: "" },
     channel: {
       type: String,
       enum: ["IN_APP", "SMS", "PUSH", "EMAIL"],

@@ -145,6 +145,20 @@ class AffiliateService {
    * Request Wallet Payout (Server-side 10,000 RWF Minimum Rule Enforcement)
    */
   async requestPayout({ userId, amount, paymentMethod, accountDetails }) {
+    amount = Number(amount);
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error("Enter the amount you want to withdraw.");
+    // Mobile money withdrawals must go to a valid number on the matching network.
+    if (["MTN_MOMO", "AIRTEL_MONEY"].includes(paymentMethod)) {
+      const { formatRwandanPhone } = require("../utils/momo.util");
+      const info = formatRwandanPhone(accountDetails?.phoneNumber);
+      if (!info) throw new Error("Enter a valid Rwandan mobile money number.");
+      if ((paymentMethod === "MTN_MOMO") !== (info.provider === "MTN")) {
+        throw new Error(`That is ${info.provider === "MTN" ? "an MTN" : "an Airtel"} number. Choose the matching payment method.`);
+      }
+      accountDetails = { ...accountDetails, phoneNumber: info.formattedNumber };
+    } else if (paymentMethod !== "BANK_TRANSFER") {
+      throw new Error("Choose MTN MoMo, Airtel Money or bank transfer.");
+    }
     if (amount < MINIMUM_PAYOUT_RWF) {
       throw new Error(`Minimum withdrawal threshold is RWF ${MINIMUM_PAYOUT_RWF.toLocaleString()}. Requested: RWF ${amount.toLocaleString()}`);
     }
@@ -180,7 +194,27 @@ class AffiliateService {
       await session.commitTransaction();
       session.endSession();
 
-      return payout[0];
+      // Small mobile money withdrawals are sent automatically; larger ones and
+      // bank transfers wait for an admin (who approves with one click).
+      const autoLimit = Number(process.env.AFFILIATE_AUTO_PAYOUT_MAX || 100000);
+      const created = payout[0];
+      if (created.paymentMethod !== "BANK_TRANSFER" && created.amount <= autoLimit) {
+        await this._sendPayout(created).catch((err) => console.error(`Affiliate payout ${created._id} send failed:`, err.message));
+      } else {
+        const notifications = require("./notification.service");
+        const User = require("../models/User");
+        const admins = await User.find({ role: "super_admin" }).select("_id").lean();
+        for (const a of admins) {
+          notifications.notify(a._id, {
+            type: "PAYOUT",
+            title: "Affiliate withdrawal needs approval",
+            message: `RWF ${created.amount.toLocaleString()} via ${created.paymentMethod.replace("_", " ").toLowerCase()}.`,
+            reference: created.payoutNumber,
+            link: "/admin/affiliates",
+          }).catch(() => {});
+        }
+      }
+      return AffiliatePayout.findById(created._id);
     } catch (error) {
       await session.abortTransaction();
       session.endSession();
@@ -205,7 +239,24 @@ class AffiliateService {
 
       const wallet = await AffiliateWallet.findOne({ affiliateUser: payout.affiliateUser }).session(session);
 
+      const isMobile = payout.paymentMethod !== "BANK_TRANSFER";
+      if ((status === "APPROVED" || status === "COMPLETED") && isMobile) {
+        // Approving a mobile money withdrawal sends it through Paypack.
+        payout.status = "PROCESSING";
+        payout.approvedBy = adminId;
+        await payout.save({ session });
+        await session.commitTransaction();
+        session.endSession();
+        try {
+          await this._sendPayout(payout);
+        } catch (sendError) {
+          // The transfer worker retries; the approval itself is already saved.
+          console.error(`Affiliate payout ${payout._id} send failed:`, sendError.message);
+        }
+        return AffiliatePayout.findById(payout._id);
+      }
       if (status === "COMPLETED") {
+        if (!transactionReference) throw new Error("Enter the bank transfer reference.");
         payout.status = "COMPLETED";
         payout.transactionReference = transactionReference;
         payout.approvedBy = adminId;
@@ -229,6 +280,20 @@ class AffiliateService {
       session.endSession();
       throw error;
     }
+  }
+
+  /** Send an approved mobile money withdrawal through Paypack. */
+  async _sendPayout(payout) {
+    await AffiliatePayout.updateOne({ _id: payout._id }, { $set: { status: "PROCESSING" } });
+    const disbursementService = require("./disbursement.service");
+    await disbursementService.queue({
+      kind: "AFFILIATE_PAYOUT",
+      recipient: payout.affiliateUser,
+      phone: payout.accountDetails?.phoneNumber,
+      amount: payout.amount,
+      affiliatePayout: payout._id,
+      idempotencyKey: `affiliate-payout:${payout._id}`,
+    });
   }
 
   /**

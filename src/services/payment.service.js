@@ -142,6 +142,7 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
     // Tell the buyer's open payment page (and dashboards) straight away.
     socketService.emitOrderStatusUpdate(order);
     socketService.emitToRoom(`user:${order.user}`, "payment_confirmed", { orderId: order._id.toString() });
+    await require("./notification.service").paymentConfirmed(order).catch((err) => console.error("Payment notification failed:", err.message));
 
     return { status: "SUCCESS", order, webhookLog };
   } catch (error) {
