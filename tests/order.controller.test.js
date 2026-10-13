@@ -392,232 +392,99 @@ describe("Order Controller Unit Tests", () => {
   });
 
   // ─── 5. updateVendorOrderStatus ────────────────────────────────────────────
-  describe("updateVendorOrderStatus()", () => {
-    it("should update order status and trigger payout release when marked DELIVERED", async () => {
-      const vendorId = new mongoose.Types.ObjectId();
-      const orderId = new mongoose.Types.ObjectId().toString();
-
-      let payoutReleased = false;
-      const originalRelease = payoutController.releaseOrderEarnings;
-      payoutController.releaseOrderEarnings = async (oId, vId) => {
-        if (
-          oId.toString() === orderId &&
-          vId.toString() === vendorId.toString()
-        ) {
-          payoutReleased = true;
-        }
-      };
-
-      const mockOrder = {
-        _id: orderId,
-        orderStatus: "SHIPPED",
+  // Sellers can only move a PAID order forward through fulfilment. Payment
+  // status comes from the payment provider and DELIVERED only from delivery
+  // confirmation with the buyer's code (see tests/automation.test.js).
+  const statusOrder = (overrides = {}) => {
+    const vendorId = new mongoose.Types.ObjectId();
+    return {
+      vendorId,
+      order: {
+        _id: new mongoose.Types.ObjectId(),
+        orderNumber: "ORD-1",
+        user: new mongoose.Types.ObjectId(),
         paymentStatus: "PAID",
-        items: [{ vendor: vendorId }],
-        save: async function () {
-          return this;
-        },
-      };
+        orderStatus: "CONFIRMED",
+        items: [{ vendor: vendorId, price: 1000, quantity: 1 }],
+        saved: 0,
+        async save() { this.saved += 1; return this; },
+        ...overrides,
+      },
+    };
+  };
 
-      const originalFindById = Order.findById;
-      Order.findById = async () => mockOrder;
-
+  describe("updateVendorOrderStatus()", () => {
+    it("moves a paid order forward and records when it shipped", async () => {
+      const { vendorId, order } = statusOrder();
+      const original = Order.findById;
+      Order.findById = async () => order;
       try {
-        const { req, res } = createMockReqRes({
-          user: { id: vendorId.toString(), role: "vendor" },
-          body: {
-            orderId,
-            status: "DELIVERED",
-          },
-        });
-
+        const { req, res } = createMockReqRes({ user: { id: vendorId.toString(), role: "vendor" }, body: { orderId: order._id.toString(), status: "SHIPPED" } });
         await orderController.updateVendorOrderStatus(req, res);
-
         assert.equal(res.statusCode, 200);
-        assert.equal(mockOrder.orderStatus, "DELIVERED");
-        assert.equal(
-          payoutReleased,
-          true,
-          "releaseOrderEarnings must be triggered for DELIVERED",
-        );
+        assert.equal(order.orderStatus, "SHIPPED");
+        assert.ok(order.shippedAt instanceof Date);
       } finally {
-        payoutController.releaseOrderEarnings = originalRelease;
-        Order.findById = originalFindById;
+        Order.findById = original;
       }
     });
 
-    it("should reject invalid order status with 400", async () => {
-      const { req, res } = createMockReqRes({
-        body: {
-          orderId: new mongoose.Types.ObjectId().toString(),
-          status: "INVALID_STATUS",
-        },
-      });
-
-      const originalFindById = Order.findById;
-      Order.findById = async () => ({
-        items: [{ vendor: req.user.id }],
-      });
-
+    it("refuses payment status changes, DELIVERED, going backwards and unpaid orders", async () => {
+      const original = Order.findById;
       try {
-        await orderController.updateVendorOrderStatus(req, res);
-        assert.equal(res.statusCode, 400);
-        assert.ok(res.jsonData.message.includes("Invalid order status"));
+        const cases = [
+          [{}, { paymentStatus: "PAID" }],
+          [{}, { status: "DELIVERED" }],
+          [{ orderStatus: "SHIPPED" }, { status: "PROCESSING" }],
+          [{ paymentStatus: "PENDING", orderStatus: "PENDING" }, { status: "PROCESSING" }],
+        ];
+        for (const [overrides, body] of cases) {
+          const { vendorId, order } = statusOrder(overrides);
+          Order.findById = async () => order;
+          const { req, res } = createMockReqRes({ user: { id: vendorId.toString(), role: "vendor" }, body: { orderId: order._id.toString(), ...body } });
+          await orderController.updateVendorOrderStatus(req, res);
+          assert.equal(res.statusCode, 400, JSON.stringify(body));
+          assert.equal(order.saved, 0);
+        }
       } finally {
-        Order.findById = originalFindById;
+        Order.findById = original;
       }
     });
 
-    it("should reject vendor who does not own items in the order with 403", async () => {
-      const orderId = new mongoose.Types.ObjectId().toString();
-      const otherVendorId = new mongoose.Types.ObjectId();
-
-      const mockOrder = {
-        _id: orderId,
-        items: [{ vendor: otherVendorId }],
-      };
-
-      const originalFindById = Order.findById;
-      Order.findById = async () => mockOrder;
-
+    it("rejects a vendor who does not own items in the order with 403", async () => {
+      const { order } = statusOrder();
+      const original = Order.findById;
+      Order.findById = async () => order;
       try {
-        const { req, res } = createMockReqRes({
-          user: {
-            id: new mongoose.Types.ObjectId().toString(),
-            role: "vendor",
-          },
-          body: { orderId, status: "SHIPPED" },
-        });
-
+        const { req, res } = createMockReqRes({ user: { id: new mongoose.Types.ObjectId().toString(), role: "vendor" }, body: { orderId: order._id.toString(), status: "SHIPPED" } });
         await orderController.updateVendorOrderStatus(req, res);
-
         assert.equal(res.statusCode, 403);
-        assert.ok(res.jsonData.message.includes("Access denied"));
       } finally {
-        Order.findById = originalFindById;
+        Order.findById = original;
       }
     });
   });
 
-  // ─── 6. updateOrderStatus ──────────────────────────────────────────────────
   describe("updateOrderStatus()", () => {
-    it("should successfully update order status from PROCESSING to SHIPPED", async () => {
-      const orderId = new mongoose.Types.ObjectId().toString();
-      const mockOrder = {
-        _id: orderId,
-        orderStatus: "PROCESSING",
-        items: [{ vendor: new mongoose.Types.ObjectId() }],
-        save: async function () {
-          return this;
-        },
-      };
-
-      const originalFindById = Order.findById;
-      Order.findById = async () => mockOrder;
-
+    it("lets an admin move an order forward but never to DELIVERED or COMPLETED", async () => {
+      const original = Order.findById;
       try {
-        const { req, res } = createMockReqRes({
-          params: { id: orderId },
-          body: { status: "SHIPPED" },
-        });
+        let { order } = statusOrder({ orderStatus: "PROCESSING" });
+        Order.findById = async () => order;
+        let r = createMockReqRes({ user: { id: "admin", role: "super_admin" }, params: { id: order._id.toString() }, body: { status: "shipped" } });
+        await orderController.updateOrderStatus(r.req, r.res);
+        assert.equal(r.res.statusCode, 200);
+        assert.equal(order.orderStatus, "SHIPPED");
 
-        await orderController.updateOrderStatus(req, res);
-
-        assert.equal(res.statusCode, 200);
-        assert.equal(mockOrder.orderStatus, "SHIPPED");
-        assert.ok(
-          res.jsonData.message.includes("successfully updated to SHIPPED"),
-        );
+        for (const status of ["DELIVERED", "COMPLETED", "NOT_A_STATUS"]) {
+          ({ order } = statusOrder({ orderStatus: "SHIPPED" }));
+          r = createMockReqRes({ user: { id: "admin", role: "super_admin" }, params: { id: order._id.toString() }, body: { status } });
+          await orderController.updateOrderStatus(r.req, r.res);
+          assert.equal(r.res.statusCode, 400, status);
+        }
       } finally {
-        Order.findById = originalFindById;
+        Order.findById = original;
       }
-    });
-
-    it("should update order status to DELIVERED, set deliveredAt, and release earnings for all unique vendors", async () => {
-      const orderId = new mongoose.Types.ObjectId().toString();
-      const vendor1 = new mongoose.Types.ObjectId();
-      const vendor2 = new mongoose.Types.ObjectId();
-
-      const releasedVendors = [];
-      const originalRelease = payoutController.releaseOrderEarnings;
-      payoutController.releaseOrderEarnings = async (oId, vId) => {
-        releasedVendors.push(vId.toString());
-      };
-
-      const mockOrder = {
-        _id: orderId,
-        orderStatus: "SHIPPED",
-        items: [
-          { vendor: vendor1 },
-          { vendor: vendor1 }, // Duplicate vendor item
-          { vendor: vendor2 },
-        ],
-        save: async function () {
-          return this;
-        },
-      };
-
-      const originalFindById = Order.findById;
-      Order.findById = async () => mockOrder;
-
-      try {
-        const { req, res } = createMockReqRes({
-          params: { id: orderId },
-          body: { status: "DELIVERED" },
-        });
-
-        await orderController.updateOrderStatus(req, res);
-
-        assert.equal(res.statusCode, 200);
-        assert.equal(mockOrder.orderStatus, "DELIVERED");
-        assert.equal(mockOrder.isDelivered, true);
-        assert.ok(mockOrder.deliveredAt instanceof Date);
-
-        // Verify earnings released for both unique vendors
-        assert.equal(releasedVendors.length, 2);
-        assert.ok(releasedVendors.includes(vendor1.toString()));
-        assert.ok(releasedVendors.includes(vendor2.toString()));
-      } finally {
-        payoutController.releaseOrderEarnings = originalRelease;
-        Order.findById = originalFindById;
-      }
-    });
-
-    it("should reject updating an order that is already DELIVERED with 400", async () => {
-      const mockOrder = {
-        orderStatus: "DELIVERED",
-      };
-
-      const originalFindById = Order.findById;
-      Order.findById = async () => mockOrder;
-
-      try {
-        const { req, res } = createMockReqRes({
-          params: { id: new mongoose.Types.ObjectId().toString() },
-          body: { status: "CANCELLED" },
-        });
-
-        await orderController.updateOrderStatus(req, res);
-
-        assert.equal(res.statusCode, 400);
-        assert.equal(
-          res.jsonData.message,
-          "Order has already been marked as DELIVERED.",
-        );
-      } finally {
-        Order.findById = originalFindById;
-      }
-    });
-
-    it("should reject invalid order status with 400", async () => {
-      const { req, res } = createMockReqRes({
-        params: { id: new mongoose.Types.ObjectId().toString() },
-        body: { status: "UNKNOWN_STATUS" },
-      });
-
-      await orderController.updateOrderStatus(req, res);
-
-      assert.equal(res.statusCode, 400);
-      assert.equal(res.jsonData.message, "Invalid order status provided.");
     });
   });
 

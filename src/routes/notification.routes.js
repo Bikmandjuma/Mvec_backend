@@ -6,7 +6,8 @@ const { protect, authorize } = require("../middleware/auth.middleware");
 // Public create (for authenticated roles pushing system events) and self-management.
 router.use(protect);
 
-router.post("/", notification.createNotification);
+// Only admins send manual notifications; the system creates the rest.
+router.post("/", authorize("super_admin"), notification.createNotification);
 router.get("/mine", notification.listMyNotifications);
 router.get("/read-all", notification.markAllRead);
 router.post("/read-all", notification.markAllRead);

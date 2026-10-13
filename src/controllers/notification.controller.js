@@ -22,6 +22,7 @@ function mapNotification(n) {
     title: n.title,
     message: n.message,
     reference: n.reference,
+    link: n.link || "",
     channel: n.channel,
     status: n.isRead ? "Read" : "Unread",
     isRead: n.isRead,
