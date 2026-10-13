@@ -1,7 +1,9 @@
 const bcrypt = require("bcryptjs");
+const mongoose = require("mongoose");
 const Staff = require("../models/Staff");
 const User = require("../models/User");
 const Store = require("../models/Store");
+const { getPrimaryStore } = require("../utils/vendorStore.util");
 
 const STAFF_ROLES = new Set(["STORE_MANAGER", "ORDER_MANAGER", "CATALOG_MANAGER"]);
 const PERMISSIONS = {
@@ -69,7 +71,7 @@ function staffDto(staff) {
 }
 
 async function storeForOwner(ownerId) {
-  let store = await Store.findOne({ vendor: ownerId });
+  let store = await getPrimaryStore(ownerId);
   if (!store) {
     const Vendor = require("../models/Vendor");
     const v = await Vendor.findOne({ user: ownerId });
@@ -87,6 +89,7 @@ async function storeForOwner(ownerId) {
       if (exists) slug = `${slug}-${Date.now().toString(36)}`;
       store = await Store.create({
         vendor: ownerId,
+        isPrimary: true,
         storeName: v.businessName,
         slug,
         contactEmail: v.email,

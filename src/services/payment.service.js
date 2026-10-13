@@ -104,6 +104,18 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
       });
     }
 
+    // 5b. Delivery fees are held for the seller of each parcel, commission-free.
+    for (const parcel of order.shippingBreakdown || []) {
+      if (!parcel.vendor || !(parcel.fee > 0)) continue;
+      await financialService.lockPaymentInEscrow({
+        orderId: order._id,
+        vendorId: parcel.vendor,
+        grossAmount: parcel.fee,
+        commissionAmount: 0,
+        session,
+      });
+    }
+
     // 6. Record or Update Idempotency Webhook Log & Explicitly Clear Previous Errors
     const webhookLog = await PaymentWebhookLog.findOneAndUpdate(
       { externalTransactionId },

@@ -1,3 +1,9 @@
+// MySQL (DB_DRIVER=mysql): same API, backed by Sequelize. See src/database/mongoose-compat.
+if (require("../database/driver").isMysql) {
+  module.exports = require("../database/mongoose-compat").model("Order");
+  return;
+}
+
 const mongoose = require("mongoose");
 
 const orderItemSchema = new mongoose.Schema({
@@ -23,11 +29,25 @@ const orderItemSchema = new mongoose.Schema({
 
 const orderSchema = new mongoose.Schema(
   {
+    // Buyer account. Manual orders for walk-in / phone customers may have none;
+    // their contact details are kept in `customer`.
     user: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: true,
+      required: function () { return this.source !== "MANUAL"; },
     },
+    // ONLINE = placed by the buyer at checkout; MANUAL = recorded by the seller.
+    source: { type: String, enum: ["ONLINE", "MANUAL"], default: "ONLINE", index: true },
+    customer: {
+      name: String,
+      phone: String,
+      email: String,
+    },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    // Paid to the seller outside MVEC (cash / MoMo / bank): no escrow, no wallet credit.
+    paidOffline: { type: Boolean, default: false },
+    offlinePaymentMethod: { type: String, enum: ["CASH", "MOMO", "BANK", null], default: null },
+    sellerNote: { type: String, default: "", maxlength: 500 },
     orderNumber: {
       type: String,
       unique: true,
@@ -36,11 +56,32 @@ const orderSchema = new mongoose.Schema(
     items: [orderItemSchema],
     shippingAddress: {
       street: { type: String, required: true },
-      city: { type: String, required: true },
-      state: { type: String, required: true },
+      city: { type: String, required: true }, // district
+      state: { type: String, required: true }, // province
       country: { type: String, required: true },
       postalCode: String,
+      province: String,
+      district: String,
+      sector: String,
     },
+    // totalAmount = subtotal (items) + shippingFee (all parcels).
+    subtotal: { type: Number, default: null },
+    shippingFee: { type: Number, default: 0 },
+    shippingMethod: { type: String, enum: ["STANDARD", "EXPRESS", "PICKUP"], default: "STANDARD" },
+    // One entry per parcel (seller store); fee is paid to that seller with no commission.
+    shippingBreakdown: [
+      {
+        _id: false,
+        vendor: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+        store: { type: mongoose.Schema.Types.ObjectId, ref: "Store", default: null },
+        storeName: String,
+        zone: { type: mongoose.Schema.Types.ObjectId, ref: "ShippingZone", default: null },
+        zoneName: String,
+        method: String,
+        fee: { type: Number, default: 0 },
+        eta: String,
+      },
+    ],
     totalAmount: { type: Number, required: true },
     paymentStatus: {
       type: String,
@@ -67,7 +108,7 @@ const orderSchema = new mongoose.Schema(
     },
     paymentMethod: {
       type: String,
-      enum: ["MOMO", "AIRTEL", "CASH_ON_DELIVERY", "CARD", "BANK"],
+      enum: ["MOMO", "AIRTEL", "CASH_ON_DELIVERY", "CARD", "BANK", "CASH"],
       default: "MOMO",
     },
     deliveryOtp: String,
@@ -95,5 +136,8 @@ const orderSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
+// Expose `id` alongside `_id` (checkout redirects to /payment/:id).
+orderSchema.set("toJSON", { virtuals: true });
 
 module.exports = mongoose.model("Order", orderSchema);

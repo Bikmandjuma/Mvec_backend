@@ -111,3 +111,6 @@ exports.initBackgroundWorkers = () => {
 
   console.log("🚀 [Background Workers] SLA & Expiry Cron Jobs Initialized.");
 };
+// Exposed for tests (tests/e2e/worker-check.cjs).
+exports.cancelExpiredUnpaidOrders = cancelExpiredUnpaidOrders;
+exports.enforceFulfillmentSLA = enforceFulfillmentSLA;
