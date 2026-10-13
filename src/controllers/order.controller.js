@@ -8,7 +8,6 @@ const LedgerEntry = require("../models/LedgerEntry");
 const VendorWallet = require("../models/VendorWallet");
 const payoutController = require("./payout.controller");
 const socketService = require("../services/socket.service");
-// const financialService = require("../services/financial.service");
 const affiliateAttribution = require("../services/affiliateAttribution.service");
 
 // A cancelled/refunded/returned/failed order can never pay out affiliate
@@ -58,53 +57,12 @@ exports.createCheckoutOrder = async (req, res) => {
       return res.status(400).json({ message: "Your cart is empty." });
     }
 
-    const orderItems = [];
-    let calculatedTotal = 0;
-
-    // 2. Validate stock & prepare snapshot items
-    for (const item of cart.items) {
-      const product = await Product.findById(item.product._id);
-
-      if (!product || product.status === "INACTIVE") {
-        return res.status(400).json({
-          message: `Product ${item.product.name || ""} is no longer available.`,
-        });
-      }
-
-      if (product.stockQuantity < item.quantity) {
-        return res.status(400).json({
-          message: `Insufficient stock for ${product.name}. Available: ${product.stockQuantity}`,
-        });
-      }
-
-      const activePrice = product.discountPrice || product.price;
-      calculatedTotal += activePrice * item.quantity;
-
-      orderItems.push({
-        product: product._id,
-        vendor: product.vendor,
-        name: product.name,
-        price: activePrice,
-        quantity: item.quantity,
-      });
-    }
-
-    // 2b. Last-click affiliate attribution, resolved from server-side records.
-    const attributions = await affiliateAttribution.resolveAttributions({
+    const order = await checkoutService.createOrder({
+      userId: req.user.id,
+      lines: cart.items.map((item) => ({ productId: String(item.product), quantity: item.quantity })),
+      delivery: deliveryFromBody(req.body),
+      paymentMethod: req.body.paymentMethod,
       visitorId: req.body.visitorId,
-      buyerId: req.user.id,
-      productIds: orderItems.map((i) => i.product),
-    });
-    orderItems.forEach((i) => affiliateAttribution.applyAttribution(i, attributions.get(String(i.product))));
-
-    // 3. Create the Order document
-    const order = await Order.create({
-      user: req.user.id,
-      orderNumber: generateOrderNumber(),
-      items: orderItems,
-      shippingAddress,
-      totalAmount: calculatedTotal,
-      paymentMethod,
     });
 
     cart.items = [];
@@ -123,79 +81,12 @@ exports.createCheckoutOrder = async (req, res) => {
 // @access  Private (Buyer/User)
 exports.directCheckout = async (req, res) => {
   try {
-    const { items, shippingAddress, paymentMethod = "MOMO" } = req.body;
-
-    if (!shippingAddress || !shippingAddress.street || !shippingAddress.city) {
-      return res.status(400).json({ message: "Complete shipping address is required." });
-    }
-
-    if (!items || !items.length) {
-      return res.status(400).json({ message: "At least one item is required." });
-    }
-
-    const orderItems = [];
-    const productsToDecrement = [];
-    const reservedQuantities = new Map();
-    let calculatedTotal = 0;
-
-    for (const item of items) {
-      if (!item.productId || !mongoose.isValidObjectId(item.productId)) {
-        return res.status(400).json({ message: "Every checkout item must reference a valid product." });
-      }
-      const product = await Product.findById(item.productId);
-      if (!product || ["INACTIVE", "OUT_OF_STOCK"].includes(product.status)) {
-        return res.status(400).json({ message: "A product in your cart is no longer available." });
-      }
-      const qty = Number(item.qty || item.quantity);
-      if (!Number.isInteger(qty) || qty < 1) {
-        return res.status(400).json({ message: "Product quantity must be a positive whole number." });
-      }
-      const productKey = product._id.toString();
-      const reservedQty = (reservedQuantities.get(productKey) || 0) + qty;
-      if (product.stockQuantity < reservedQty) {
-        return res.status(400).json({
-          message: `Insufficient stock for ${product.name}. Available: ${product.stockQuantity}`,
-        });
-      }
-      reservedQuantities.set(productKey, reservedQty);
-      const resolvedPrice = product.discountPrice || product.price;
-      calculatedTotal += resolvedPrice * qty;
-      const resolvedProduct = product._id;
-      const resolvedVendor = product.vendor || null;
-      const resolvedName = product.name;
-      const resolvedImage = product.media?.mainImage || "";
-
-      productsToDecrement.push({ product, qty });
-
-      orderItems.push({
-        product: resolvedProduct,
-        vendor: resolvedVendor,
-        name: resolvedName,
-        price: resolvedPrice,
-        quantity: qty,
-        image: resolvedImage,
-      });
-    }
-
-    const attributions = await affiliateAttribution.resolveAttributions({
+    const order = await checkoutService.createOrder({
+      userId: req.user.id,
+      lines: req.body.items,
+      delivery: deliveryFromBody(req.body),
+      paymentMethod: req.body.paymentMethod,
       visitorId: req.body.visitorId,
-      buyerId: req.user.id,
-      productIds: orderItems.map((i) => i.product),
-    });
-    orderItems.forEach((i) => affiliateAttribution.applyAttribution(i, attributions.get(String(i.product))));
-
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-
-    const order = await Order.create({
-      user: req.user.id,
-      orderNumber: generateOrderNumber(),
-      items: orderItems,
-      shippingAddress,
-      totalAmount: calculatedTotal,
-      paymentMethod,
-      paymentStatus: "PENDING",
-      orderStatus: "PENDING",
-      deliveryOtp: otp,
     });
 
     socketService.emitOrderCreated(order);
@@ -524,10 +415,12 @@ exports.confirmOrderDelivery = async (req, res) => {
       return res.status(400).json({ message: "Order is already marked as DELIVERED." });
     }
 
-    if (["CANCELLED", "REFUNDED", "RETURNED", "FAILED"].includes(order.orderStatus)) {
+    // Only paid, live orders can be delivered: delivering a cancelled or
+    // unpaid order would release escrow for money that was never kept.
+    if (order.paymentStatus !== "PAID" || ["CANCELLED", "REFUNDED", "RETURNED", "FAILED"].includes(order.orderStatus)) {
       await session.abortTransaction();
       session.endSession();
-      return res.status(400).json({ message: `A ${order.orderStatus.toLowerCase()} order cannot be delivered.` });
+      return res.status(400).json({ message: "Only paid, active orders can be marked as delivered." });
     }
 
     // 1. Verify Delivery OTP if enforced
@@ -660,16 +553,9 @@ exports.cancelOrderByBuyer = async (req, res) => {
       reason: "Order cancelled and refunded",
     });
 
-    // Restore stock for each product that was snapshot into this order
-    for (const item of order.items || []) {
-      if (!item.product) continue;
-      const product = await Product.findById(item.product);
-      if (product) {
-        product.stockQuantity = Math.max(0, (product.stockQuantity || 0) + (item.quantity || 0));
-        if (product.status === "OUT_OF_STOCK" && product.stockQuantity > 0) product.status = "ACTIVE";
-        await product.save();
-      }
-    }
+    await checkoutService.restoreStock(
+      (order.items || []).filter((item) => item.product).map((item) => ({ product: item.product, quantity: item.quantity })),
+    );
 
     socketService.emitOrderStatusUpdate(order);
 
@@ -689,11 +575,12 @@ exports.cancelOrderByBuyer = async (req, res) => {
 
 /**
  * Internal Escrow Release Helper
- * Handles double-entry ledger transitions & wallet updates atomically
+ * One settlement exists per order item, so a vendor can have several. Each is
+ * released through the financial service, which keeps the double-entry ledger,
+ * platform shares and wallets consistent (and is the same code the admin manual
+ * release uses).
  */
 async function releaseVendorEscrowFunds(orderId, vendorId, session) {
-  // Find held settlement record for this order & vendor
-  // One settlement exists per order item, so a vendor can have several.
   const settlements = await Settlement.find({
     order: orderId,
     vendor: vendorId,
@@ -701,41 +588,6 @@ async function releaseVendorEscrowFunds(orderId, vendorId, session) {
   }).session(session);
 
   for (const settlement of settlements) {
-    await releaseSettlement(settlement, orderId, vendorId, session);
+    await financialService.releaseEscrowToVendor({ settlementId: settlement._id, session });
   }
-}
-
-async function releaseSettlement(settlement, orderId, vendorId, session) {
-  const releaseAmount = settlement.netAmount; // Amount after platform commission
-
-  // 1. Update Settlement State
-  settlement.status = "RELEASED";
-  settlement.releasedAt = new Date();
-  await settlement.save({ session });
-
-  // 2. Update Vendor Wallet Balances (pendingBalance -> availableBalance)
-  const wallet = await VendorWallet.findOne({ vendor: vendorId }).session(session);
-  if (wallet) {
-    wallet.pendingBalance = Math.max(0, wallet.pendingBalance - releaseAmount);
-    wallet.availableBalance += releaseAmount;
-    wallet.totalEarned += releaseAmount;
-    await wallet.save({ session });
-  }
-
-  // 3. Record Double-Entry Financial Ledger Entry
-  await LedgerEntry.create(
-    [
-      {
-        referenceType: "ESCROW_RELEASE",
-        referenceId: orderId,
-        vendor: vendorId,
-        debitAccount: "ESCROW_HOLDING_ACCOUNT",
-        creditAccount: "VENDOR_PAYABLE_ACCOUNT",
-        amount: releaseAmount,
-        currency: "RWF",
-        description: `Escrow payout released for order #${orderId}`,
-      },
-    ],
-    { session }
-  );
 }

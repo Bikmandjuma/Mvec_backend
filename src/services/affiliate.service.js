@@ -503,16 +503,45 @@ class AffiliateService {
     if (!user) throw new Error("User not found.");
 
     const { displayName, bio, website, country, paymentMethod, accountDetails, accountName, phone } = body;
+    const rawName = body.fullName !== undefined ? body.fullName : body.Fullname;
+    const email = body.email;
 
-    if (phone !== undefined && phone !== null && String(phone).trim() !== "") {
+    // Name and phone are mandatory on the affiliate profile: they may be
+    // omitted from a partial update, but never blanked or left invalid.
+    let userChanged = false;
+    if (rawName !== undefined) {
+      const name = typeof rawName === "string" ? rawName.trim() : "";
+      if (name.length < 2 || name.length > 120) {
+        throw new Error("Please enter your full name (2 to 120 characters).");
+      }
+      user.Fullname = name;
+      userChanged = true;
+    }
+    if (phone !== undefined) {
       const normalized = normalizePhone(phone);
       if (!normalized) throw new Error(describePhoneIssue(phone));
       user.phone = normalized;
+      userChanged = true;
+    }
+    if (email !== undefined) {
+      const normalizedEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
+      if (normalizedEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+        throw new Error("Please enter a valid email address or leave it empty.");
+      }
+      if (normalizedEmail && normalizedEmail !== user.email) {
+        const taken = await User.exists({ email: normalizedEmail, _id: { $ne: user._id } });
+        if (taken) throw new Error("Another account already uses this email.");
+      }
+      user.email = normalizedEmail || undefined;
+      userChanged = true;
+    }
+    if (userChanged) {
+      if (!user.Fullname || !user.phone) throw new Error("Full name and phone number are required.");
       try {
         await user.save();
       } catch (err) {
         if (err && err.code === 11000) {
-          throw new Error("An account with this phone number already exists.");
+          throw new Error("An account with this phone number or email already exists.");
         }
         throw err;
       }
@@ -619,6 +648,7 @@ class AffiliateService {
       clickCount: stats.clicks || 0,
       uniqueVisitors: stats.unique || 0,
       conversionCount: stats.conversions || 0,
+      successfulCount: stats.successful || 0,
       commissionEarned: stats.commission || 0,
       revenue: stats.revenue || 0,
       createdAt: link.createdAt,
@@ -655,6 +685,21 @@ class AffiliateService {
             conversions: { $sum: 1 },
             commission: { $sum: { $subtract: ["$commissionEarned", "$reversedAmount"] } },
             revenue: { $sum: { $cond: [{ $eq: ["$status", "REVERSED"] }, 0, "$conversionValue"] } },
+            // Delivered (approved) and not fully refunded.
+            successful: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $in: ["$status", ["APPROVED", "PAID"]] },
+                      { $gt: [{ $subtract: ["$commissionEarned", "$reversedAmount"] }, 0] },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
           },
         },
       ]),
@@ -673,6 +718,7 @@ class AffiliateService {
         conversions: r.conversions,
         commission: round2(r.commission),
         revenue: r.revenue,
+        successful: r.successful,
       })
     );
     return map;
@@ -867,7 +913,7 @@ class AffiliateService {
   async getOverview(userId) {
     const uid = this._oid(userId);
     if (!uid) throw new Error("User not found.");
-    const [wallet, linkRows, clickTotals, totals, recent, stats] = await Promise.all([
+    const [wallet, linkRows, clickTotals, totals, recent, stats, clickedLinks, successfulLinks] = await Promise.all([
       this.getWalletSummary(userId),
       AffiliateLink.find({ affiliateUser: uid }).select("status isActive"),
       AffiliateClick.aggregate([
@@ -877,12 +923,29 @@ class AffiliateService {
       this._commissionTotals(uid),
       this.getRecentConversions(userId, 10),
       this.getStats(userId, "30d"),
+      // Links that received at least one real click.
+      AffiliateClick.distinct("link", { affiliateUser: uid, link: { $ne: null } }),
+      // Successful = clicked, ordered AND delivered (commission approved and
+      // not fully refunded). Terminated links keep counting: history is kept.
+      ConversionAudit.distinct("link", {
+        affiliateUser: uid,
+        link: { $ne: null },
+        status: { $in: ["APPROVED", "PAID"] },
+        $expr: { $gt: [{ $subtract: ["$commissionEarned", "$reversedAmount"] }, 0] },
+      }),
     ]);
 
     const click = clickTotals[0] || { clicks: 0, visitors: [] };
     const terminated = linkRows.filter((l) => l.status === "TERMINATED" || l.isActive === false).length;
     return {
-      links: { total: linkRows.length, active: linkRows.length - terminated, terminated },
+      links: {
+        total: linkRows.length,
+        created: linkRows.length,
+        clicked: clickedLinks.length,
+        successful: successfulLinks.length,
+        active: linkRows.length - terminated,
+        terminated,
+      },
       clicks: click.clicks,
       uniqueVisitors: click.visitors.filter(Boolean).length,
       conversions: totals.conversions,

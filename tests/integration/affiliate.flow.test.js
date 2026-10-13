@@ -53,7 +53,7 @@ describe("affiliate flow", () => {
     const bin = execSync("command -v mongod", { encoding: "utf8" }).trim();
     replSet = await MongoMemoryReplSet.create({ binary: { systemBinary: bin }, replSet: { count: 1, name: "rs0" } });
     await mongoose.connect(replSet.getUri("test"), { directConnection: true });
-    await Promise.all([Settlement, ConversionAudit, Order, AffiliateLink, AffiliateAttribution].map((m) => m.init()));
+    await Promise.all([User, Settlement, ConversionAudit, Order, AffiliateLink, AffiliateAttribution].map((m) => m.init()));
 
     app = express();
     app.use(express.json());
@@ -94,7 +94,8 @@ describe("affiliate flow", () => {
         items,
         visitorId,
         paymentMethod: "MOMO",
-        shippingAddress: { street: "KN 1", city: "Kigali", state: "Kigali", country: "Rwanda" },
+        shippingAddress: { street: "KN 1 Ave", district: "Gasabo", province: "Kigali City" },
+        recipient: { name: "Jean Buyer", phone: "0788123456" },
       });
   const pay = (order, ref = `ext-${order._id}`) =>
     paymentService.processPaymentWebhook({
@@ -394,5 +395,33 @@ describe("affiliate flow", () => {
     assert.equal(p.commission.net, 0);
     assert.equal((await request(app).get("/api/affiliates/overview").set("Authorization", `Bearer ${token(buyer)}`)).status, 403);
     assert.equal((await request(app).get("/api/affiliates/overview")).status, 401);
+  });
+
+  test("profile: name and phone are mandatory, phone is unique, per-link successful count is exposed", async () => {
+    const patch = (body) =>
+      request(app).patch("/api/affiliates/profile").set("Authorization", `Bearer ${token(affA)}`).send(body);
+
+    assert.equal((await patch({ fullName: " " })).status, 400);
+    assert.equal((await patch({ phone: "" })).status, 400);
+    assert.equal((await patch({ phone: "12" })).status, 400);
+    const { normalizePhone } = require("../../src/utils/sms.util");
+    await User.updateOne({ _id: affB._id }, { phone: normalizePhone(affB.phone) });
+    assert.equal((await patch({ phone: affB.phone })).status, 400, "duplicate phone");
+
+    const ok = await patch({ fullName: "Amina Uwase", phone: "0788555111", bio: "hi" });
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    const fresh = await User.findById(affA._id);
+    assert.equal(fresh.Fullname, "Amina Uwase");
+    assert.match(fresh.phone, /788555111$/);
+
+    const { order } = await promotedOrder();
+    await pay(order);
+    let links = (await request(app).get("/api/affiliates/links").set("Authorization", `Bearer ${token(affA)}`)).body.data;
+    assert.equal(links[0].clickCount, 1);
+    assert.equal(links[0].conversionCount, 1);
+    assert.equal(links[0].successfulCount, 0, "ordered but not delivered");
+    assert.equal((await deliver(order, admin)).status, 200);
+    links = (await request(app).get("/api/affiliates/links").set("Authorization", `Bearer ${token(affA)}`)).body.data;
+    assert.equal(links[0].successfulCount, 1);
   });
 });
