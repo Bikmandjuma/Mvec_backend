@@ -1,11 +1,25 @@
 const Product = require("../models/Product");
 const Category = require("../models/Category");
 const mongoose = require("mongoose");
+const { resolveOwnedStore } = require("../utils/vendorStore.util");
+
+// Validates the store a product is listed under. "" / null = primary store.
+// Returns { store } (null for primary) or { error }.
+const checkProductStore = async (vendorId, storeId) => {
+  if (storeId === undefined) return {};
+  if (storeId === null || storeId === "") return { store: null };
+  const store = await resolveOwnedStore(vendorId, storeId);
+  return store ? { store: store._id } : { error: "Select one of your own stores." };
+};
 
 const normalizeProductPayload = (body = {}) => {
   const normalized = { ...body };
   const category = body.category ?? body.categoryId;
   if (category !== undefined) normalized.category = category;
+  // storeId wins; a populated store object (sent back by edit forms) is reduced to its id.
+  const rawStore = body.storeId !== undefined ? body.storeId : body.store;
+  const store = rawStore && typeof rawStore === "object" ? rawStore._id ?? null : rawStore;
+  if (store !== undefined) normalized.store = store;
 
   const media = { ...(body.media || {}) };
   if (body.mainImage !== undefined) media.mainImage = body.mainImage;
@@ -18,7 +32,7 @@ const normalizeProductPayload = (body = {}) => {
   }
   if (Object.keys(attributes).length) normalized.attributes = attributes;
 
-  for (const key of ["categoryId", "mainImage", "gallery", "color", "size", "material", "weight", "capacity", "model"]) {
+  for (const key of ["categoryId", "storeId", "mainImage", "gallery", "color", "size", "material", "weight", "capacity", "model"]) {
     delete normalized[key];
   }
   return normalized;
@@ -77,12 +91,12 @@ exports.getAllProducts = async (req, res) => {
 exports.getVendorProducts = async (req, res) => {
   try {
     const vendorId = req.vendorId || req.targetVendorId || req.user.id;
-    const products = await Product.find({
-      $or: [{ vendor: vendorId }, { vendor: req.user.id }],
-    }).populate(
-      "category",
-      "name",
-    );
+    const query = { $or: [{ vendor: vendorId }, { vendor: req.user.id }] };
+    if (req.query.store === "primary") query.store = null;
+    else if (mongoose.isValidObjectId(req.query.store)) query.store = req.query.store;
+    const products = await Product.find(query)
+      .populate("category", "name")
+      .populate("store", "storeName slug isPrimary");
 
     return res.status(200).json({ count: products.length, products });
   } catch (error) {
@@ -103,8 +117,11 @@ exports.createProduct = async (req, res) => {
     if (!(await Category.exists({ _id: payload.category }))) {
       return res.status(400).json({ message: "The selected category no longer exists. Refresh the category list and try again." });
     }
+    const storeCheck = await checkProductStore(vendorId, payload.store);
+    if (storeCheck.error) return res.status(400).json({ message: storeCheck.error });
     const product = new Product({
       ...payload,
+      store: storeCheck.store ?? null,
       vendor: vendorId,
     });
 
@@ -169,6 +186,12 @@ exports.updateProduct = async (req, res) => {
       if (!(await Category.exists({ _id: updates.category }))) {
         return res.status(400).json({ message: "The selected category no longer exists. Refresh the category list and try again." });
       }
+    }
+
+    if (updates.store !== undefined) {
+      const storeCheck = await checkProductStore(product.vendor, updates.store);
+      if (storeCheck.error) return res.status(400).json({ message: storeCheck.error });
+      updates.store = storeCheck.store;
     }
 
     // Prevent changing immutable unique indexes
@@ -241,7 +264,9 @@ exports.deleteProduct = async (req, res) => {
 // @access  Public
 exports.getProductById = async (req, res) => {
   try {
-    const product = await Product.findById(req.params.id)
+    // Storefront links use the public id (MVEC-PRD-…); dashboards use the DB id.
+    const { id } = req.params;
+    const product = await Product.findOne(mongoose.isValidObjectId(id) ? { _id: id } : { publicId: id })
       .populate("vendor", "Fullname companyName email")
       .populate("category", "name slug");
 

@@ -6,6 +6,20 @@ const Cart = require("../src/models/Cart");
 const Product = require("../src/models/Product");
 const payoutController = require("../src/controllers/payout.controller");
 const orderController = require("../src/controllers/order.controller");
+const shippingService = require("../src/services/shipping.service");
+
+// Stand-in for the zone-based quote (the real one queries the database).
+const stubQuote = (fee, deliverable = true) => async ({ lines, address }) => ({
+  address: { province: address.state, district: address.city },
+  method: "STANDARD",
+  deliverable,
+  shippingFee: deliverable ? fee : 0,
+  groups: [{
+    vendor: String(lines[0].product.vendor), store: null, storeName: "Test Store", zone: null,
+    zoneName: "Test zone", method: "STANDARD", fee: deliverable ? fee : 0, eta: "1 day", deliverable,
+    message: deliverable ? null : "Test Store doesn't deliver to Kigali yet.",
+  }],
+});
 
 // Helper to construct mock Express req & res
 function createMockReqRes(options = {}) {
@@ -88,6 +102,8 @@ describe("Order Controller Unit Tests", () => {
         createdOrderDoc = { ...orderData, _id: new mongoose.Types.ObjectId() };
         return createdOrderDoc;
       };
+      const originalQuote = shippingService.quoteShipping;
+      shippingService.quoteShipping = stubQuote(0);
 
       try {
         const { req, res } = createMockReqRes({
@@ -123,7 +139,50 @@ describe("Order Controller Unit Tests", () => {
         Cart.findOne = originalCartFindOne;
         Product.findById = originalProductFindById;
         Order.create = originalOrderCreate;
+        shippingService.quoteShipping = originalQuote;
       }
+    });
+
+    const checkoutWithQuote = async (quote) => {
+      const productId = new mongoose.Types.ObjectId().toString();
+      const product = {
+        _id: productId, name: "Lamp", vendor: new mongoose.Types.ObjectId().toString(),
+        price: 10000, discountPrice: null, stockQuantity: 5, status: "ACTIVE", save: async function () { return this; },
+      };
+      const cart = { items: [{ product: { _id: productId }, quantity: 2 }], save: async function () { return this; } };
+      const originals = { cart: Cart.findOne, product: Product.findById, create: Order.create, quote: shippingService.quoteShipping };
+      Cart.findOne = () => ({ populate: async () => cart });
+      Product.findById = async () => product;
+      Order.create = async (data) => ({ ...data, _id: new mongoose.Types.ObjectId() });
+      shippingService.quoteShipping = quote;
+      try {
+        const { req, res } = createMockReqRes({
+          body: { shippingAddress: { street: "KN 5 Rd", city: "Gasabo", state: "Kigali City", country: "Rwanda" }, paymentMethod: "MOMO" },
+        });
+        await orderController.createCheckoutOrder(req, res);
+        return { res, product };
+      } finally {
+        Cart.findOne = originals.cart;
+        Product.findById = originals.product;
+        Order.create = originals.create;
+        shippingService.quoteShipping = originals.quote;
+      }
+    };
+
+    it("should add the zone delivery fee to the order total", async () => {
+      const { res } = await checkoutWithQuote(stubQuote(3000));
+      assert.equal(res.statusCode, 201);
+      assert.equal(res.jsonData.order.subtotal, 20000);
+      assert.equal(res.jsonData.order.shippingFee, 3000);
+      assert.equal(res.jsonData.order.totalAmount, 23000);
+      assert.equal(res.jsonData.order.shippingBreakdown[0].fee, 3000);
+    });
+
+    it("should reject checkout when a seller doesn't deliver to the address", async () => {
+      const { res, product } = await checkoutWithQuote(stubQuote(0, false));
+      assert.equal(res.statusCode, 400);
+      assert.match(res.jsonData.message, /doesn't deliver/);
+      assert.equal(product.stockQuantity, 5, "stock must not be deducted");
     });
 
     it("should reject checkout when shippingAddress is missing or incomplete", async () => {
