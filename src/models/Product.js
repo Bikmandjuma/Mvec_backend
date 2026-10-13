@@ -41,12 +41,6 @@ const productSchema = new mongoose.Schema(
     discountType: { type: String, enum: ["PERCENT", "FIXED", null], default: null },
     discountValue: { type: Number, default: null },
 
-    // Flexible discount config: either a fixed RWF amount or a percentage.
-    discount: {
-      type: { type: String, enum: ["fixed", "percent", null], default: null },
-      value: { type: Number, default: null, min: 0 },
-    },
-
     stockQuantity: { type: Number, required: true, default: 0, min: 0 },
     lowStockThreshold: { type: Number, default: 5 }, // sensible default so it's never undefined
 

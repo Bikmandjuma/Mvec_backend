@@ -16,6 +16,7 @@ module.exports = (sequelize) => {
     phone: { type: DataTypes.STRING(20), allowNull: false },
     email: { type: DataTypes.STRING(190), allowNull: false, set(v) { this.setDataValue("email", String(v || "").trim().toLowerCase()); } },
     commissionRate: { type: DataTypes.DECIMAL(5, 2), allowNull: false, defaultValue: 0 },
+    category: { type: DataTypes.STRING(120), allowNull: true, defaultValue: "" },
     verificationStatus: { type: DataTypes.ENUM("UNVERIFIED", "PENDING", "VERIFIED", "REJECTED"), allowNull: false, defaultValue: "UNVERIFIED" },
     ratingAvg: { type: DataTypes.DECIMAL(3, 2), allowNull: false, defaultValue: 0, validate: { min: 0, max: 5 } },
     status: { type: DataTypes.ENUM("ACTIVE", "SUSPENDED", "BLOCKED", "UNDER_REVIEW"), allowNull: false, defaultValue: "ACTIVE" },

@@ -27,17 +27,23 @@ const LEGACY = {
       Fullname: F("string"), email: F("string"), password: F("string"), gender: F("string"), phone: F("string"),
       googleId: F("string"), email_verified: F("bool"), role: F("string"), isSellerEnabled: F("bool"), status: F("string"),
       companyName: F("string"), resetPasswordToken: F("string"), resetPasswordExpires: F("date"), isVendorStaff: F("bool"),
-      lastPasswordChangeAt: F("date"),
+      lastPasswordChangeAt: F("date"), businessName: F("string"), description: F("string"), logoUrl: F("string"),
+      category: F("string"), location: F("json"), isOnboarded: F("bool"), verificationStatus: F("string"), avatarUrl: F("string"),
+      resetPasswordCode: F("string"), resetPasswordCodeExpires: F("date"), resetPasswordAttempts: F("number"), isSupplierStaff: F("bool"),
     },
-    hidden: ["isVendorStaff"],
+    hidden: ["isVendorStaff", "isSupplierStaff", "resetPasswordCode", "resetPasswordCodeExpires", "resetPasswordAttempts"],
     children: {
       addresses: {
         Model: "UserAddress", parentKey: "userId", orderBy: "createdAt",
         fields: {
-          type: F("string"), country: F("string"), provinceState: F("string"), cityDistrict: F("string"), street: F("string"),
+          type: F("string"), country: F("string"), provinceState: F("string"), cityDistrict: F("string"), sector: F("string"), street: F("string"),
           building: F("string"), apartment: F("string"), postalCode: F("string"), phone: F("string"),
           deliveryInstructions: F("string"), isDefaultShipping: F("bool"), isDefaultBilling: F("bool"),
         },
+      },
+      wishlist: {
+        Model: "UserWishlistItem", parentKey: "userId", orderBy: "savedAt", noId: true,
+        fields: { product: F("ref", "productId", "Product"), savedPrice: F("number"), savedAt: F("date") },
       },
     },
   },
@@ -50,7 +56,7 @@ const LEGACY = {
     fields: {
       publicId: F("string"), user: F("ref", "userId", "User"), businessName: F("string"), slug: F("string"), logoUrl: F("string"),
       bannerUrl: F("string"), description: F("string"), phone: F("string"), email: F("string"), commissionRate: F("number"),
-      verificationStatus: F("string"), ratingAvg: F("number"), status: F("string"), location: F("json"),
+      verificationStatus: F("string"), ratingAvg: F("number"), status: F("string"), location: F("json"), category: F("string"),
     },
   },
   Store: {
@@ -69,6 +75,7 @@ const LEGACY = {
     Model: "Staff",
     fields: {
       store: F("ref", "storeId", "Store"), vendorOwner: F("ref", "vendorOwnerId", "User"), user: F("ref", "userId", "User"),
+      email: F("string"), invitationTokenHash: F("string"), invitationExpiresAt: F("date"),
       role: F("string"),
       ...Object.fromEntries(["canViewDashboard", "canManageProducts", "canManageOrders", "canManagePayouts", "canManageStaff", "canViewAnalytics", "canManageSettings"]
         .map((p) => [`permissions.${p}`, F("bool", p)])),
@@ -78,6 +85,7 @@ const LEGACY = {
       user_id: { ...F("ref", "userId", "User"), alias: true },
       permission_role: { ...F("string", "role"), alias: true },
     },
+    hidden: ["invitationTokenHash", "invitationExpiresAt"],
   },
   Category: {
     Model: "Category",
@@ -126,7 +134,7 @@ for (const [name, def] of Object.entries(LEGACY)) {
     fields: normalizeLegacyFields(def.fields),
     hidden: def.hidden || [],
     children: Object.fromEntries(Object.entries(def.children || {}).map(([cname, c]) => [cname, {
-      name: cname, Model: models[c.Model], parentKey: c.parentKey, orderBy: c.orderBy, noId: false, hasPosition: false,
+      name: cname, Model: models[c.Model], parentKey: c.parentKey, orderBy: c.orderBy, noId: !!c.noId, hasPosition: false,
       fields: normalizeLegacyFields(c.fields),
     }])),
     methods: METHODS[name] || {},
