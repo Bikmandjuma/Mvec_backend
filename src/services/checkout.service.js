@@ -120,7 +120,7 @@ async function reserveStock(lines) {
  * Create a PENDING order for a buyer from product lines. Prices, shipping and
  * totals are computed here, never trusted from the client.
  */
-async function createOrder({ userId, lines: rawLines, delivery, paymentMethod, visitorId = null }) {
+async function createOrder({ userId, lines: rawLines, delivery, paymentMethod, visitorId }) {
   const parsed = parseDelivery(delivery);
   const lines = normaliseLines(rawLines);
 
@@ -153,7 +153,8 @@ async function createOrder({ userId, lines: rawLines, delivery, paymentMethod, v
     });
   }
 
-  // Last-click affiliate attribution, resolved from server-side records only.
+  // Last-click affiliate attribution, resolved from server-side click records
+  // (never from client-supplied affiliate data).
   const attributions = await affiliateAttribution.resolveAttributions({
     visitorId,
     buyerId: userId,

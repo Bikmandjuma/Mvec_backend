@@ -51,7 +51,7 @@ exports.adminListUsers = async (req, res) => {
     if (role) query.role = role;
     if (status) query.status = status;
     if (search) {
-      const re = new RegExp(search, "i");
+      const re = new RegExp(String(search).slice(0, 100).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
       query.$or = [{ Fullname: re }, { email: re }, { phone: re }];
     }
 
