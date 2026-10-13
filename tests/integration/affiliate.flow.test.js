@@ -1,5 +1,6 @@
-// End-to-end affiliate flow against a real MongoDB replica set (transactions are
-// required by the payment/escrow code). Run with: node --test tests/integration/affiliate.flow.test.js
+// End-to-end affiliate flow against a real database. MongoDB (default): an
+// in-memory replica set. MySQL: DB_DRIVER=mysql NODE_ENV=test with a migrated
+// *_test database. Run with: node --test tests/integration/affiliate.flow.test.js
 const assert = require("node:assert/strict");
 const { before, after, beforeEach, describe, test } = require("node:test");
 const { execSync } = require("node:child_process");
@@ -12,6 +13,7 @@ const express = require("express");
 const request = require("supertest");
 const jwt = require("jsonwebtoken");
 const { MongoMemoryReplSet } = require("mongodb-memory-server");
+const { isMysql } = require("../../src/database/driver");
 
 const User = require("../../src/models/User");
 const Category = require("../../src/models/Category");
@@ -50,10 +52,16 @@ describe("affiliate flow", () => {
   let vendor, buyer, affA, affB, admin, cat, mouse, keyboard, draft;
 
   before(async () => {
+    if (isMysql) {
+      const { sequelize } = require("../../src/database");
+      if (!/_test$/.test(sequelize.config.database)) throw new Error(`Refusing to run against ${sequelize.config.database}; use a *_test database.`);
+      await sequelize.authenticate();
+    } else {
     const bin = execSync("command -v mongod", { encoding: "utf8" }).trim();
     replSet = await MongoMemoryReplSet.create({ binary: { systemBinary: bin }, replSet: { count: 1, name: "rs0" } });
     await mongoose.connect(replSet.getUri("test"), { directConnection: true });
     await Promise.all([User, Settlement, ConversionAudit, Order, AffiliateLink, AffiliateAttribution].map((m) => m.init()));
+    }
 
     app = express();
     app.use(express.json());
@@ -62,15 +70,16 @@ describe("affiliate flow", () => {
   });
 
   after(async () => {
+    if (isMysql) return require("../../src/database").sequelize.close();
     await mongoose.disconnect();
     if (replSet) await replSet.stop();
   });
 
   beforeEach(async () => {
-    await Promise.all(
-      [User, Category, Product, Order, Settlement, AffiliateLink, AffiliateClick, AffiliateAttribution, AffiliateWallet, ConversionAudit]
-        .map((m) => m.deleteMany({}))
-    );
+    // Children before parents (MySQL enforces foreign keys).
+    for (const m of [ConversionAudit, AffiliateAttribution, AffiliateClick, AffiliateWallet, AffiliateLink, Settlement, Order, Product, Category, User]) {
+      await m.deleteMany({});
+    }
     vendor = await mkUser("vendor");
     buyer = await mkUser("buyer");
     affA = await mkUser("affiliate");
@@ -100,7 +109,7 @@ describe("affiliate flow", () => {
       });
   const pay = (order, ref = `ext-${order._id}`) =>
     paymentService.processPaymentWebhook({
-      provider: "TEST",
+      provider: "PAYPACK",
       externalTransactionId: ref,
       orderId: order._id,
       amount: order.totalAmount,

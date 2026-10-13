@@ -2,7 +2,7 @@
 const { Op } = require("sequelize");
 const { sequelize } = require("..");
 const C = require("./convert");
-const { buildWhere, resolvePath, isArrayField } = require("./where");
+const { buildWhere, resolvePath, isArrayField, matchDoc } = require("./where");
 const { mapError, CastError } = require("./errors");
 const { resolveTx } = require("./session");
 
@@ -530,8 +530,11 @@ function updateAssignments(entry, update, current) {
     const f = entry.fields[path];
     if (f) values[f.column] = sequelize.literal(`COALESCE(\`${f.column}\`, 0) * ${sequelize.escape(Number(by))}`);
   }
+  const childOps = [];
   const arrayOp = (op, fn) => {
     for (const [path, raw] of Object.entries(u[op] || {})) {
+      // Embedded sub-document arrays live in child tables; applied after loading them.
+      if (entry.children?.[path]) { childOps.push({ op, path, raw }); continue; }
       const f = entry.fields[path];
       if (!f || !isArrayField(f)) throw new Error(`${op} is only supported on array fields (${path})`);
       const list = (current?.[f.column] || []).slice();
@@ -542,7 +545,21 @@ function updateAssignments(entry, update, current) {
   arrayOp("$addToSet", (list, items) => { items.forEach((x) => { if (!list.some((y) => JSON.stringify(y) === JSON.stringify(x))) list.push(x); }); return list; });
   arrayOp("$push", (list, items) => list.concat(items));
   arrayOp("$pull", (list, items) => list.filter((y) => !items.some((x) => JSON.stringify(y) === JSON.stringify(x))));
-  return { values, childSets, setOnInsert: u.$setOnInsert || {} };
+  return { values, childSets, childOps, setOnInsert: u.$setOnInsert || {} };
+}
+
+// $push / $addToSet / $pull on a child-table array, applied to the loaded list.
+function applyChildOps(list, ops) {
+  const plain = (x) => JSON.stringify(x, (k, v) => (k === "_id" ? undefined : v));
+  for (const { op, raw } of ops) {
+    const items = raw && typeof raw === "object" && Array.isArray(raw.$each) ? raw.$each : [raw];
+    if (op === "$push") list = list.concat(items.map((x) => ({ ...x })));
+    else if (op === "$addToSet") items.forEach((x) => { if (!list.some((y) => plain(y) === plain(x))) list.push({ ...x }); });
+    else if (op === "$pull") {
+      list = list.filter((y) => !items.some((cond) => (cond && typeof cond === "object" && !isObjectId(cond) ? matchDoc(y, cond) : plain(y) === plain(cond))));
+    }
+  }
+  return list;
 }
 
 async function updateOneImpl(entry, filter, update, opts = {}, op) {
@@ -567,7 +584,14 @@ async function updateOneImpl(entry, filter, update, opts = {}, op) {
   }
 
   const before = opts.returnBefore ? (await loadDocs(entry, { where: { id: existing.id }, transaction }))[0] : null;
-  const { values, childSets } = updateAssignments(entry, update, existing);
+  const { values, childSets, childOps } = updateAssignments(entry, update, existing);
+  if (childOps.length) {
+    const current = (await loadDocs(entry, { where: { id: existing.id }, transaction }))[0];
+    for (const path of [...new Set(childOps.map((c) => c.path))]) {
+      const base = (current?.[path] || []).map((sub) => ({ ...(sub.toObject ? sub.toObject() : sub) }));
+      childSets[path] = applyChildOps(base, childOps.filter((c) => c.path === path));
+    }
+  }
   let affected = 1;
   if (Object.keys(values).length) {
     const [count] = await entry.Model.unscoped().update(values, { where: { [Op.and]: [{ id: existing.id }, where] }, transaction, hooks: false, validate: !!opts.runValidators });
