@@ -20,7 +20,7 @@ const { authorize, requireOnboarded } = require("../middleware/auth.middleware")
 router.get("/", getAllProducts);
 
 // Recommendations route - products sorted by rating and recency
-router.get("/recommendations", getRecommendations);
+router.get("/recommendations", optionalProtect, getRecommendations);
 
 // Placed these above router.use(protect);
 router.get("/slug/:slug", getProductBySlug);
