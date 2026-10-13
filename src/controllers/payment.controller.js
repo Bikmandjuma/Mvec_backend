@@ -65,6 +65,7 @@ async function initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService
   //    reconcile the callback against a persisted transaction.
   const payment = await Payment.create({
     parentOrder: order._id,
+    user: order.user,
     transactionReference: transactionRef,
     method: paymentMethod,
     phoneNumber: phoneInfo.formattedNumber,
@@ -93,7 +94,7 @@ async function initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService
     payment.gatewayResponse = { error: pushError.message };
     payment.status = "FAILED";
     await payment.save();
-    throw Object.assign(new Error("Unable to reach the mobile money gateway. Payment not pushed."), {
+    throw Object.assign(new Error("We could not reach the mobile money network, so no prompt was sent and no money was taken. Please try again in a moment."), {
       statusCode: 502,
     });
   }
@@ -126,6 +127,70 @@ async function initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService
   };
 }
 
+/**
+ * Standalone payment: a signed-in user pays a chosen amount that is not tied
+ * to an order (used by the mobile app for top-ups and manual collections).
+ * Orders are always paid with an orderId so the server sets the amount.
+ */
+async function initiateStandalonePayment({ amount, phoneNumber, userId, gatewayService, explicitProvider = null }) {
+  const value = Number(amount);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw Object.assign(new Error("Enter an amount in whole Rwandan francs, for example 1000."), { statusCode: 400 });
+  }
+  if (gatewayService.isSandbox() && process.env.NODE_ENV === "production") {
+    throw Object.assign(new Error("Mobile money payments are temporarily unavailable. Please try again later."), { statusCode: 503 });
+  }
+  const phoneInfo = formatRwandanPhone(phoneNumber);
+  if (!phoneInfo) {
+    throw Object.assign(new Error("Enter an MTN (078/079) or Airtel (072/073) mobile money number."), { statusCode: 400 });
+  }
+  if (explicitProvider && phoneInfo.provider !== explicitProvider) {
+    throw Object.assign(new Error(`That is ${phoneInfo.provider === "MTN" ? "an MTN" : "an Airtel"} number. Use ${explicitProvider === "MTN" ? "an MTN" : "an Airtel"} number for this payment method.`), { statusCode: 400 });
+  }
+  const provider = explicitProvider || phoneInfo.provider;
+  const paymentMethod = provider === "MTN" ? "MOMO" : "AIRTEL";
+  const transactionRef = `PAY-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+
+  const payment = await Payment.create({
+    user: userId,
+    transactionReference: transactionRef,
+    method: paymentMethod,
+    phoneNumber: phoneInfo.formattedNumber,
+    provider,
+    amount: value,
+    currency: "RWF",
+    status: "PENDING",
+    gateway: gatewayService.name,
+    gatewayResponse: { phase: "initiated" },
+  });
+
+  try {
+    const push = await gatewayService.triggerUssdPush({ amount: value, currency: "RWF", phone: phoneInfo.formattedNumber });
+    if (push.reference) payment.gatewayReference = push.reference;
+    if (push.raw) payment.gatewayResponse = push.raw;
+  } catch (pushError) {
+    payment.gatewayResponse = { error: pushError.message };
+    payment.status = "FAILED";
+    await payment.save();
+    throw Object.assign(new Error("We could not reach the mobile money network, so no prompt was sent and no money was taken. Please try again in a moment."), { statusCode: 502 });
+  }
+  // Without gateway credentials (development) the payment is simulated.
+  if (gatewayService.isSandbox()) {
+    payment.status = "SUCCESS";
+    payment.paidAt = new Date();
+  }
+  await payment.save();
+
+  return {
+    message: `Payment prompt sent to ${phoneInfo.localNumber}. Please approve it on your phone.`,
+    paymentRef: transactionRef,
+    paymentId: payment._id,
+    amount: value,
+    gatewayReference: payment.gatewayReference || null,
+    status: payment.status,
+  };
+}
+
 // All mobile money collections go through Paypack, which handles both MTN and Airtel numbers.
 const paypackGateway = {
   name: "PAYPACK",
@@ -136,19 +201,21 @@ const paypackGateway = {
 function mobileMoneyHandler(explicitProvider) {
   return async (req, res) => {
     try {
-      const { orderId, phoneNumber } = req.body;
-      const result = await initiateMobileMoneyPayment({
-        orderId,
-        phoneNumber,
-        gatewayService: paypackGateway,
-        explicitProvider,
-        reqUserId: req.user.id || req.user._id.toString(),
-      });
+      const { orderId, amount, phoneNumber } = req.body;
+      const userId = req.user.id || req.user._id.toString();
+      let result;
+      if (orderId) {
+        result = await initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService: paypackGateway, explicitProvider, reqUserId: userId });
+      } else if (amount !== undefined) {
+        result = await initiateStandalonePayment({ amount, phoneNumber, userId, gatewayService: paypackGateway, explicitProvider });
+      } else {
+        return res.status(400).json({ message: "Send the orderId of the order you are paying for." });
+      }
       return res.status(200).json(result);
     } catch (error) {
       if (!error.statusCode) {
         console.error("Mobile money payment failed:", error);
-        return res.status(500).json({ message: "We could not start the payment. Please try again." });
+        return res.status(500).json({ message: "Something went wrong on our side while starting the payment. No money was taken. Please try again; if it keeps failing, contact MVEC support." });
       }
       return res.status(error.statusCode).json({ message: error.message, ...(error.paymentId && { paymentId: error.paymentId }) });
     }
@@ -173,39 +240,37 @@ exports.checkPaymentStatus = async (req, res) => {
       return res.status(400).json({ message: "Invalid payment ID." });
     }
     const payment = await Payment.findById(req.params.paymentId);
-    if (!payment) {
-      return res.status(404).json({ message: "Payment not found." });
+    if (!payment) return res.status(404).json({ message: "Payment not found." });
+
+    // Owner: the order's buyer for order payments, the payer for standalone ones.
+    let ownerId = payment.user ? String(payment.user) : null;
+    if (payment.parentOrder) {
+      const paymentOrder = await Order.findById(payment.parentOrder).select("user");
+      ownerId = paymentOrder ? String(paymentOrder.user) : null;
     }
-    const paymentOrder = await Order.findById(payment.parentOrder).select("user");
-    if (!paymentOrder || paymentOrder.user.toString() !== req.user.id) {
+    if (ownerId !== String(req.user.id) && req.user.role !== "super_admin") {
       return res.status(404).json({ message: "Payment not found." });
     }
 
     if (payment.status === "PENDING" && payment.gateway === "PAYPACK" && payment.gatewayReference) {
       const result = await paypackService.getTransactionStatus(payment.gatewayReference);
-
-      if (result.status === "SUCCESSFUL") {
-        await paymentService.processPaymentWebhook({
-          provider: "PAYPACK",
-          externalTransactionId: payment.gatewayReference,
-          orderId: payment.parentOrder,
-          paymentId: payment._id,
-          amount: result.amount ?? payment.amount,
-          payload: result.raw || {},
-          gatewayFee: result.fee || 0,
-        });
-      } else if (result.status === "FAILED") {
-        payment.status = "FAILED";
-        payment.gatewayResponse = result.raw || payment.gatewayResponse;
-        await payment.save();
-      }
+      await paymentService.settlePaypackPayment({
+        payment,
+        status: result.status,
+        amount: result.amount ?? payment.amount,
+        fee: result.fee || 0,
+        payload: result.raw || {},
+      });
     }
 
     const fresh = await Payment.findById(payment._id);
-    const order = await Order.findById(fresh.parentOrder).select("paymentStatus orderStatus totalAmount");
+    const order = fresh.parentOrder
+      ? await Order.findById(fresh.parentOrder).select("paymentStatus orderStatus totalAmount")
+      : null;
     return res.status(200).json({ payment: fresh, order });
   } catch (error) {
-    return res.status(500).json({ message: "Unable to check payment status", error: error.message });
+    console.error("Payment status check failed:", error);
+    return res.status(502).json({ message: "We could not check the payment with the mobile money network right now. Your payment is safe; try again in a minute." });
   }
 };
 
@@ -233,7 +298,7 @@ exports.confirmPayment = async (req, res) => {
       await session.abortTransaction();
       return res.status(404).json({ message: "Order not found." });
     }
-    if (order.user.toString() !== req.user.id) {
+    if (!order.user || order.user.toString() !== req.user.id) {
       await session.abortTransaction();
       return res.status(404).json({ message: "Order not found." });
     }

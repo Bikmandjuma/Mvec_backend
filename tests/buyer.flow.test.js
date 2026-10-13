@@ -122,7 +122,7 @@ test("checkout charges discounted price plus delivery and reserves stock", async
   assert.equal(bad.status, 400);
 
   const res = await request(app).post("/api/orders/checkout").set(auth(buyerToken))
-    .send({ ...delivery, shippingAddress: { ...delivery.shippingAddress, province: "Northern Province" } });
+    .send({ ...delivery, shippingAddress: { ...delivery.shippingAddress, district: "Musanze", province: "Northern Province" } });
   assert.equal(res.status, 201, JSON.stringify(res.body));
   const { order } = res.body;
   assert.ok(order.id, "orders expose id");

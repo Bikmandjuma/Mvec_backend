@@ -47,6 +47,7 @@ const deliveryFromBody = (body = {}) => ({
   shippingAddress: body.shippingAddress,
   recipient: body.recipient,
   deliveryMethod: body.deliveryMethod,
+  shippingMethod: body.shippingMethod,
 });
 
 // @desc    Checkout the buyer's server-side cart & create a PENDING order
@@ -208,6 +209,10 @@ exports.getVendorOrders = async (req, res) => {
         _id: order._id,
         orderNumber: order.orderNumber,
         user: order.user,
+        source: order.source || "ONLINE",
+        customer: order.customer,
+        paidOffline: order.paidOffline,
+        paymentMethod: order.paymentMethod,
         shippingAddress: order.shippingAddress,
         paymentStatus: order.paymentStatus,
         orderStatus: order.orderStatus,
@@ -217,6 +222,11 @@ exports.getVendorOrders = async (req, res) => {
           (sum, item) => sum + item.price * item.quantity,
           0,
         ),
+        // Delivery fees for this seller's parcels (paid to the seller, no commission).
+        vendorShippingFee: (order.shippingBreakdown || [])
+          .filter((s) => s.vendor && vendorIds.includes(s.vendor.toString()))
+          .reduce((sum, s) => sum + (s.fee || 0), 0),
+        shippingMethod: order.shippingMethod,
       };
     });
 
@@ -240,8 +250,13 @@ async function advanceFulfilment({ order, status, actor }) {
   if (!FULFILMENT_FLOW.includes(next)) {
     throw checkoutService.httpError(400, "Choose one of: processing, ready for shipment, shipped, out for delivery. Delivery is confirmed with the buyer's code.");
   }
-  if (order.paymentStatus !== "PAID") {
-    throw checkoutService.httpError(400, "Only paid orders can be fulfilled.");
+  // Paid orders, and cash-on-delivery orders recorded by the seller (the
+  // customer pays when the parcel arrives).
+  const isCashOnDelivery = order.paymentMethod === "CASH_ON_DELIVERY" && order.paymentStatus === "PENDING" && order.orderStatus !== "PENDING";
+  if (order.paymentStatus !== "PAID" && !isCashOnDelivery) {
+    throw checkoutService.httpError(400, order.paymentStatus === "DISPUTED"
+      ? "This order is under dispute review. Wait for MVEC's decision before moving it."
+      : "This order isn't paid yet, so it can't be prepared or shipped.");
   }
   const current = FULFILMENT_FLOW.indexOf(order.orderStatus === "PENDING" ? "CONFIRMED" : order.orderStatus);
   if (current === -1) {
@@ -366,9 +381,12 @@ exports.confirmOrderDelivery = async (req, res) => {
       await session.abortTransaction();
       return res.status(400).json({ message: `A ${order.orderStatus.toLowerCase()} order cannot be delivered.` });
     }
+    // Cash on delivery: the seller collected the money at the door, so the
+    // code also confirms payment. Nothing went through MVEC escrow.
+    const cashOnDelivery = order.paymentMethod === "CASH_ON_DELIVERY" && order.paymentStatus === "PENDING" && order.orderStatus !== "PENDING";
     // Only paid orders can be delivered. This also keeps a DISPUTED order's
     // escrow frozen until an admin resolves the dispute.
-    if (order.paymentStatus !== "PAID") {
+    if (order.paymentStatus !== "PAID" && !cashOnDelivery) {
       await session.abortTransaction();
       return res.status(400).json({
         message: order.paymentStatus === "DISPUTED"
@@ -396,6 +414,11 @@ exports.confirmOrderDelivery = async (req, res) => {
     order.deliveredVendors = [...delivered];
 
     const complete = orderVendors.every((v) => delivered.has(v));
+    if (cashOnDelivery && complete) {
+      order.paymentStatus = "PAID";
+      order.paidOffline = true;
+      order.paidAt = new Date();
+    }
     if (complete) {
       order.orderStatus = "DELIVERED";
       order.isDelivered = true;
@@ -515,6 +538,7 @@ async function cancelOrder({ orderId, actor, reason }) {
   session.startTransaction();
   let order;
   let isPaid = false;
+  let paidOutsideMvec = false;
   let paidWith = null;
   try {
     order = await Order.findById(orderId).session(session);
@@ -542,7 +566,14 @@ async function cancelOrder({ orderId, actor, reason }) {
     }
 
     isPaid = order.paymentStatus === "PAID";
-    if (isPaid) {
+    // Paid to the seller outside MVEC: MVEC holds nothing and refunds nothing.
+    paidOutsideMvec = isPaid && Boolean(order.paidOffline);
+    if (paidOutsideMvec) {
+      if (isBuyer && role !== "super_admin") {
+        throw checkoutService.httpError(400, "You paid the seller directly for this order. Contact the seller to cancel and get your money back.");
+      }
+      order.paymentStatus = "REFUNDED";
+    } else if (isPaid) {
       if (isBuyer && role !== "super_admin") {
         const paidAt = new Date(order.paidAt || order.updatedAt || order.createdAt).getTime();
         if (!Number.isFinite(paidAt) || Date.now() - paidAt >= BUYER_CANCEL_WINDOW_MS) {
@@ -586,7 +617,7 @@ async function cancelOrder({ orderId, actor, reason }) {
   socketService.emitOrderStatusUpdate(order);
 
   let refundSent = false;
-  if (isPaid) {
+  if (isPaid && !paidOutsideMvec) {
     const refundPhone = paidWith?.phoneNumber || order.recipient?.phone;
     if (refundPhone) {
       const refund = await disbursementService.queue({
@@ -601,10 +632,10 @@ async function cancelOrder({ orderId, actor, reason }) {
     }
   }
   await notifications.orderCancelled(order, {
-    refunded: isPaid,
+    refunded: isPaid && !paidOutsideMvec,
     reason: String(order.user) === String(actor.id) ? undefined : `${order.cancellationReason}.${isPaid ? " Your full refund is on its way to your mobile money." : ""}`,
   }).catch(() => {});
-  return { order, isPaid, refundSent };
+  return { order, isPaid: isPaid && !paidOutsideMvec, refundSent };
 }
 
 // @desc    Cancel an order (buyer, the seller before shipping, or an admin)

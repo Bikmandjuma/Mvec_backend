@@ -4,6 +4,7 @@ const mongoose = require("mongoose");
 const Staff = require("../models/Staff");
 const Store = require("../models/Store");
 const User = require("../models/User");
+const { getPrimaryStore } = require("../utils/vendorStore.util");
 
 const authController = require("./auth.controller");
 const vendorStaffInvitation = require("../services/vendorStaffInvitation.service");
@@ -114,9 +115,8 @@ function staffDto(staff) {
 }
 
 async function storeForOwner(ownerId) {
-  let store = await Store.findOne({
-    vendor: ownerId,
-  });
+  // Multi-store vendors: staff belong to the primary store by default.
+  let store = await getPrimaryStore(ownerId);
 
   if (!store) {
     const Vendor = require("../models/Vendor");
@@ -146,6 +146,7 @@ async function storeForOwner(ownerId) {
 
       store = await Store.create({
         vendor: ownerId,
+        isPrimary: true,
         storeName: vendor.businessName,
         slug,
         contactEmail: vendor.email,
@@ -634,9 +635,6 @@ exports.updateStaffMember = async (req, res) => {
   }
 };
 
-// @desc    Remove staff member
-// @route   DELETE /api/staff/:id
-// @access  Private (Vendor Owner Only)
 exports.removeStaffMember = async (req, res) => {
   try {
     const ownerId = req.ownerId || req.vendorId || req.user.id;
