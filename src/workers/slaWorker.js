@@ -4,6 +4,8 @@ const Order = require("../models/Order");
 const Product = require("../models/Product");
 const Payment = require("../models/Payment");
 const socketService = require("../services/socket.service");
+const notifications = require("../services/notification.service");
+const disbursementService = require("../services/disbursement.service");
 
 /**
  * 1. 30-Minute Unpaid Order Cancellation Worker
@@ -67,6 +69,9 @@ const cancelExpiredUnpaidOrders = async () => {
 
         await session.commitTransaction();
         socketService.emitOrderStatusUpdate(freshOrder);
+        notifications.orderCancelled(freshOrder, {
+          reason: "It was not paid within 30 minutes, so the items were released. You were not charged.",
+        }).catch(() => {});
         console.log(`[Expiry Worker] Auto-cancelled unpaid Order #${freshOrder._id}`);
       } catch (err) {
         if (session.inTransaction()) await session.abortTransaction();
@@ -113,12 +118,46 @@ const enforceFulfillmentSLA = async () => {
 /**
  * Initialize Background Jobs
  */
+/**
+ * Payment reminder: one in-app + SMS nudge 20 minutes after an order was
+ * placed, if it is still unpaid (it expires at 30 minutes).
+ */
+const sendPaymentReminders = async () => {
+  const from = new Date(Date.now() - 29 * 60 * 1000);
+  const to = new Date(Date.now() - 20 * 60 * 1000);
+  try {
+    const orders = await Order.find({
+      paymentStatus: "PENDING",
+      orderStatus: "PENDING",
+      paymentReminderSentAt: { $exists: false },
+      createdAt: { $gte: from, $lte: to },
+    }).limit(200);
+    for (const order of orders) {
+      // Claim it first so a second worker never sends the same reminder.
+      const claimed = await Order.updateOne(
+        { _id: order._id, paymentReminderSentAt: { $exists: false } },
+        { $set: { paymentReminderSentAt: new Date() } },
+      );
+      if (claimed.modifiedCount) await notifications.paymentReminder(order);
+    }
+  } catch (error) {
+    console.error("[Reminder Worker] failed:", error.message);
+  }
+};
+
 exports.cancelExpiredUnpaidOrders = cancelExpiredUnpaidOrders;
+exports.sendPaymentReminders = sendPaymentReminders;
 
 exports.initBackgroundWorkers = () => {
   // Run 30-min expiration check every minute: "* * * * *"
   cron.schedule("* * * * *", () => {
     cancelExpiredUnpaidOrders();
+    sendPaymentReminders();
+  });
+
+  // Confirm or retry refunds and affiliate withdrawals every 5 minutes.
+  cron.schedule("*/5 * * * *", () => {
+    disbursementService.processDue().catch((err) => console.error("[Disbursement Worker] failed:", err.message));
   });
 
   // Run 3-Hour SLA audit every 15 minutes: "*/15 * * * *"

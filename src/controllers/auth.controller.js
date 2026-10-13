@@ -511,9 +511,12 @@ exports.changePassword = async (req, res) => {
     user.password = await bcrypt.hash(newPassword, 10);
     user.lastPasswordChangeAt = new Date();
     await user.save();
+    // Other sessions are now signed out; give this one a fresh token.
+    const token = signToken(user._id, await getStaffDetailsForUser(user._id));
     return res.status(200).json({
-      message: "Password updated successfully.",
+      message: "Password updated. You have been signed out on other devices.",
       lastPasswordChangeAt: user.lastPasswordChangeAt,
+      token,
     });
   } catch (error) {
     return res.status(500).json({ message: "Unable to update password.", error: error.message });
@@ -692,115 +695,153 @@ exports.getTransporter = getTransporter;
 exports.sendResetEmail = sendResetEmail;
 
 // ─── 1. FORGOT PASSWORD CONTROLLER ───────────────────────────────────────────
+// ─── PASSWORD RESET (code by email or SMS) ──────────────────────────────────
+// 1. POST /api/auth/forgot-password   { email } or { phone }  → sends a 6-digit code
+// 2. POST /api/auth/verify-reset-otp  { email|phone, code }   → returns a short-lived resetToken
+// 3. POST /api/auth/reset-password    { resetToken, newPassword }
+// Responses never reveal whether an account exists.
+const RESET_CODE_TTL_MS = 15 * 60 * 1000;
+const RESET_TOKEN_TTL_MS = 10 * 60 * 1000;
+const RESET_MAX_ATTEMPTS = 5;
+const sha256 = (value) => crypto.createHash("sha256").update(String(value)).digest("hex");
+const messaging = require("../services/messaging.service");
+
+async function findResetUser({ email, phone }) {
+  if (email && typeof email === "string" && email.trim()) {
+    return User.findOne({ email: email.trim().toLowerCase() })
+      .select("+resetPasswordCode +resetPasswordCodeExpires +resetPasswordAttempts");
+  }
+  const variants = phoneVariants(phone);
+  if (!variants.length) return null;
+  return User.findOne({ phone: { $in: variants } })
+    .select("+resetPasswordCode +resetPasswordCodeExpires +resetPasswordAttempts");
+}
+
 exports.forgotPassword = async (req, res) => {
   try {
-    const { email } = req.body;
-
-    if (!email || typeof email !== "string" || !email.trim()) {
-      return res.status(400).json({ message: "Email is required" });
+    const { email, phone } = req.body;
+    const byEmail = typeof email === "string" && email.trim();
+    if (!byEmail && !normalizePhone(phone)) {
+      return res.status(400).json({ message: "Enter the email or phone number on your account." });
+    }
+    if (!byEmail && !messaging.smsAvailable()) {
+      return res.status(503).json({ message: "Text messages are not available right now. Use your email address instead." });
     }
 
-    const normalizedEmail = email.trim().toLowerCase();
-    const user = await User.findOne({ email: normalizedEmail });
-
-    // Consistent generic response message to prevent email enumeration
     const genericResponse = {
-      message: "If an account exists with that email, a reset link has been sent.",
+      message: byEmail
+        ? "If an account uses that email, we sent it a 6-digit code."
+        : "If an account uses that phone number, we sent it a 6-digit code.",
     };
 
-    if (!user) {
-      return res.status(200).json(genericResponse);
-    }
-
-    // Block Google OAuth users without local password from password reset
+    const user = await findResetUser({ email, phone });
+    if (!user) return res.status(200).json(genericResponse);
     if (!user.password && user.googleId) {
-      return res.status(400).json({
-        message: "This account was created using Google Sign-In. Please log in with Google.",
-      });
+      return res.status(400).json({ message: "This account signs in with Google. Use Continue with Google instead." });
     }
 
-    // Generate unhashed random token for URL
-    const resetToken = crypto.randomBytes(32).toString("hex");
-
-    // Hash token before saving to database (SHA-256)
-    user.resetPasswordToken = crypto
-      .createHash("sha256")
-      .update(resetToken)
-      .digest("hex");
-    user.resetPasswordExpires = new Date(Date.now() + 15 * 60 * 1000); // 15-minute expiration
-
+    const code = String(crypto.randomInt(100000, 1000000));
+    user.resetPasswordCode = sha256(code);
+    user.resetPasswordCodeExpires = new Date(Date.now() + RESET_CODE_TTL_MS);
+    user.resetPasswordAttempts = 0;
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
     await user.save({ validateBeforeSave: false });
 
-    // Construct reset link for the React frontend safely
-    const frontendUrl = (process.env.FRONTEND_URL || "http://localhost:3000").replace(/\/+$/, "");
-    const resetUrl = `${frontendUrl}/reset-password/${resetToken}`;
-
-    // Send email safely
     try {
-      await sendResetEmail(user.email, resetUrl);
-      return res.status(200).json(genericResponse);
-    } catch (emailError) {
-      console.error("Email Sending Error:", emailError.message);
-
-      // Clear reset fields in DB so no invalid token remains if sending fails
-      user.resetPasswordToken = undefined;
-      user.resetPasswordExpires = undefined;
+      if (byEmail) {
+        await messaging.sendEmail({
+          to: user.email,
+          subject: "Your MVEC password reset code",
+          text: `Your password reset code is ${code}.\nIt expires in 15 minutes.\nIf you did not ask to reset your password, you can ignore this email.`,
+        });
+      } else {
+        await messaging.sendSms(user.phone, `Your MVEC password reset code is ${code}. It expires in 15 minutes.`);
+      }
+    } catch (sendError) {
+      console.error("Password reset delivery failed:", sendError.message);
+      user.resetPasswordCode = undefined;
+      user.resetPasswordCodeExpires = undefined;
       await user.save({ validateBeforeSave: false });
-
-      return res.status(500).json({
-        message: "Could not send reset email. Please try again later.",
-      });
+      return res.status(502).json({ message: "We could not send the code. Please try again in a few minutes." });
     }
+
+    return res.status(200).json({
+      ...genericResponse,
+      // Local development only, when no real provider is configured.
+      ...(process.env.NODE_ENV === "development" && !byEmail && messaging.smsProvider() === "log" && { devCode: code }),
+    });
   } catch (error) {
     console.error("Forgot Password Error:", error);
     return res.status(500).json({ message: "Failed to process request" });
   }
 };
 
-// ─── 2. RESET PASSWORD CONTROLLER ────────────────────────────────────────────
+exports.verifyResetOtp = async (req, res) => {
+  try {
+    const { email, phone, code } = req.body;
+    const invalid = { message: "That code is incorrect or has expired. Request a new one." };
+    if (!/^\d{6}$/.test(String(code || ""))) return res.status(400).json(invalid);
+
+    const user = await findResetUser({ email, phone });
+    if (!user || !user.resetPasswordCode || !user.resetPasswordCodeExpires || user.resetPasswordCodeExpires < new Date()) {
+      return res.status(400).json(invalid);
+    }
+    if ((user.resetPasswordAttempts || 0) >= RESET_MAX_ATTEMPTS) {
+      return res.status(429).json({ message: "Too many wrong codes. Request a new code." });
+    }
+
+    const matches = crypto.timingSafeEqual(Buffer.from(sha256(code)), Buffer.from(user.resetPasswordCode));
+    if (!matches) {
+      user.resetPasswordAttempts = (user.resetPasswordAttempts || 0) + 1;
+      await user.save({ validateBeforeSave: false });
+      return res.status(400).json(invalid);
+    }
+
+    const resetToken = crypto.randomBytes(32).toString("hex");
+    user.resetPasswordToken = sha256(resetToken);
+    user.resetPasswordExpires = new Date(Date.now() + RESET_TOKEN_TTL_MS);
+    user.resetPasswordCode = undefined;
+    user.resetPasswordCodeExpires = undefined;
+    user.resetPasswordAttempts = 0;
+    await user.save({ validateBeforeSave: false });
+
+    return res.status(200).json({ message: "Code verified.", resetToken });
+  } catch (error) {
+    console.error("Verify reset code error:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+// Accepts the token in the body (code flow) or in the URL (older email links).
 exports.resetPassword = async (req, res) => {
   try {
-    const { token } = req.params;
+    const token = req.params.token || req.body.resetToken;
     const newPassword = req.body.newPassword || req.body.password;
 
     if (!token || typeof token !== "string" || !token.trim()) {
       return res.status(400).json({ message: "Reset token is required" });
     }
-
-    if (!newPassword || typeof newPassword !== "string" || newPassword.length < 6) {
-      return res.status(400).json({
-        message: "Password is required and must be at least 6 characters long",
-      });
+    if (!newPassword || typeof newPassword !== "string" || newPassword.length < 8) {
+      return res.status(400).json({ message: "Your new password must be at least 8 characters long." });
     }
 
-    // Hash the token from URL parameter to match DB record
-    const hashedToken = crypto
-      .createHash("sha256")
-      .update(token.trim())
-      .digest("hex");
-
-    // Search for user with matching token that hasn't expired yet
     const user = await User.findOne({
-      resetPasswordToken: hashedToken,
+      resetPasswordToken: sha256(token.trim()),
       resetPasswordExpires: { $gt: Date.now() },
     });
-
     if (!user) {
-      return res
-        .status(400)
-        .json({ message: "Invalid or expired reset token" });
+      return res.status(400).json({ message: "This reset session has expired. Request a new code." });
     }
 
-    // Hash new password and clear token fields
     user.password = await bcrypt.hash(newPassword, 10);
     user.resetPasswordToken = undefined;
     user.resetPasswordExpires = undefined;
-
+    // Signs out every existing session (see protect middleware).
+    user.lastPasswordChangeAt = new Date();
     await user.save();
 
-    return res.status(200).json({
-      message: "Password reset successful! You can now log in with your new password.",
-    });
+    return res.status(200).json({ message: "Password reset. You can now log in with your new password." });
   } catch (error) {
     console.error("Reset Password Error:", error);
     return res.status(500).json({ message: "Internal server error" });
@@ -1057,8 +1098,14 @@ exports.sendOtp = async (req, res) => {
       consumed: false,
     });
 
-    // 5. Deliver the code (logged to console in dev; SMS provider pluggable).
-    await sendOtpSms(normalizedPhone, code, { purpose });
+    // 5. Deliver the code through the SMS provider (printed to the log in
+    //    development). Tell the user honestly when SMS is unavailable.
+    try {
+      await sendOtpSms(normalizedPhone, code, { purpose });
+    } catch (smsError) {
+      console.error("OTP SMS failed:", smsError.message);
+      return res.status(503).json({ message: "We could not send a text message right now. Try again in a few minutes or use your email." });
+    }
 
     return res.status(200).json({
       message: `Verification code sent to ${normalizedPhone}`,
@@ -1189,5 +1236,71 @@ exports.verifyOtp = async (req, res) => {
   } catch (error) {
     console.error("Error verifying OTP:", error);
     return res.status(500).json({ message: "Failed to verify code" });
+  }
+};
+
+
+// ─── WISHLIST ────────────────────────────────────────────────────────────────
+const WISHLIST_MAX = 200;
+const Product = require("../models/Product");
+const { effectivePrice } = require("../utils/pricing.util");
+
+async function wishlistResponse(userId) {
+  const user = await User.findById(userId).select("wishlist").populate({
+    path: "wishlist.product",
+    select: "name price discountPrice media stockQuantity status vendor category",
+    populate: [{ path: "vendor", select: "Fullname companyName" }, { path: "category", select: "name" }],
+  });
+  // Products that were deleted drop out of the list.
+  return (user?.wishlist || []).filter((w) => w.product).map((w) => ({
+    product: w.product,
+    savedPrice: w.savedPrice,
+    savedAt: w.savedAt,
+  }));
+}
+
+// @route GET /api/auth/wishlist
+exports.getWishlist = async (req, res) => {
+  try {
+    return res.status(200).json({ items: await wishlistResponse(req.user.id) });
+  } catch (error) {
+    console.error("Wishlist load failed:", error);
+    return res.status(500).json({ message: "Could not load your wishlist." });
+  }
+};
+
+// @route POST /api/auth/wishlist   { productIds: [...] }  (adds; used to merge device lists too)
+exports.addToWishlist = async (req, res) => {
+  try {
+    const ids = [...new Set((Array.isArray(req.body.productIds) ? req.body.productIds : [req.body.productId]).map(String))]
+      .filter((id) => mongoose.isValidObjectId(id))
+      .slice(0, WISHLIST_MAX);
+    if (!ids.length) return res.status(400).json({ message: "Choose a product to save." });
+
+    const products = await Product.find({ _id: { $in: ids }, status: { $in: ["ACTIVE", "OUT_OF_STOCK"] } }).select("price discountPrice");
+    const user = await User.findById(req.user.id).select("wishlist");
+    const have = new Set(user.wishlist.map((w) => String(w.product)));
+    for (const p of products) {
+      if (!have.has(String(p._id)) && user.wishlist.length < WISHLIST_MAX) {
+        user.wishlist.push({ product: p._id, savedPrice: effectivePrice(p), savedAt: new Date() });
+      }
+    }
+    await user.save({ validateBeforeSave: false });
+    return res.status(200).json({ items: await wishlistResponse(req.user.id) });
+  } catch (error) {
+    console.error("Wishlist add failed:", error);
+    return res.status(500).json({ message: "Could not save this product." });
+  }
+};
+
+// @route DELETE /api/auth/wishlist/:productId
+exports.removeFromWishlist = async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.productId)) return res.status(404).json({ message: "Product not in your wishlist." });
+    await User.updateOne({ _id: req.user.id }, { $pull: { wishlist: { product: req.params.productId } } });
+    return res.status(200).json({ items: await wishlistResponse(req.user.id) });
+  } catch (error) {
+    console.error("Wishlist remove failed:", error);
+    return res.status(500).json({ message: "Could not remove this product." });
   }
 };

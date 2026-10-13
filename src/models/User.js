@@ -81,7 +81,8 @@ const userSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      enum: ["buyer", "vendor", "supplier", "affiliate", "super_admin", "developer"],
+      // "delivery" = MVEC courier, created by an admin (never self sign-up).
+      enum: ["buyer", "vendor", "supplier", "affiliate", "super_admin", "developer", "delivery"],
       default: "buyer",
     },
     // Super admins can also operate their own vendor account without
@@ -107,10 +108,23 @@ const userSchema = new mongoose.Schema(
     verificationStatus: { type: String, enum: ["UNVERIFIED", "PENDING", "VERIFIED", "REJECTED"], default: function () { return ["vendor", "supplier"].includes(this.role) ? "UNVERIFIED" : "VERIFIED"; } },
 
     avatarUrl: { type: String, default: "" },
+    // Saved products, synced across the buyer's devices.
+    wishlist: [
+      {
+        _id: false,
+        product: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
+        savedPrice: { type: Number, default: 0 },
+        savedAt: { type: Date, default: Date.now },
+      },
+    ],
     addresses: [addressSchema],
 
     resetPasswordToken: { type: String },
     resetPasswordExpires: { type: Date },
+    // 6-digit reset code (stored hashed) sent by email or SMS.
+    resetPasswordCode: { type: String, select: false },
+    resetPasswordCodeExpires: { type: Date, select: false },
+    resetPasswordAttempts: { type: Number, default: 0, select: false },
     isVendorStaff: { type: Boolean, default: false, select: false },
     isSupplierStaff: { type: Boolean, default: false, select: false },
     lastPasswordChangeAt: { type: Date },
