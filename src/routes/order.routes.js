@@ -25,6 +25,7 @@ router.post("/checkout", createCheckoutOrder);
 router.post("/direct-checkout", directCheckout);
 router.get("/my-orders", getMyOrders);
 router.get("/vendor/orders", authorize("vendor"), getVendorOrders);
+router.post("/vendor/manual", authorize("vendor"), require("../controllers/manualOrder.controller").createManualOrder);
 router.get("/:id", getOrderById);
 router.post("/:id/cancel", protect, cancelOrderByBuyer);
 router.patch(

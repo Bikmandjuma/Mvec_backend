@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const Category = require("../models/Category");
+const Product = require("../models/Product");
 
 // Helper: turn a name into a slug
 const slugify = (str) =>
@@ -20,25 +21,31 @@ exports.createCategory = async (req, res) => {
     }
 
     // Validate parent exists if provided
+    let parent = null;
     if (parentId) {
       if (!mongoose.Types.ObjectId.isValid(parentId)) {
         return res.status(400).json({ message: "Invalid parentId" });
       }
-      const parent = await Category.findById(parentId);
+      parent = await Category.findById(parentId);
       if (!parent) {
         return res.status(404).json({ message: "Parent category not found" });
       }
     }
 
-    const slug = slugify(name);
+    // Subcategory slugs are prefixed with the parent so "Accessories" can
+    // exist under both Phones and Fashion.
+    const slug = parent ? `${parent.slug}-${slugify(name)}` : slugify(name);
 
     const existing = await Category.findOne({ slug });
+    if (existing && !existing.active) {
+      return res.status(409).json({ message: `"${existing.name}" was disabled by MVEC and can't be used. Choose another category.` });
+    }
     if (existing) {
       // Return the existing category so the form can auto-select it rather than error
       return res.status(200).json({
         alreadyExisted: true,
         message: `Category "${existing.name}" already exists and has been selected.`,
-        category: { id: existing._id, name: existing.name, slug: existing.slug },
+        category: { id: existing._id, _id: existing._id, name: existing.name, slug: existing.slug, parentId: existing.parentId },
       });
     }
 
@@ -59,15 +66,26 @@ exports.createCategory = async (req, res) => {
 };
 
 // ─── GET ALL CATEGORIES (flat, optionally nested tree) ────────────────────
-// @route   GET /api/categories?tree=true
+// @route   GET /api/categories?tree=true&withCounts=true
+// withCounts adds productCount (active marketplace products) to each category.
 exports.getCategories = async (req, res) => {
   try {
-    const categories = await Category.find({ active: true }).sort({ sortOrder: 1, name: 1 });
+    let categories = await Category.find({ active: true }).sort({ sortOrder: 1, name: 1 });
+
+    if (req.query.withCounts === "true") {
+      const rows = await Product.aggregate([
+        { $match: { status: "ACTIVE", category: { $in: categories.map((c) => c._id) } } },
+        { $group: { _id: "$category", count: { $sum: 1 } } },
+      ]);
+      const counts = Object.fromEntries(rows.map((r) => [String(r._id), r.count]));
+      categories = categories.map((c) => ({ ...c.toJSON(), productCount: counts[String(c._id)] || 0 }));
+    }
 
     if (req.query.tree === "true") {
       const byId = {};
       categories.forEach((cat) => {
-        byId[cat._id] = { ...cat.toObject(), children: [] };
+        const plain = typeof cat.toJSON === "function" ? cat.toJSON() : cat;
+        byId[cat._id] = { ...plain, children: [] };
       });
 
       const tree = [];
@@ -138,7 +156,8 @@ exports.updateCategory = async (req, res) => {
 
     if (name && name.trim()) {
       category.name = name.trim();
-      category.slug = slugify(name);
+      const parentDoc = category.parentId ? await Category.findById(category.parentId) : null;
+      category.slug = parentDoc ? `${parentDoc.slug}-${slugify(name)}` : slugify(name);
 
       const existing = await Category.findOne({ slug: category.slug, _id: { $ne: id } });
       if (existing) {
