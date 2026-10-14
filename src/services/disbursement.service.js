@@ -74,6 +74,7 @@ async function onFinalFailure(d) {
 }
 
 async function attempt(d) {
+  if (d.channel === "MANUAL") return d; // an admin refunds it in the provider's portal
   d.attempts += 1;
   try {
     const result = d.channel === "CARD"
@@ -118,6 +119,18 @@ module.exports = {
    * Returns the transfer, or null when there is nowhere to send it.
    */
   async refundPayment({ order, payment, amount, idempotencyKey }) {
+    // K-Pay has no refund API: card/SPENN refunds are done by an admin in the K-Pay portal.
+    if (payment?.gateway === "KPAY" && ["CARD", "SPENN"].includes(payment.method)) {
+      const existing = await Disbursement.findOne({ idempotencyKey });
+      if (existing) return existing;
+      const d = await Disbursement.create({
+        kind: "REFUND", channel: "MANUAL", recipient: order.user, cardTransactionId: payment.gatewayReference,
+        amount: Math.round(amount), order: order._id, idempotencyKey, status: "QUEUED",
+        lastError: `Refund ${Math.round(amount)} RWF in the K-Pay merchant portal (transaction ${payment.gatewayReference || payment.transactionReference}), then mark it done.`,
+      });
+      await notifications.manualRefundNeeded(order, d).catch(() => {});
+      return d;
+    }
     if (payment?.method === "CARD") {
       return module.exports.queue({
         kind: "REFUND", channel: "CARD", recipient: order.user, cardTransactionId: payment.gatewayReference,
@@ -149,7 +162,7 @@ module.exports = {
 
   /** Worker: confirm SENT transfers and retry FAILED ones that are due. */
   async processDue() {
-    const due = await Disbursement.find({ status: { $in: ["SENT", "FAILED"] }, attempts: { $lt: MAX_ATTEMPTS + 1 }, nextAttemptAt: { $lte: new Date() } }).limit(50);
+    const due = await Disbursement.find({ status: { $in: ["SENT", "FAILED"] }, channel: { $ne: "MANUAL" }, attempts: { $lt: MAX_ATTEMPTS + 1 }, nextAttemptAt: { $lte: new Date() } }).limit(50);
     for (const d of due) {
       if (d.status === "SENT" && d.gatewayReference) {
         try {
@@ -168,6 +181,20 @@ module.exports = {
         await attempt(d);
       }
     }
+  },
+
+  /** Admin: confirm a manual refund was made in the provider's portal. */
+  async markManualDone(id, adminNote = "") {
+    const d = await Disbursement.findById(id);
+    if (!d) throw Object.assign(new Error("Transfer not found."), { statusCode: 404 });
+    if (d.channel !== "MANUAL") throw Object.assign(new Error("Only manual refunds are marked done by hand."), { statusCode: 400 });
+    if (d.status === "SUCCESS") return d;
+    d.status = "SUCCESS";
+    d.completedAt = new Date();
+    d.lastError = String(adminNote || "").slice(0, 300);
+    await d.save();
+    await onSuccess(d);
+    return d;
   },
 
   /** Admin: send a failed transfer again now. */

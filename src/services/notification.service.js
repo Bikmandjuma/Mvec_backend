@@ -42,6 +42,18 @@ const orderLink = (order) => `/orders/${idOf(order)}`;
 module.exports = {
   notify,
 
+  async manualRefundNeeded(order, disbursement) {
+    for (const adminId of await adminIds()) {
+      await notify(adminId, {
+        type: "PAYMENT",
+        title: `Manual refund needed for ${order.orderNumber}`,
+        message: disbursement.lastError,
+        reference: order.orderNumber,
+        link: "/admin/transfers",
+      });
+    }
+  },
+
   async premiumActivated(userId, until) {
     await notify(userId, {
       type: "SUBSCRIPTION",

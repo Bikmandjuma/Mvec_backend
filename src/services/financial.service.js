@@ -60,6 +60,7 @@ exports.lockPaymentInEscrow = async ({
   const devShare = split ? split.developerShare : 0;
   const adminShare = split ? split.adminShare : 0;
   const affShare = split ? split.affiliateShare : 0;
+  const vendorAffShare = split ? Number(split.vendorAffiliateShare) || 0 : 0;
   const gwFee = split ? split.gatewayFee : 0;
 
   const escrowAccount = await getOrCreateLedgerAccount({ accountType: "ESCROW_HOLDING", session });
@@ -98,6 +99,7 @@ exports.lockPaymentInEscrow = async ({
         developerShare: devShare,
         adminShare,
         affiliateShare: affShare,
+        vendorAffiliateShare: vendorAffShare,
         gatewayFee: gwFee,
         affiliateUser: affiliateUserId,
         status: "HELD",
@@ -208,9 +210,25 @@ exports.releaseEscrowToVendor = async ({ settlementId, session, adminUserId = nu
   const affShare = settlement.affiliateShare || 0;
   const gwFee = settlement.gatewayFee || 0;
 
+  // gross = seller net + platform fee + seller-paid affiliate commission.
+  const vendorAffShare = Number(settlement.vendorAffiliateShare) || 0;
   escrowAccount.balance -= settlement.grossAmount;
   vendorAccount.balance += settlement.netAmount;
   platformAccount.balance += settlement.commissionAmount;
+  if (vendorAffShare > 0) {
+    const affiliateAccount = await getOrCreateLedgerAccount({ accountType: "AFFILIATE_COMMISSION", session });
+    affiliateAccount.balance += vendorAffShare;
+    await affiliateAccount.save({ session });
+    await LedgerEntry.create([{
+      transactionReference: `MVEC-AFF-${Date.now()}`,
+      debitAccount: escrowAccount._id,
+      creditAccount: affiliateAccount._id,
+      amount: vendorAffShare,
+      entryType: "AFFILIATE_COMMISSION",
+      relatedOrder: settlement.order,
+      description: `Seller-paid affiliate commission for settlement ${settlement.settlementReference}`,
+    }], { session });
+  }
 
   await escrowAccount.save({ session });
   await vendorAccount.save({ session });

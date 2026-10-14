@@ -7,6 +7,8 @@ const ConversionAudit = require("../models/ConversionAudit");
 const Settlement = require("../models/Settlement");
 const Order = require("../models/Order");
 const Product = require("../models/Product");
+// Required lazily: affiliateProgram loads models that load this file's callers.
+const program = () => require("./affiliateProgram.service");
 
 // Referral window: a click is eligible while now < clickedAt + 30 days. The
 // boundary instant itself is already expired, and clicks dated in the future
@@ -37,6 +39,7 @@ async function recordClickAttribution({ visitorId, link, now = new Date() }) {
   const productId = link.targetProduct._id || link.targetProduct;
   const product = await Product.findById(productId).select("status");
   if (!product || !PROMOTABLE_STATUSES.includes(product.status)) return null;
+  if (!(await program().termsForOne(productId)).eligible) return null;
 
   return AffiliateAttribution.findOneAndUpdate(
     { visitorId, product: productId },
@@ -62,6 +65,8 @@ async function resolveAttributions({ visitorId, buyerId = null, productIds = [],
   const vid = cleanVisitorId(visitorId);
   if (!vid || !productIds.length) return result;
 
+  // Products whose seller runs the program right now, with the seller's rate.
+  const terms = await program().termsFor(productIds);
   const rows = await AffiliateAttribution.find({
     visitorId: vid,
     product: { $in: productIds },
@@ -70,6 +75,8 @@ async function resolveAttributions({ visitorId, buyerId = null, productIds = [],
 
   for (const row of rows) {
     if (buyerId && String(row.affiliateUser) === String(buyerId)) continue; // no self-referral
+    const t = terms.get(String(row.product));
+    if (!t || !t.eligible) continue; // seller left the program since the click
     const link = await AffiliateLink.findById(row.link).select("targetProduct affiliateUser");
     if (!link || String(link.targetProduct) !== String(row.product)) continue;
     result.set(String(row.product), {
@@ -77,6 +84,7 @@ async function resolveAttributions({ visitorId, buyerId = null, productIds = [],
       affiliateUser: row.affiliateUser,
       affiliateCode: row.affiliateCode,
       clickedAt: row.clickedAt,
+      vendorRate: t.vendorRate,
     });
   }
   return result;
@@ -89,6 +97,7 @@ function applyAttribution(item, attribution) {
   item.affiliateLink = attribution.link;
   item.affiliateCode = attribution.affiliateCode;
   item.affiliateClickedAt = attribution.clickedAt;
+  item.affiliateVendorRate = Number(attribution.vendorRate) || 0;
   return item;
 }
 

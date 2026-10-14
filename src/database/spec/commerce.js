@@ -116,6 +116,8 @@ module.exports = [
           affiliateLink: ref("affiliate_links", { fk: false }),
           affiliateCode: str({ len: 60 }),
           affiliateClickedAt: date(),
+          // Seller's affiliate rate (%) when the order was placed.
+          affiliateVendorRate: num(),
         },
       },
       shippingBreakdown: {
@@ -140,10 +142,10 @@ module.exports = [
       user: ref("users", { index: true }),
       transactionReference: str({ len: 120, required: true, unique: true }),
       gatewayReference: str({ len: 120, unique: true }),
-      method: en(["MOMO", "AIRTEL", "CASH_ON_DELIVERY", "CARD"], { required: true }),
-      gateway: en(["PAYPACK", "MOMO", "AIRTEL", "FLUTTERWAVE"]),
+      method: en(["MOMO", "AIRTEL", "CASH_ON_DELIVERY", "CARD", "SPENN"], { required: true }),
+      gateway: en(["PAYPACK", "MOMO", "AIRTEL", "FLUTTERWAVE", "KPAY"]),
       phoneNumber: str({ len: 30 }),
-      provider: en(["MTN", "AIRTEL", "CASH", "CARD"], { required: true }),
+      provider: en(["MTN", "AIRTEL", "CASH", "CARD", "SPENN"], { required: true }),
       status: en(["PENDING", "PROCESSING", "SUCCESS", "FAILED", "REFUNDED", "CANCELLED"], { default: "PENDING", required: true, index: true }),
       amount: money({ required: true }),
       currency: str({ len: 8, default: "RWF", required: true }),
@@ -157,7 +159,7 @@ module.exports = [
   {
     model: "PaymentWebhookLog", table: "payment_webhook_logs", collection: "paymentwebhooklogs",
     fields: {
-      provider: en(["MTN_MOMO", "AIRTEL_MONEY", "PAYPACK", "FLUTTERWAVE"], { required: true }),
+      provider: en(["MTN_MOMO", "AIRTEL_MONEY", "PAYPACK", "FLUTTERWAVE", "KPAY"], { required: true }),
       externalTransactionId: str({ len: 120, required: true, unique: true }),
       internalOrderId: ref("orders", { required: true, fk: false, index: true }),
       status: en(["PENDING", "PROCESSED", "FAILED", "IGNORED"], { default: "PENDING", required: true }),
@@ -184,6 +186,7 @@ module.exports = [
       developerShare: money({ required: true, default: 0 }),
       adminShare: money({ required: true, default: 0 }),
       affiliateShare: money({ required: true, default: 0 }),
+      vendorAffiliateShare: money({ required: true, default: 0 }),
       gatewayFee: money({ required: true, default: 0 }),
       hasAffiliate: bool(false),
       currency: str({ len: 8, default: "RWF", required: true }),
@@ -203,6 +206,8 @@ module.exports = [
       developerShare: money({ required: true, default: 0 }),
       adminShare: money({ required: true, default: 0 }),
       affiliateShare: money({ required: true, default: 0 }),
+      // Part of affiliateShare paid by the seller (their own affiliate rate).
+      vendorAffiliateShare: money({ required: true, default: 0 }),
       gatewayFee: money({ required: true, default: 0 }),
       affiliateUser: ref("users", { fk: false }),
       status: en(["HELD", "RELEASED", "ADMIN_HOLD", "REFUNDED", "CANCELLED"], { default: "HELD", required: true, index: true }),
@@ -228,7 +233,7 @@ module.exports = [
       creditAccount: ref("ledger_accounts", { required: true }),
       amount: money({ required: true }),
       currency: str({ len: 8, default: "RWF", required: true }),
-      entryType: en(["PAYMENT_ESCROW_LOCK", "ESCROW_RELEASE_VENDOR", "PLATFORM_COMMISSION_DEDUCTION", "COURIER_FEE_PAYOUT", "BUYER_REFUND", "ADMIN_MANUAL_ADJUSTMENT"], { required: true }),
+      entryType: en(["PAYMENT_ESCROW_LOCK", "ESCROW_RELEASE_VENDOR", "PLATFORM_COMMISSION_DEDUCTION", "COURIER_FEE_PAYOUT", "BUYER_REFUND", "ADMIN_MANUAL_ADJUSTMENT", "AFFILIATE_COMMISSION"], { required: true }),
       relatedOrder: ref("orders", { fk: false, index: true }),
       description: text({ required: true }),
     },
@@ -272,7 +277,8 @@ module.exports = [
     fields: {
       kind: en(["REFUND", "AFFILIATE_PAYOUT", "VENDOR_PAYOUT"], { required: true, index: true }),
       // MOMO: sent to `phone` through Paypack. CARD: refunded to the card of `cardTransactionId` through Flutterwave.
-      channel: en(["MOMO", "CARD"], { default: "MOMO", required: true }),
+      // MANUAL: no provider refund API (e.g. K-Pay card); an admin refunds and marks it done.
+      channel: en(["MOMO", "CARD", "MANUAL"], { default: "MOMO", required: true }),
       recipient: ref("users", { required: true, fk: false }),
       phone: str({ len: 30 }),
       cardTransactionId: str({ len: 120 }),

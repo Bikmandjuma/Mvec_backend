@@ -22,6 +22,8 @@ const AffiliateClick = require("../../src/models/AffiliateClick");
 const AffiliateAttribution = require("../../src/models/AffiliateAttribution");
 const AffiliateWallet = require("../../src/models/AffiliateWallet");
 const ConversionAudit = require("../../src/models/ConversionAudit");
+const Vendor = require("../../src/models/Vendor");
+const LedgerAccount = require("../../src/models/LedgerAccount");
 const paymentService = require("../../src/services/payment.service");
 const financialService = require("../../src/services/financial.service");
 const attribution = require("../../src/services/affiliateAttribution.service");
@@ -45,7 +47,7 @@ const mkUser = (role) => {
 };
 
 describe("affiliate flow", () => {
-  let vendor, buyer, affA, affB, admin, cat, mouse, keyboard, draft;
+  let vendor, sellerProfile, buyer, affA, affB, admin, cat, mouse, keyboard, draft;
 
   before(async () => {
     await db.setup();
@@ -54,6 +56,7 @@ describe("affiliate flow", () => {
     app.use(express.json());
     app.use("/api/affiliates", require("../../src/routes/affiliate.routes"));
     app.use("/api/orders", require("../../src/routes/order.routes"));
+    app.use("/api/vendors", require("../../src/routes/vendor.routes"));
   });
 
   after(() => db.close());
@@ -61,6 +64,8 @@ describe("affiliate flow", () => {
   beforeEach(async () => {
     await db.reset();
     vendor = await mkUser("vendor");
+    // The seller runs the affiliate program at 0% of its own, so affiliates earn MVEC's 0.5%.
+    sellerProfile = await Vendor.create({ user: vendor._id, businessName: "Seller Co", phone: "0788111222", email: `seller${seq}@t.rw`, affiliateEnabled: true, affiliateRate: 0, affiliateScope: "ALL" });
     buyer = await mkUser("buyer");
     affA = await mkUser("affiliate");
     affB = await mkUser("affiliate");
@@ -413,5 +418,87 @@ describe("affiliate flow", () => {
     assert.equal((await deliver(order, admin)).status, 200);
     links = (await request(app).get("/api/affiliates/links").set("Authorization", `Bearer ${token(affA)}`)).body.data;
     assert.equal(links[0].successfulCount, 1);
+  });
+
+  // ── Seller-controlled affiliate program ─────────────────────────────────
+  const program = (user, body) => request(app).put("/api/vendors/me/affiliate-program").set("Authorization", `Bearer ${token(user)}`).send(body);
+
+  test("sellers outside the program cannot be promoted, and clicks on old links earn nothing", async () => {
+    const { body } = await createLink(affA, mouse._id);
+    assert.equal((await program(vendor, { enabled: false })).status, 200);
+
+    const refused = await createLink(affA, keyboard._id);
+    assert.equal(refused.status, 400);
+    assert.match(refused.body.message, /not running an affiliate program/);
+
+    const c = await click(body.link.affiliateCode);
+    assert.equal(c.status, 200, "the visitor still lands on the product");
+    assert.equal(c.body.data.earning, false);
+    assert.equal(await AffiliateClick.countDocuments({}), 0, "no click recorded");
+
+    const res = await checkout([{ productId: mouse._id, qty: 1 }], c.body.data.visitorId);
+    assert.equal(res.body.order.items[0].affiliateUser ?? null, null, "no attribution");
+    const links = (await request(app).get("/api/affiliates/links").set("Authorization", `Bearer ${token(affA)}`)).body.data;
+    assert.equal(links[0].earning, false);
+    assert.match(links[0].pausedReason, /not running/);
+  });
+
+  test("the seller's own rate is added to MVEC's, paid from the seller's net, and the books balance", async () => {
+    assert.equal((await program(vendor, { enabled: true, ratePercent: 10 })).status, 200);
+    const { body } = await createLink(affA, mouse._id);
+    const c = await click(body.link.affiliateCode);
+    const res = await checkout([{ productId: mouse._id, qty: 1 }], c.body.data.visitorId);
+    assert.equal(res.body.order.items[0].affiliateVendorRate, 10, "rate frozen on the item");
+    // A later change never touches this order.
+    await program(vendor, { ratePercent: 2 });
+    const order = await Order.findById(res.body.order._id);
+    await pay(order);
+
+    const s = await Settlement.findOne({ order: order._id });
+    assert.equal(s.affiliateShare, 10500, "0.5% MVEC + 10% seller of 100,000");
+    assert.equal(s.vendorAffiliateShare, 10000);
+    assert.equal(s.netAmount, 100000 - 5000 - 10000, "seller pays its 10%");
+    assert.equal((await wallet()).pendingBalance, 10500);
+
+    assert.equal((await deliver(order, admin)).status, 200);
+    assert.equal((await wallet()).availableBalance, 10500);
+    const escrow = await LedgerAccount.findOne({ accountType: "ESCROW_HOLDING" });
+    assert.equal(Number(escrow.balance), 0, "escrow fully released: net + platform fee + seller-paid commission");
+  });
+
+  test("selected-products scope: only the chosen products can be promoted", async () => {
+    const bad = await program(vendor, { enabled: true, scope: "SELECTED", productIds: [] });
+    assert.equal(bad.status, 400, "must choose at least one");
+    assert.equal((await program(vendor, { enabled: true, scope: "SELECTED", productIds: [String(keyboard._id)] })).status, 200);
+    assert.equal((await createLink(affA, keyboard._id)).status, 201);
+    assert.equal((await createLink(affA, mouse._id)).status, 400);
+    const other = await mkUser("vendor");
+    const foreign = await Product.create({ vendor: other._id, category: cat._id, description: "d", stockQuantity: 5, media: { mainImage: "x.jpg" }, name: "Other", slug: "other", sku: "O1", price: 10, status: "ACTIVE" });
+    assert.equal((await program(vendor, { scope: "SELECTED", productIds: [String(foreign._id)] })).status, 400, "only own products");
+
+    const list = await request(app).get("/api/affiliates/promotable").set("Authorization", `Bearer ${token(affA)}`);
+    assert.equal(list.status, 200);
+    assert.deepEqual(list.body.products.map((p) => p.name), ["Keyboard"]);
+    assert.equal(list.body.products[0].commissionPercent, 0.5);
+  });
+
+  test("leaving the program stops new attribution but keeps commission on orders already placed", async () => {
+    const { body } = await createLink(affA, mouse._id);
+    const c = await click(body.link.affiliateCode);
+    const before = await checkout([{ productId: mouse._id, qty: 1 }], c.body.data.visitorId);
+    await program(vendor, { enabled: false });
+    const after = await checkout([{ productId: mouse._id, qty: 1 }], c.body.data.visitorId);
+    assert.ok(before.body.order.items[0].affiliateUser, "placed while in the program");
+    assert.equal(after.body.order.items[0].affiliateUser ?? null, null, "placed after leaving");
+    await pay(await Order.findById(before.body.order._id));
+    assert.equal(await ConversionAudit.countDocuments({}), 1);
+  });
+
+  test("only the seller (or its staff) manages the program; affiliates cannot", async () => {
+    assert.equal((await program(affA, { enabled: true })).status, 403);
+    const get = await request(app).get("/api/vendors/me/affiliate-program").set("Authorization", `Bearer ${token(vendor)}`);
+    assert.equal(get.status, 200);
+    assert.equal(get.body.program.enabled, true);
+    assert.equal((await program(vendor, { ratePercent: 31 })).status, 400);
   });
 });

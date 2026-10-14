@@ -283,15 +283,23 @@ const toPublicVendor = (v) => ({
   status: v.status,
 });
 
+// Active sellers that are verified or already selling something, verified
+// sellers first. The shop shows products of every active seller, so the
+// vendor directory lists the same sellers (with a Verified badge when earned).
 exports.getVendors = async (req, res) => {
   try {
-    const { q, location, page = 1, pageSize = 20 } = req.query;
+    const { q, location, page = 1, pageSize = 20, verified } = req.query;
+    const Product = require("../models/Product");
 
+    const selling = await Product.distinct("vendor", { status: "ACTIVE" });
     const filter = {
       status: "ACTIVE",
-      verificationStatus: "VERIFIED",
+      $or: [{ verificationStatus: "VERIFIED" }, { user: { $in: selling } }],
     };
-
+    if (verified === "true") {
+      delete filter.$or;
+      filter.verificationStatus = "VERIFIED";
+    }
     if (q) {
       filter.businessName = { $regex: escapeRegex(String(q).slice(0, 100)), $options: "i" };
     }
@@ -301,19 +309,18 @@ exports.getVendors = async (req, res) => {
 
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const limit = Math.min(parseInt(pageSize, 10) || 20, 100);
-    const skip = (pageNum - 1) * limit;
 
-    const [vendors, total] = await Promise.all([
-      Vendor.find(filter).sort({ ratingAvg: -1 }).skip(skip).limit(limit),
-      Vendor.countDocuments(filter),
-    ]);
+    const all = await Vendor.find(filter);
+    all.sort((a, b) => (b.verificationStatus === "VERIFIED") - (a.verificationStatus === "VERIFIED") || (Number(b.ratingAvg) || 0) - (Number(a.ratingAvg) || 0));
+    const vendors = all.slice((pageNum - 1) * limit, pageNum * limit);
 
     return res.status(200).json({
       data: vendors.map(toPublicVendor),
-      meta: { page: pageNum, pageSize: limit, total },
+      meta: { page: pageNum, pageSize: limit, total: all.length },
     });
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    console.error("Vendor list failed:", error);
+    return res.status(500).json({ message: "We could not load the stores right now. Please try again." });
   }
 };
 
@@ -327,13 +334,12 @@ exports.getVendorByIdOrSlug = async (req, res) => {
 
     const query = isObjectId ? { _id: idOrSlug } : { slug: idOrSlug };
 
-    const vendor = await Vendor.findOne({
-      ...query,
-      status: "ACTIVE",
-      verificationStatus: "VERIFIED",
-    });
+    // Same rule as the directory: active and verified, or already selling.
+    const vendor = await Vendor.findOne({ ...query, status: "ACTIVE" });
+    const Product = require("../models/Product");
+    const visible = vendor && (vendor.verificationStatus === "VERIFIED" || (await Product.exists({ vendor: vendor.user, status: "ACTIVE" })));
 
-    if (!vendor) {
+    if (!visible) {
       return res.status(404).json({ message: "Vendor store not found" });
     }
 
@@ -451,5 +457,40 @@ exports.adminUpdateVendorStatus = async (req, res) => {
     return res.status(200).json({ message: `Vendor status set to ${status}`, vendor });
   } catch (error) {
     return res.status(500).json({ message: error.message });
+  }
+};
+
+// ─── SELLER'S AFFILIATE PROGRAM ─────────────────────────────────────────────
+// @route   GET /api/vendors/me/affiliate-program
+// @access  Private (vendor, staff with canManageProducts)
+exports.getAffiliateProgram = async (req, res) => {
+  const program = require("../services/affiliateProgram.service");
+  try {
+    const ownerId = req.vendorId || req.user.id;
+    const [settings, stats] = await Promise.all([program.getVendorProgram(ownerId), program.vendorProgramStats(ownerId)]);
+    return res.status(200).json({ program: settings, stats, maxRatePercent: program.MAX_VENDOR_RATE });
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
+    console.error("Affiliate program load failed:", error);
+    return res.status(500).json({ message: "We could not load your affiliate program right now. Please try again." });
+  }
+};
+
+// @route   PUT /api/vendors/me/affiliate-program   { enabled, ratePercent, scope: ALL|SELECTED, productIds? }
+// @access  Private (vendor, staff with canManageSettings)
+exports.updateAffiliateProgram = async (req, res) => {
+  const program = require("../services/affiliateProgram.service");
+  try {
+    const ownerId = req.vendorId || req.user.id;
+    const { enabled, ratePercent, scope, productIds } = req.body || {};
+    const settings = await program.updateVendorProgram(ownerId, { enabled, ratePercent, scope, productIds });
+    const message = settings.enabled
+      ? `Affiliate program is on: affiliates earn ${settings.totalPercent}% on ${settings.scope === "ALL" ? "all your products" : "the products you chose"} (${settings.ratePercent}% paid by you).`
+      : "Affiliate program is off. Affiliates can no longer promote your products; orders already placed keep their commission.";
+    return res.status(200).json({ message, program: settings });
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
+    console.error("Affiliate program update failed:", error);
+    return res.status(500).json({ message: "We could not save your affiliate program right now. Please try again." });
   }
 };

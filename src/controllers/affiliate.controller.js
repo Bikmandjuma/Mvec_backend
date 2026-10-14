@@ -293,3 +293,13 @@ exports.updateSettings = async (req, res) => {
     return fail(res, error);
   }
 };
+// @desc    Products affiliates can promote (sellers running the program), with earnings per sale
+// @route   GET /api/affiliates/promotable?q=&page=&pageSize=
+exports.listPromotable = async (req, res) => {
+  try {
+    const data = await affiliateService.listPromotable(req.user.id, { q: req.query.q, page: req.query.page, pageSize: req.query.pageSize });
+    return res.status(200).json({ success: true, ...data });
+  } catch (error) {
+    return fail(res, error);
+  }
+};

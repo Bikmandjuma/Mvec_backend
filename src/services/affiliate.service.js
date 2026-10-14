@@ -13,6 +13,7 @@ const User = require("../models/User");
 const { normalizePhone, describePhoneIssue } = require("../utils/sms.util");
 const Product = require("../models/Product");
 const attribution = require("./affiliateAttribution.service");
+const program = require("./affiliateProgram.service");
 const crypto = require("crypto");
 
 const MINIMUM_PAYOUT_RWF = 10000;
@@ -40,6 +41,9 @@ class AffiliateService {
     if (!PROMOTABLE_STATUSES.includes(product.status)) {
       throw new Error("This product is not available for promotion.");
     }
+    // Only sellers who opted into the affiliate program can be promoted.
+    const terms = await program.termsForOne(product._id);
+    if (!terms.eligible) throw new Error(`${terms.reason} Choose another product.`);
     if (campaignId) {
       if (!this._isValidId(campaignId)) throw new Error("Campaign not found.");
       const campaign = await AffiliateCampaign.findById(campaignId).select("status");
@@ -94,6 +98,13 @@ class AffiliateService {
       ? { id: link.targetProduct._id, slug: link.targetProduct.slug, name: link.targetProduct.name }
       : null;
     const base = { success: true, visitorId: vid, affiliateCode: link.affiliateCode, targetProduct: product };
+
+    // The visitor still lands on the product, but a product whose seller is not
+    // (or no longer) in the affiliate program records no click and no attribution.
+    if (link.targetProduct) {
+      const terms = await program.termsForOne(link.targetProduct._id);
+      if (!terms.eligible) return { ...base, earning: false };
+    }
 
     // Fraud Guard: an affiliate cannot earn from their own visits.
     if (buyerUserId && link.affiliateUser.toString() === buyerUserId.toString()) {
@@ -694,10 +705,14 @@ class AffiliateService {
     return round2((row.commissionEarned || 0) - (row.reversedAmount || 0));
   }
 
-  _mapLink(link, stats = {}) {
+  _mapLink(link, stats = {}, terms = null) {
     const product = link.targetProduct;
     const terminated = link.status === "TERMINATED" || link.isActive === false;
     return {
+      // Whether new clicks earn right now (the seller may have left the program).
+      earning: !terminated && (!terms || terms.eligible),
+      pausedReason: !terminated && terms && !terms.eligible ? terms.reason : null,
+      commissionPercent: terms ? terms.totalPercent : null,
       _id: link._id,
       id: link._id,
       affiliateCode: link.affiliateCode,
@@ -805,10 +820,55 @@ class AffiliateService {
       this._linkStats(uid),
     ]);
 
+    const terms = await program.termsFor(links.map((l) => l.targetProduct?._id).filter(Boolean));
     const needle = String(q || "").trim().toLowerCase();
     return links
-      .map((l) => this._mapLink(l, stats.get(String(l._id))))
+      .map((l) => this._mapLink(l, stats.get(String(l._id)), l.targetProduct ? terms.get(String(l.targetProduct._id)) : null))
       .filter((l) => !needle || `${l.label} ${l.code} ${l.targetProduct?.name || ""}`.toLowerCase().includes(needle));
+  }
+
+  /**
+   * Products affiliates may promote: sellers with the program on (all their
+   * products, or the ones they chose). Each row says what a sale earns.
+   */
+  async listPromotable(userId, { q = "", page = 1, pageSize = 24 } = {}) {
+    const Vendor = require("../models/Vendor");
+    const vendors = await Vendor.find({ affiliateEnabled: true }).select("user businessName affiliateRate affiliateScope");
+    if (!vendors.length) return { products: [], total: 0, page: 1, pageSize: Number(pageSize) || 24 };
+    const all = vendors.filter((v) => v.affiliateScope !== "SELECTED").map((v) => v.user);
+    const selected = vendors.filter((v) => v.affiliateScope === "SELECTED").map((v) => v.user);
+    const or = [];
+    if (all.length) or.push({ vendor: { $in: all } });
+    if (selected.length) or.push({ vendor: { $in: selected }, affiliateEnabled: true });
+    const filter = { status: "ACTIVE", $or: or };
+    const needle = String(q || "").trim().slice(0, 80);
+    if (needle) filter.name = { $regex: needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), $options: "i" };
+
+    const size = Math.min(Math.max(Number(pageSize) || 24, 1), 60);
+    const pg = Math.max(Number(page) || 1, 1);
+    const [rows, total, mine] = await Promise.all([
+      Product.find(filter).sort({ createdAt: -1 }).skip((pg - 1) * size).limit(size)
+        .select("name price discountPrice stockQuantity status media vendor category affiliateEnabled").populate("category", "name"),
+      Product.countDocuments(filter),
+      AffiliateLink.find({ affiliateUser: userId, status: { $ne: "TERMINATED" } }).select("targetProduct affiliateCode"),
+    ]);
+    const byUser = new Map(vendors.map((v) => [String(v.user), v]));
+    const linkFor = new Map(mine.map((l) => [String(l.targetProduct), l.affiliateCode]));
+    const { AFFILIATE_PERCENT } = require("../config/revenueSplit");
+    return {
+      total, page: pg, pageSize: size,
+      products: rows.map((p) => {
+        const v = byUser.get(String(p.vendor));
+        const price = Number(p.discountPrice) > 0 && Number(p.discountPrice) < Number(p.price) ? Number(p.discountPrice) : Number(p.price);
+        const percent = round2(AFFILIATE_PERCENT + (Number(v?.affiliateRate) || 0));
+        return {
+          id: String(p._id), name: p.name, price, stock: p.stockQuantity, image: p.media?.mainImage || "",
+          category: p.category?.name || "", vendor: v?.businessName || "Seller",
+          commissionPercent: percent, earnPerSale: round2((price * percent) / 100),
+          affiliateCode: linkFor.get(String(p._id)) || null,
+        };
+      }),
+    };
   }
 
   /** PATCH /affiliates/links/:id — relabel, or terminate with { isActive: false }. */
