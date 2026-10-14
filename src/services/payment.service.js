@@ -106,6 +106,8 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
         session,
         hasAffiliate,
         gatewayFee,
+        // Seller's own affiliate rate, frozen on the item at checkout.
+        vendorAffiliatePercent: hasAffiliate ? Number(item.affiliateVendorRate) || 0 : 0,
       });
 
       const settlement = await financialService.lockPaymentInEscrow({

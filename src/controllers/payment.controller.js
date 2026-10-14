@@ -5,6 +5,7 @@ const { formatRwandanPhone } = require("../utils/momo.util");
 const paymentService = require("../services/payment.service");
 const paypackService = require("../services/paypack.service");
 const flutterwaveService = require("../services/flutterwave.service");
+const kpayService = require("../services/kpay.service");
 const User = require("../models/User");
 const socketService = require("../services/socket.service");
 
@@ -290,6 +291,84 @@ exports.initiateCardPayment = async (req, res) => {
   }
 };
 
+// 1e. Pay an order through K-Pay: mobile money, card or SPENN on K-Pay's page.
+//     Mobile money sends a prompt to the phone; card/SPENN return a checkout URL.
+exports.initiateKpayPayment = async (req, res) => {
+  try {
+    const { orderId, phoneNumber } = req.body;
+    const method = String(req.body.method || "momo").toLowerCase();
+    if (!["momo", "card", "spenn"].includes(method)) return res.status(400).json({ message: "Choose mobile money, card or SPENN." });
+    if (!orm.isValidObjectId(orderId)) return res.status(400).json({ message: "A valid order ID is required." });
+    if (kpayService.isSandbox() && process.env.NODE_ENV === "production") {
+      return res.status(503).json({ message: "K-Pay is temporarily unavailable. Please choose another way to pay." });
+    }
+
+    const order = await Order.findById(orderId);
+    if (!order || String(order.user) !== String(req.user.id)) return res.status(404).json({ message: "Order not found." });
+    if (order.paymentStatus === "PAID") return res.status(400).json({ message: "This order is already paid." });
+    if (order.orderStatus !== "PENDING") return res.status(400).json({ message: "This order can no longer be paid. Please place a new order." });
+
+    const buyer = await User.findById(req.user.id).select("Fullname email phone");
+    const phoneInfo = formatRwandanPhone(phoneNumber || order.recipient?.phone || buyer?.phone);
+    if (method === "momo" && !phoneInfo) {
+      return res.status(400).json({ message: "Enter an MTN (078/079) or Airtel (072/073) mobile money number." });
+    }
+    const refid = `KPAY-${order._id}-${Date.now()}`;
+    const provider = method === "card" ? "CARD" : method === "spenn" ? "SPENN" : phoneInfo.provider;
+    const payment = await Payment.create({
+      parentOrder: order._id,
+      user: order.user,
+      transactionReference: refid,
+      method: method === "card" ? "CARD" : method === "spenn" ? "SPENN" : provider === "MTN" ? "MOMO" : "AIRTEL",
+      gateway: "KPAY",
+      provider,
+      phoneNumber: phoneInfo?.formattedNumber || null,
+      amount: order.totalAmount,
+      currency: "RWF",
+      status: "PENDING",
+    });
+
+    const api = (process.env.API_PUBLIC_URL || `${req.protocol}://${req.get("host")}`).replace(/\/$/, "");
+    const frontend = (process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
+    let started;
+    try {
+      started = await kpayService.pay({
+        refid, amount: order.totalAmount, method,
+        msisdn: phoneInfo?.formattedNumber || "250780000000",
+        email: buyer?.email || order.recipient?.email, name: order.recipient?.name || buyer?.Fullname,
+        customerRef: String(order.user), details: `MVEC order ${order.orderNumber}`,
+        returnUrl: `${api}/api/webhooks/kpay`,
+        redirectUrl: `${frontend}/payment/${order._id}?paymentId=${payment._id}`,
+      });
+    } catch (err) {
+      payment.status = "FAILED";
+      payment.gatewayResponse = { error: err.message, gateway: err.gateway || null };
+      await payment.save();
+      throw err;
+    }
+    payment.gatewayReference = started.reference || null;
+    payment.gatewayResponse = started.raw;
+    await payment.save();
+
+    if (started.status === "SUCCESSFUL") {
+      // Sandbox (no K-Pay keys): confirmed at once.
+      await paymentService.settleGatewayPayment({ payment, provider: "KPAY", status: "SUCCESSFUL", amount: order.totalAmount, payload: started.raw, externalTransactionId: started.reference });
+      return res.status(200).json({ message: "Payment confirmed (test mode).", paymentId: payment._id, status: "SUCCESS", checkoutUrl: null });
+    }
+    return res.status(200).json({
+      message: started.checkoutUrl ? "Opening K-Pay's secure page…" : `Payment prompt sent to ${phoneInfo.localNumber}. Approve it on your phone.`,
+      paymentId: payment._id,
+      status: "PENDING",
+      checkoutUrl: started.checkoutUrl,
+    });
+  } catch (error) {
+    if (error.statusCode && error.statusCode < 500) return res.status(error.statusCode).json({ message: error.message });
+    if (error.statusCode === 502) return res.status(502).json({ message: error.message });
+    console.error("K-Pay payment failed:", error);
+    return res.status(502).json({ message: "We could not start the K-Pay payment. No money was taken; please try again or choose another way to pay." });
+  }
+};
+
 // 1c. Check a payment's status, reconciling with Paypack while it is still pending.
 //     Lets clients poll for completion when the Paypack webhook cannot reach the
 //     server (e.g. local development).
@@ -319,6 +398,14 @@ exports.checkPaymentStatus = async (req, res) => {
         amount: result.amount ?? payment.amount,
         fee: result.fee || 0,
         payload: result.raw || {},
+      });
+    }
+
+    if (payment.status === "PENDING" && payment.gateway === "KPAY") {
+      const result = await kpayService.checkStatus(payment.transactionReference);
+      await paymentService.settleGatewayPayment({
+        payment, provider: "KPAY", status: result.status, amount: payment.amount,
+        payload: result.raw || {}, externalTransactionId: result.tid || payment.gatewayReference,
       });
     }
 

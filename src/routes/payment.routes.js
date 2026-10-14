@@ -7,6 +7,7 @@ const {
   initiateMomoPayment,
   initiateAirtelPayment,
   initiateCardPayment,
+  initiateKpayPayment,
   checkPaymentStatus,
   confirmPayment,
 } = require("../controllers/payment.controller");
@@ -24,6 +25,9 @@ router.post("/pay/airtel", protect, limits.payment, initiateAirtelPayment);
 
 // Pay by card on Flutterwave's hosted checkout
 router.post("/pay/card", protect, limits.payment, initiateCardPayment);
+
+// Pay through K-Pay (mobile money, card or SPENN)
+router.post("/pay/kpay", protect, limits.payment, initiateKpayPayment);
 
 // Check payment status (reconciles with Paypack while pending)
 router.get("/status/:paymentId", protect, checkPaymentStatus);

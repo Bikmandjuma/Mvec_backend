@@ -27,6 +27,8 @@ module.exports = (sequelize) => {
     stockQuantity: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, defaultValue: 0 },
     lowStockThreshold: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 5 },
     status: { type: DataTypes.ENUM("DRAFT", "PENDING_APPROVAL", "ACTIVE", "INACTIVE", "OUT_OF_STOCK"), allowNull: false, defaultValue: "DRAFT" },
+    // Chosen for the seller's affiliate program (used when the scope is SELECTED).
+    affiliateEnabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     // `media` sub-document
     mainImage: { type: DataTypes.STRING(1000), allowNull: false },
     gallery: { type: DataTypes.JSON, allowNull: true },

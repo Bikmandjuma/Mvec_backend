@@ -320,3 +320,27 @@ exports.handleFlutterwaveWebhook = async (req, res) => {
     return res.status(500).json({ message: "Webhook processing failed; it will be retried." });
   }
 };
+
+// @desc    K-Pay payment callback. K-Pay does not sign callbacks, so the body is
+//          never trusted: the status is re-checked with K-Pay before anything changes.
+// @route   POST /api/webhooks/kpay   { tid, refid, statusid, ... }
+// @access  Public
+exports.handleKpayWebhook = async (req, res) => {
+  const kpayService = require("../services/kpay.service");
+  const { tid = "", refid = "" } = req.body || {};
+  const ack = () => res.status(200).json({ tid, refid, reply: "OK" });
+  try {
+    if (!refid) return ack();
+    const payment = await Payment.findOne({ transactionReference: String(refid), gateway: "KPAY" });
+    if (!payment || payment.status !== "PENDING") return ack();
+    const result = await kpayService.checkStatus(String(refid));
+    await paymentService.settleGatewayPayment({
+      payment, provider: "KPAY", status: result.status, amount: payment.amount,
+      payload: result.raw || {}, externalTransactionId: result.tid || String(tid) || payment.gatewayReference,
+    });
+    return ack();
+  } catch (error) {
+    console.error("K-Pay webhook failed:", error);
+    return res.status(500).json({ tid, refid, reply: "RETRY" });
+  }
+};

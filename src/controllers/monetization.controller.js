@@ -662,10 +662,9 @@ exports.adminUpdateAdvertisementStatus = async (req, res) => {
       return res.status(400).json({ message: "Invalid advertisement status" });
     }
 
-    if (!orm.isValidObjectId(req.params.id)) {
-      return res.status(404).json({ message: "Advertisement campaign not found" });
-    }
-    const ad = await Advertisement.findById(req.params.id);
+    // Lists expose publicId as `id`; accept either identifier.
+    const adId = String(req.params.id);
+    const ad = await Advertisement.findOne(orm.isValidObjectId(adId) ? { _id: adId } : { publicId: adId });
     if (!ad) {
       return res.status(404).json({ message: "Advertisement campaign not found" });
     }

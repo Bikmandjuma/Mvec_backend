@@ -21,6 +21,12 @@ module.exports = (sequelize) => {
     ratingAvg: { type: DataTypes.DECIMAL(3, 2), allowNull: false, defaultValue: 0, validate: { min: 0, max: 5 } },
     status: { type: DataTypes.ENUM("ACTIVE", "SUSPENDED", "BLOCKED", "UNDER_REVIEW"), allowNull: false, defaultValue: "ACTIVE" },
     location: { type: DataTypes.JSON, allowNull: true }, // Mixed in Mongoose
+    // Affiliate program: off until the seller opts in. affiliateRate (%) is paid
+    // by the seller on affiliate-driven sales, on top of MVEC's own share.
+    affiliateEnabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    affiliateRate: { type: DataTypes.DECIMAL(5, 2), allowNull: false, defaultValue: 0 },
+    affiliateScope: { type: DataTypes.ENUM("ALL", "SELECTED"), allowNull: false, defaultValue: "ALL" },
+    affiliateUpdatedAt: { type: DataTypes.DATE, allowNull: true },
   }, {
     tableName: "vendors",
     timestamps: true,
@@ -43,7 +49,7 @@ module.exports = (sequelize) => {
   Vendor.associate = (m) => Vendor.belongsTo(m.User, { as: "user", foreignKey: "userId" });
   Vendor.prototype.toApi = function () {
     const { userId, user, ...rest } = withIds(this);
-    return { ...rest, user: user ? this.user.toApi() : userId, commissionRate: Number(rest.commissionRate), ratingAvg: Number(rest.ratingAvg) };
+    return { ...rest, user: user ? this.user.toApi() : userId, commissionRate: Number(rest.commissionRate), ratingAvg: Number(rest.ratingAvg), affiliateRate: Number(rest.affiliateRate) };
   };
   return Vendor;
 };

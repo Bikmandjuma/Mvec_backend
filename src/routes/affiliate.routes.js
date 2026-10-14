@@ -25,6 +25,7 @@ router.get("/commissions", ...affiliateOnly, affiliateController.listCommissions
 
 // ─── Referral links ──────────────────────────────────────────────────────────
 router.get("/links", ...affiliateOnly, affiliateController.listLinks);
+router.get("/promotable", ...affiliateOnly, affiliateController.listPromotable);
 router.post("/links", ...affiliateOnly, affiliateController.generateLink);
 router.patch("/links/:linkId", ...affiliateOnly, affiliateController.updateLink);
 router.delete("/links/:linkId", ...affiliateOnly, affiliateController.deleteLink);
