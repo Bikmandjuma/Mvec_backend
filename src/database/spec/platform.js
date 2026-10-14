@@ -541,18 +541,59 @@ module.exports = [
       shippedAt: date(),
       deliveredAt: date(),
       confirmedAt: date(),
+      paidAt: date(),
+      // Set when the order came from an accepted quote (no catalog products).
+      quote: ref("quotes", { fk: false }),
+      category: str({ len: 120, default: "" }),
+      stockReserved: bool(false),
+      cancelledBy: str({ len: 20, default: "" }),
+      cancelReason: str({ len: 300, default: "" }),
+      disputeReason: text({ apiDefault: "" }),
     },
     children: {
       items: {
         model: "WholesaleOrderItem", table: "wholesale_order_items", parentKey: "wholesaleOrderId",
         fields: {
-          product: ref("wholesale_products", { required: true, fk: false }),
+          product: ref("wholesale_products", { fk: false }), // empty for quoted items
+          unit: str({ len: 40, default: "piece" }),
           productName: str({ required: true }),
           unitPrice: money({ required: true }),
           quantity: int({ required: true }),
           moq: int({ required: true }),
         },
       },
+    },
+  },
+  {
+    // A vendor asks suppliers for goods: "50 bags of rice by Friday".
+    model: "QuoteRequest", table: "quote_requests", collection: "quoterequests",
+    indexes: [{ fields: ["status", "neededBy"] }],
+    fields: {
+      reference: str({ len: 40, required: true, unique: true }),
+      vendor: ref("users", { required: true, index: true, fk: false }),
+      category: str({ len: 120, required: true, index: true }),
+      lines: json([]), // [{ product, units, unit, targetPrice }]
+      neededBy: date({ required: true }),
+      deliverTo: str({ len: 200, default: "" }),
+      note: text({ apiDefault: "" }),
+      status: en(["OPEN", "AWARDED", "CANCELLED", "EXPIRED"], { default: "OPEN", required: true, index: true }),
+      acceptedQuote: ref("quotes", { fk: false }),
+      wholesaleOrder: ref("wholesale_orders", { fk: false }),
+    },
+  },
+  {
+    // A supplier's offer for one quote request.
+    model: "Quote", table: "quotes", collection: "quotes",
+    indexes: [{ fields: ["requestId", "supplierId"], unique: true }],
+    fields: {
+      request: ref("quote_requests", { required: true, index: true, fk: false }),
+      supplier: ref("users", { required: true, index: true, fk: false }), // supplier owner account
+      lines: json([]), // [{ product, units, unit, unitPrice }]
+      totalAmount: money({ required: true, default: 0 }),
+      deliveryDays: int({ required: true, default: 1 }),
+      note: text({ apiDefault: "" }),
+      validUntil: date(),
+      status: en(["SUBMITTED", "ACCEPTED", "DECLINED", "WITHDRAWN"], { default: "SUBMITTED", required: true, index: true }),
     },
   },
 ];

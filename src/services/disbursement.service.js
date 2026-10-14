@@ -37,7 +37,7 @@ async function onSuccess(d) {
     );
     if (payout) {
       await VendorWallet.updateOne({ vendor: payout.vendor }, { $inc: { totalWithdrawn: payout.amount } });
-      await notifications.vendorPayout(payout.vendor, { amount: payout.amount, status: "PAID" }).catch(() => {});
+      await notifications.vendorPayout(payout.vendor, { amount: payout.amount, status: "PAID", supplier: String(payout.payoutNumber || "").startsWith("SUP-") }).catch(() => {});
     }
   }
 }
@@ -68,7 +68,7 @@ async function onFinalFailure(d) {
     );
     if (payout) {
       await VendorWallet.updateOne({ vendor: payout.vendor }, { $inc: { availableBalance: payout.amount } });
-      await notifications.vendorPayout(payout.vendor, { amount: payout.amount, status: "FAILED" }).catch(() => {});
+      await notifications.vendorPayout(payout.vendor, { amount: payout.amount, status: "FAILED", supplier: String(payout.payoutNumber || "").startsWith("SUP-") }).catch(() => {});
     }
   }
 }

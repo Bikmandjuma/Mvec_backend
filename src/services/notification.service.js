@@ -285,14 +285,14 @@ module.exports = {
     });
   },
 
-  async vendorPayout(vendorId, { amount, status }) {
+  async vendorPayout(vendorId, { amount, status, supplier = false }) {
     await notify(vendorId, {
       type: "PAYOUT",
       title: status === "PAID" ? "Withdrawal sent" : "Withdrawal failed",
       message: status === "PAID"
         ? `${money(amount)} was sent to your mobile money.`
         : `The ${money(amount)} transfer failed and the amount is back in your balance. Check your number and try again.`,
-      link: "/vendor/payouts",
+      link: supplier ? "/supplier/payments" : "/vendor/payouts",
       sms: status === "PAID" ? `MVEC: your ${money(amount)} withdrawal was sent to your mobile money.` : undefined,
     });
   },

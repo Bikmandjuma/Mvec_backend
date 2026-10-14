@@ -212,9 +212,14 @@ exports.searchUsers = async (req, res) => {
     const query = String(q).trim();
     const re = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
 
+    // A seller only finds their own customers and orders; admins find anyone.
+    const isAdmin = req.user.role === "super_admin";
+    const sellerId = req.vendorId || req.user._id;
+    const customerIds = isAdmin ? null : await Order.distinct("user", { "items.vendor": sellerId });
     const [users, stores, orders] = await Promise.all([
       User.find({
         $or: [{ Fullname: re }, { email: re }, { phone: re }, { companyName: re }],
+        ...(isAdmin ? {} : { _id: { $in: customerIds } }),
       })
         .select(USER_WITHOUT_PASSWORD)
         .limit(10),
@@ -223,7 +228,7 @@ exports.searchUsers = async (req, res) => {
       })
         .select("storeName slug logo businessCategory vendor status")
         .limit(8),
-      Order.find({ orderNumber: re })
+      Order.find({ orderNumber: re, ...(isAdmin ? {} : { "items.vendor": sellerId }) })
         .select("orderNumber user totalAmount createdAt")
         .populate("user", "Fullname email phone companyName role")
         .limit(8),
@@ -258,8 +263,8 @@ exports.searchUsers = async (req, res) => {
         targetUserId: s.vendor,
         label: s.storeName,
         subtitle: `${s.businessCategory || "Store"} · ${owner?.Fullname || ""}`.trim().replace(/^ ·| · $/g, ""),
-        email: owner?.email,
-        phone: owner?.phone,
+        email: isAdmin ? owner?.email : undefined,
+        phone: isAdmin ? owner?.phone : undefined,
         role: "vendor",
         companyName: owner?.companyName || "",
         store: { id: s._id, slug: s.slug, logo: s.logo },
