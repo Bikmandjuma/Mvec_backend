@@ -118,6 +118,24 @@ module.exports = [
   subscription("vendor", "MVEC-SUB", "Subscription", "subscriptions", "subscriptions", false),
   subscription("buyer", "MVEC-BSUB", "BuyerSubscription", "buyer_subscriptions", "buyersubscriptions", true),
   {
+    // Every change an administrator makes (verify, suspend, refund, approve…),
+    // written automatically by middleware/adminAudit.js.
+    model: "AuditLog", table: "audit_logs", collection: "auditlogs", timestamps: "createdAt",
+    indexes: [{ fields: ["createdAt"] }, { fields: ["targetType", "targetId"] }],
+    fields: {
+      actor: ref("users", { fk: false, index: true }),
+      actorName: str({ len: 150, default: "" }),
+      action: str({ len: 200, required: true }),
+      method: str({ len: 10, default: "" }),
+      path: str({ len: 300, default: "" }),
+      targetType: str({ len: 60, default: "" }),
+      targetId: str({ len: 60, default: "" }),
+      statusCode: int({ default: 200 }),
+      detail: json(null),
+      ip: str({ len: 60, default: "" }),
+    },
+  },
+  {
     model: "Notification", table: "notifications", collection: "notifications",
     indexes: [{ fields: ["recipientId", "isRead", "createdAt"] }],
     fields: {
@@ -177,6 +195,7 @@ module.exports = [
       email: str({ len: 190, required: true, lowercase: true }),
       category: str({ len: 120, default: "" }),
       verificationStatus: en(["UNVERIFIED", "PENDING", "VERIFIED", "REJECTED"], { default: "UNVERIFIED", required: true }),
+      verificationNote: str({ len: 500, default: "" }),
       ratingAvg: num({ required: true, default: 0 }),
       status: en(["ACTIVE", "SUSPENDED", "BLOCKED", "UNDER_REVIEW"], { default: "ACTIVE", required: true }),
       location: json(null),

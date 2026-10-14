@@ -118,8 +118,9 @@ exports.onboardVendor = async (req, res) => {
     }
 
     const vendor = existing || new Vendor({ user: req.user.id });
-    Object.assign(vendor, { businessName, description, phone, email, logoUrl, category, bannerUrl, location: locationVal, verificationStatus: "PENDING" });
+    Object.assign(vendor, { businessName, description, phone, email, logoUrl, category, bannerUrl, location: locationVal, verificationStatus: "PENDING", verificationNote: "" });
     await vendor.save();
+    require("../services/notification.service").profileSubmitted({ kind: "seller", name: businessName, resubmitted: !created }).catch(() => {});
     await User.findByIdAndUpdate(req.user.id, { companyName: businessName, businessName, description, logoUrl, category, location: locationVal, isOnboarded: true, verificationStatus: "PENDING" });
 
     // Auto-sync Store record so all store/staff/settings endpoints function seamlessly
@@ -219,7 +220,17 @@ exports.updateMyProfile = async (req, res) => {
       vendor.location = typeof address === "object" ? (address.city || address.street) : address;
     }
 
+    // A rejected profile that has been fixed goes straight back to MVEC for review.
+    const resubmitted = vendor.verificationStatus === "REJECTED";
+    if (resubmitted) {
+      vendor.verificationStatus = "PENDING";
+      vendor.verificationNote = "";
+    }
     await vendor.save();
+    if (resubmitted) {
+      await User.findByIdAndUpdate(req.user.id, { verificationStatus: "PENDING" });
+      require("../services/notification.service").profileSubmitted({ kind: "seller", name: vendor.businessName, resubmitted: true }).catch(() => {});
+    }
 
     // Sync Store record
     try {
@@ -249,7 +260,7 @@ exports.updateMyProfile = async (req, res) => {
       console.error("Auto-sync Store error on vendor profile update:", storeErr.message);
     }
 
-    return res.status(200).json({ message: "Vendor profile updated", vendor });
+    return res.status(200).json({ message: resubmitted ? "Profile saved and sent to MVEC for review again." : "Vendor profile updated", vendor });
   } catch (error) {
     if (error.code === 11000) {
       return res.status(409).json({ message: "A vendor with this business name already exists" });
@@ -396,7 +407,7 @@ exports.adminGetVendors = async (req, res) => {
         ...v.toObject(),
         productCount: Number(stats.productCount) || 0,
         productCategories: categories,
-        category: categories[0] || "",
+        category: v.category || categories[0] || "",
       };
     });
 
@@ -415,9 +426,13 @@ exports.adminGetVendors = async (req, res) => {
 exports.adminVerifyVendor = async (req, res) => {
   try {
     const { decision } = req.body; // "VERIFIED" | "REJECTED"
+    const reason = String(req.body.reason || "").trim().slice(0, 500);
 
     if (!["VERIFIED", "REJECTED"].includes(decision)) {
-      return res.status(400).json({ message: "decision must be VERIFIED or REJECTED" });
+      return res.status(400).json({ message: "Choose to verify or reject the seller." });
+    }
+    if (decision === "REJECTED" && reason.length < 5) {
+      return res.status(400).json({ message: "Tell the seller what to fix: write a short reason for the rejection." });
     }
 
     const vendor = await Vendor.findById(req.params.id);
@@ -426,8 +441,10 @@ exports.adminVerifyVendor = async (req, res) => {
     }
 
     vendor.verificationStatus = decision;
+    vendor.verificationNote = decision === "REJECTED" ? reason : "";
     await vendor.save();
     await User.findByIdAndUpdate(vendor.user, { verificationStatus: decision });
+    await require("../services/notification.service").verificationDecision(vendor.user, { kind: "seller", name: vendor.businessName, decision, reason });
 
     return res.status(200).json({ message: `Vendor ${decision.toLowerCase()}`, vendor });
   } catch (error) {
