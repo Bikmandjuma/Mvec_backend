@@ -18,7 +18,7 @@ const RULES = [
   ["PATCH", /^\/api\/admin\/suppliers\/payouts\/([^/]+)$/, "Supplier payout", (b) => `Supplier payout ${lower(b.status)}`],
   ["PATCH", /^\/api\/admin\/suppliers\/([^/]+)\/verify$/, "Supplier", (b) => `Supplier ${lower(b.decision)}`],
   ["PATCH", /^\/api\/admin\/suppliers\/([^/]+)\/status$/, "Supplier", (b) => `Supplier account set to ${lower(b.status)}`],
-  ["PATCH", /^\/api\/users\/([^/]+)$/, "User", (b) => (b.status ? `User account set to ${lower(b.status)}` : "User account updated")],
+  ["PATCH", /^\/api\/users\/([^/]+)$/, "User", (b) => (b.role ? `User role changed to ${lower(b.role === "super_admin" ? "admin" : b.role === "delivery" ? "courier" : b.role)}` : b.status ? `User account set to ${lower(b.status)}` : "User account updated")],
   ["POST", /^\/api\/disputes\/([^/]+)\/arbitrate$/, "Dispute", (b) => `Dispute decided: ${lower(b.resolution || b.decision || b.outcome || "resolved")}`],
   ["PATCH", /^\/api\/admin\/settlements\/([^/]+)\/hold$/, "Settlement", () => "Seller payment put on hold"],
   ["DELETE", /^\/api\/admin\/settlements\/([^/]+)\/hold$/, "Settlement", () => "Hold on seller payment removed"],
@@ -33,8 +33,12 @@ const RULES = [
   ["POST", /^\/api\/categories\/?$/, "Category", (b) => `Category created: ${b.name || ""}`.trim()],
   ["PATCH", /^\/api\/categories\/([^/]+)$/, "Category", () => "Category updated"],
   ["DELETE", /^\/api\/categories\/([^/]+)$/, "Category", () => "Category disabled"],
-  ["POST", /^\/api\/admin\/commissions$/, "Commission rule", () => "Commission rule created"],
-  ["PATCH", /^\/api\/admin\/commissions\/([^/]+)\/toggle$/, "Commission rule", () => "Commission rule switched on/off"],
+  ["POST", /^\/api\/wholesale\/orders\/([^/]+)\/hold-escrow$/, "Wholesale order", () => "Wholesale order marked as paid by hand"],
+  ["POST", /^\/api\/admin\/commissions$/, "Commission rule", (b) => `Commission rule created: ${b.rateValue ?? ""}%`],
+  ["PATCH", /^\/api\/admin\/commissions\/([^/]+)\/toggle$/, "Commission rule", (b) => (b.isActive === false ? "Commission rule deactivated" : b.isActive === true ? "Commission rule activated" : "Commission rule switched on/off")],
+  ["PUT", /^\/api\/admin\/commissions\/([^/]+)$/, "Commission rule", (b) => `Commission rule edited${b.rateValue !== undefined ? `: ${b.rateValue}%` : ""}`],
+  ["DELETE", /^\/api\/admin\/commissions\/([^/]+)$/, "Commission rule", () => "Commission rule deleted"],
+  ["PUT", /^\/api\/admin\/commission-settings$/, "Commission settings", () => "Commission settings changed"],
 ];
 
 function describe(method, path, body) {

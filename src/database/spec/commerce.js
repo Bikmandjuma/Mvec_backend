@@ -209,6 +209,9 @@ module.exports = [
       // Part of affiliateShare paid by the seller (their own affiliate rate).
       vendorAffiliateShare: money({ required: true, default: 0 }),
       gatewayFee: money({ required: true, default: 0 }),
+      // Commission % applied (from the matching rule) and who bore the provider fee.
+      commissionRate: num(),
+      gatewayFeePayer: en(["MVEC", "SELLER"], { default: "MVEC", required: true }),
       affiliateUser: ref("users", { fk: false }),
       status: en(["HELD", "RELEASED", "ADMIN_HOLD", "REFUNDED", "CANCELLED"], { default: "HELD", required: true, index: true }),
       releasedAt: date(),

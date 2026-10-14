@@ -125,7 +125,7 @@ describe("Admin operations: verification, attention queue, audit log", () => {
       expect(ok.status).toBe(200);
     }
     const platform = await request(app).get("/api/admin/platform").set(as("admin"));
-    expect(platform.body.fees[0].value).toBe("5%");
-    expect(platform.body.commissionRules.applied).toBe(false);
+    expect(platform.body.fees[0].value).toBe("5%"); // default commission
+    expect(platform.body.commissionRules.applied).toBe(true);
   });
 });

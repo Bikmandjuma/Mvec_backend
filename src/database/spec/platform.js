@@ -118,6 +118,16 @@ module.exports = [
   subscription("vendor", "MVEC-SUB", "Subscription", "subscriptions", "subscriptions", false),
   subscription("buyer", "MVEC-BSUB", "BuyerSubscription", "buyer_subscriptions", "buyersubscriptions", true),
   {
+    // Marketplace-wide settings an admin can change (commission shares,
+    // provider fee payer…). One row per key; read through services/commission.service.js.
+    model: "PlatformSetting", table: "platform_settings", collection: "platformsettings",
+    fields: {
+      settingKey: str({ len: 80, required: true, unique: true }),
+      value: json(null),
+      updatedBy: ref("users", { fk: false }),
+    },
+  },
+  {
     // Every change an administrator makes (verify, suspend, refund, approve…),
     // written automatically by middleware/adminAudit.js.
     model: "AuditLog", table: "audit_logs", collection: "auditlogs", timestamps: "createdAt",

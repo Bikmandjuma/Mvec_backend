@@ -39,7 +39,8 @@ exports.getVendorBalance = async (req, res) => {
       withdrawnAmount: wallet.totalWithdrawn || 0,
       commissionPaid: fees[0]?.commission || 0,
     };
-    return res.status(200).json({ balance, commissionRate: `${TOTAL_PLATFORM_FEE_PERCENT}%` });
+    const rate = await require("../services/commission.service").resolveRate({ vendorId: req.vendorId || req.user._id || req.user.id, categoryId: null });
+    return res.status(200).json({ balance, commissionRate: `${rate.percent}%` });
   } catch (error) {
     console.error("Vendor balance failed:", error);
     return res.status(500).json({ message: "We could not load your balance right now. Your money is safe; refresh in a moment." });

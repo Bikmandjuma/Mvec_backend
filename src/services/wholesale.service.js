@@ -129,6 +129,30 @@ class WholesaleService {
   }
 
   /**
+   * A confirmed payment for a wholesale order: check it covers the order,
+   * hold the money in escrow and tell the supplier to ship. Safe to repeat.
+   */
+  async markWholesalePaid(orderId, payment) {
+    const order = await WholesaleOrder.findById(orderId);
+    if (!order) throw new Error(`Wholesale order ${orderId} not found for payment ${payment.transactionReference}.`);
+    if (order.status !== "PENDING_PAYMENT") return order;
+    if (Number(payment.amount) !== Number(order.totalAmount)) {
+      throw new Error(`Wholesale payment ${payment.transactionReference} is ${payment.amount} RWF but the order is ${order.totalAmount} RWF.`);
+    }
+    const held = await this.holdWholesaleEscrow(orderId);
+    const notifications = require("./notification.service");
+    await notifications.notify(order.supplier, {
+      type: "ORDER",
+      title: `Wholesale order ${order.orderNumber} is paid`,
+      message: `${Number(order.totalAmount).toLocaleString("en-RW")} RWF is held by MVEC. Ship the goods; you are paid when the vendor confirms receipt.`,
+      link: "/supplier/delivery",
+      sms: `MVEC: wholesale order ${order.orderNumber} is paid. Please ship it.`,
+    });
+    await notifications.notify(order.vendor, { type: "PAYMENT", title: `Payment received for ${order.orderNumber}`, message: "MVEC holds the money until you confirm you received the goods.", link: "/vendor/purchases" });
+    return held;
+  }
+
+  /**
    * Confirm Physical Receipt and Release Escrow Funds to Supplier
    */
   async confirmReceiptAndRelease(orderId, providedOtp = null) {

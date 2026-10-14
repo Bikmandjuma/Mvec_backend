@@ -32,6 +32,8 @@ function sanitizeWholesalePayload(body = {}, defaults = {}) {
     stockQuantity: Math.max(0, Number(body.stockQuantity ?? defaults.stockQuantity ?? 0) || 0),
     bulkDiscount: Math.min(100, Math.max(0, Number(body.bulkDiscount ?? defaults.bulkDiscount ?? 0) || 0)),
     media: body.media !== undefined ? body.media : defaults.media || { mainImage: "", gallery: [] },
+    // Suppliers choose Active or Archived; Out of stock is set from the stock count.
+    ...(["ACTIVE", "ARCHIVED"].includes(body.status) ? { status: body.status } : {}),
   };
 }
 
