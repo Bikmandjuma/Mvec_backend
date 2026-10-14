@@ -130,6 +130,7 @@ const buildAuthenticatedUserResponse = async (user, staffDetails = null) => {
     );
     response.isOnboarded = requiredComplete;
     response.verificationStatus = profile?.verificationStatus || "UNVERIFIED";
+    response.verificationNote = profile?.verificationNote || "";
     response.businessName = profile?.businessName || response.companyName;
     response.logoUrl = profile?.logoUrl || null;
     response.description = profile?.description || "";

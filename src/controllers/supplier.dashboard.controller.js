@@ -178,6 +178,10 @@ function payoutJson(payout) {
     destination: payout.payoutDetails?.accountNumber,
     note: payout.note || "",
     arrivedAt: payout.processedAt || null,
+    payoutNumber: payout.payoutNumber,
+    accountName: payout.payoutDetails?.accountName || "",
+    bankName: payout.payoutDetails?.bankName || "",
+    rejectionReason: payout.rejectionReason || "",
   };
 }
 
@@ -361,6 +365,11 @@ exports.requestPayout = async (req, res) => {
       }], { session });
       created = payout;
     });
+    require("../services/notification.service").adminAlert({
+      title: `Supplier payout request: ${amount.toLocaleString("en-RW")} RWF`,
+      message: `${req.user.Fullname || "A supplier"} asked to be paid to ${payoutDestination}.`,
+      link: "/admin/suppliers?tab=payouts",
+    }).catch(() => {});
     return res.status(201).json({ payout: payoutJson(created) });
   } catch (error) {
     return sendError(res, error);
@@ -527,6 +536,11 @@ exports.createSupplyRequest = async (req, res) => {
       note: String(req.body.note || "").trim(),
       events: [{ at: createdAt, title: "Request submitted", detail: "Submitted by the supplier for review." }],
     });
+    require("../services/notification.service").adminAlert({
+      title: `New supply request from ${supplier.businessName}`,
+      message: `${lines.length} item${lines.length === 1 ? "" : "s"}, needed by ${neededDate.toLocaleDateString("en-GB")}.`,
+      link: "/admin/suppliers?tab=requests",
+    }).catch(() => {});
     return res.status(201).json({ request });
   } catch (error) {
     return sendError(res, error);
@@ -614,6 +628,14 @@ exports.adminUpdateSupplyRequest = async (req, res) => {
       detail: decision || "Updated by supplier operations.",
     });
     await request.save();
+    const supplier = await Supplier.findById(request.supplier).select("user").lean();
+    if (supplier?.user) {
+      await require("../services/notification.service").supplierUpdate(supplier.user, {
+        title: `Supply request ${request.reference}: ${status.toLowerCase().replaceAll("_", " ")}`,
+        message: decision || "MVEC updated your supply request.",
+        link: "/supplier/supply-requests",
+      });
+    }
     return res.json({ request });
   } catch (error) {
     return sendError(res, error);
@@ -630,7 +652,9 @@ exports.adminGetPayouts = async (req, res) => {
       .sort({ createdAt: 1 })
       .limit(limitFrom(req.query, 50))
       .lean();
-    return res.json({ payouts: payouts.map(payoutJson) });
+    const suppliers = await Supplier.find({ user: { $in: payouts.map((p) => p.vendor) } }).select("user businessName").lean();
+    const names = new Map(suppliers.map((x) => [String(x.user), x.businessName]));
+    return res.json({ payouts: payouts.map((p) => ({ ...payoutJson(p), supplierName: names.get(String(p.vendor)) || "" })) });
   } catch (error) {
     return sendError(res, error);
   }
@@ -679,6 +703,12 @@ exports.adminUpdatePayout = async (req, res) => {
       payout.status = status;
       await payout.save({ session });
       updated = payout;
+    });
+    const words = { PROCESSING: "is being sent", PAID: "was sent", REJECTED: "was declined", FAILED: "failed and the money is back in your balance" };
+    await require("../services/notification.service").supplierUpdate(updated.vendor, {
+      title: `Payout ${updated.payoutNumber} ${words[status]}`,
+      message: updated.rejectionReason || "",
+      link: "/supplier/payments",
     });
     return res.json({ payout: payoutJson(updated) });
   } catch (error) {

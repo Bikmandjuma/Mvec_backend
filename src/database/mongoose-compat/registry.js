@@ -57,7 +57,7 @@ const LEGACY = {
       publicId: F("string"), user: F("ref", "userId", "User"), businessName: F("string"), slug: F("string"), logoUrl: F("string"),
       bannerUrl: F("string"), description: F("string"), phone: F("string"), email: F("string"), commissionRate: F("number"),
       verificationStatus: F("string"), ratingAvg: F("number"), status: F("string"), location: F("json"), category: F("string"),
-      affiliateEnabled: F("bool"), affiliateRate: F("number"), affiliateScope: F("string"), affiliateUpdatedAt: F("date"),
+      affiliateEnabled: F("bool"), affiliateRate: F("number"), affiliateScope: F("string"), affiliateUpdatedAt: F("date"), verificationNote: F("string"),
     },
   },
   Store: {
