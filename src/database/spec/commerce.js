@@ -22,7 +22,7 @@ const staffPayout = (ownerField, collection, model, table) => ({
     payoutNumber: str({ len: 60, required: true, unique: true }),
     [ownerField]: ref("users", { required: true, index: true, onDelete: "CASCADE" }),
     amount: money({ required: true }),
-    paymentMethod: en(["MOMO", "AIRTEL"], { default: "MOMO" }),
+    paymentMethod: en(["MOMO", "AIRTEL", "BANK"], { default: "MOMO" }),
     ...accountDetails("accountDetails"),
     status: en(PAYOUT_STATUS, { default: "PENDING", index: true }),
     transactionReference: str({ len: 120 }),
@@ -313,6 +313,8 @@ module.exports = [
     fields: {
       name: str({ len: 150, required: true }),
       ruleType: en(["GLOBAL", "CATEGORY", "VENDOR", "PRODUCT"], { required: true }),
+      // RETAIL: sales to buyers. WHOLESALE: supplier → vendor orders (targetVendor is then the supplier).
+      scope: en(["RETAIL", "WHOLESALE"], { default: "RETAIL", required: true }),
       targetCategory: ref("categories", { fk: false }),
       targetVendor: ref("users", { fk: false }),
       targetProduct: ref("products", { fk: false }),

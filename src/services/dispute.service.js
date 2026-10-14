@@ -58,6 +58,10 @@ class DisputeService {
     const dispute = await Dispute.findById(disputeId);
     if (!dispute) throw new Error("Dispute not found.");
 
+    // Only the buyer who raised it, the seller involved and MVEC admins take part.
+    const isParty = [String(dispute.raisedBy), String(dispute.vendor)].includes(String(userId)) || userRole === "super_admin";
+    if (!isParty) throw Object.assign(new Error("Dispute not found."), { statusCode: 404 });
+
     if (["RESOLVED_BUYER_REFUNDED", "RESOLVED_VENDOR_RELEASED", "RESOLVED_SPLIT", "REJECTED"].includes(dispute.status)) {
       throw new Error("Cannot submit evidence to a closed dispute.");
     }

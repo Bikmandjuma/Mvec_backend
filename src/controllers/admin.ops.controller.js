@@ -17,7 +17,7 @@ const Advertisement = require("../models/Advertisement");
 const SupportCase = require("../models/SupportCase");
 const AbuseReport = require("../models/AbuseReport");
 const { Payout } = require("../models/Payout");
-const SupplierSupplyRequest = require("../models/SupplierSupplyRequest");
+const WholesaleOrder = require("../models/WholesaleOrder");
 const Product = require("../models/Product");
 const AuditLog = require("../models/AuditLog");
 
@@ -45,7 +45,7 @@ exports.getAttention = async (_req, res) => {
     const supplierUsers = await Supplier.distinct("user");
     const [
       vendors, suppliers, disputes, manualRefunds, failedTransfers, affiliateWithdrawals,
-      supplierPayouts, supplyRequests, ads, support, abuse, staleShipments,
+      supplierPayouts, wholesaleDisputes, ads, support, abuse, staleShipments,
     ] = await Promise.all([
       Vendor.countDocuments({ verificationStatus: "PENDING" }),
       Supplier.countDocuments({ verificationStatus: "PENDING" }),
@@ -53,8 +53,8 @@ exports.getAttention = async (_req, res) => {
       Disbursement.countDocuments({ channel: "MANUAL", status: { $in: ["QUEUED", "FAILED"] } }),
       Disbursement.countDocuments({ channel: { $ne: "MANUAL" }, status: "FAILED" }),
       AffiliatePayout.countDocuments({ status: "PENDING" }),
-      supplierUsers.length ? Payout.countDocuments({ vendor: { $in: supplierUsers }, status: { $in: ["PENDING", "PROCESSING"] } }) : 0,
-      SupplierSupplyRequest.countDocuments({ status: { $in: ["SUBMITTED", "UNDER_REVIEW"] } }),
+      supplierUsers.length ? Payout.countDocuments({ vendor: { $in: supplierUsers }, status: { $in: ["PENDING", "PROCESSING"] }, payoutMethod: "BANK" }) : 0,
+      WholesaleOrder.countDocuments({ status: "DISPUTED" }),
       Advertisement.countDocuments({ status: "PENDING" }),
       SupportCase.countDocuments({ status: { $in: ["OPEN", "IN_PROGRESS"] } }),
       AbuseReport.countDocuments({ status: { $in: ["PENDING", "INVESTIGATE"] } }),
@@ -67,8 +67,8 @@ exports.getAttention = async (_req, res) => {
       { key: "manualRefunds", label: "Refunds to send by hand (K-Pay card/SPENN)", count: manualRefunds, link: "/admin/transfers", urgent: true },
       { key: "failedTransfers", label: "Transfers that failed", count: failedTransfers, link: "/admin/transfers", urgent: true },
       { key: "affiliateWithdrawals", label: "Affiliate withdrawals to approve", count: affiliateWithdrawals, link: "/admin/transfers" },
-      { key: "supplierPayouts", label: "Supplier payouts to send", count: supplierPayouts, link: "/admin/suppliers?tab=payouts" },
-      { key: "supplyRequests", label: "Supply requests to review", count: supplyRequests, link: "/admin/suppliers?tab=requests" },
+      { key: "supplierPayouts", label: "Supplier bank payouts to send", count: supplierPayouts, link: "/admin/suppliers?tab=payouts" },
+      { key: "wholesaleDisputes", label: "Wholesale orders with a reported problem", count: wholesaleDisputes, link: "/admin/suppliers?tab=wholesale", urgent: true, hint: "Pay the supplier or refund the vendor." },
       { key: "ads", label: "Advertisements to approve", count: ads, link: "/admin/advertising" },
       { key: "support", label: "Open support requests", count: support, link: "/admin/support" },
       { key: "abuse", label: "Abuse reports to investigate", count: abuse, link: "/admin/risk" },
@@ -143,10 +143,17 @@ exports.getEarnings = async (req, res) => {
     if (req.query.status) filter.status = String(req.query.status).toUpperCase();
     const [rows, total, all] = await Promise.all([
       Settlement.find(filter).sort({ createdAt: -1 }).skip(skip).limit(pageSize)
-        .populate("order", "orderNumber").populate("vendor", "Fullname companyName businessName").lean(),
+        .populate("vendor", "Fullname companyName businessName").lean(),
       Settlement.countDocuments(filter),
       Settlement.find(filter).select("grossAmount commissionAmount developerShare adminShare affiliateShare vendorAffiliateShare gatewayFee netAmount status").lean(),
     ]);
+    // A settlement belongs to a buyer order or to a wholesale (supplier → vendor) order.
+    const orderIds = rows.map((r) => r.order).filter(Boolean);
+    const [retail, wholesale] = await Promise.all([
+      Order.find({ _id: { $in: orderIds } }).select("orderNumber").lean(),
+      WholesaleOrder.find({ _id: { $in: orderIds } }).select("orderNumber").lean(),
+    ]);
+    const orderOf = new Map([...retail.map((o) => [idOf(o), { id: idOf(o), orderNumber: o.orderNumber, kind: "Retail" }]), ...wholesale.map((o) => [idOf(o), { id: idOf(o), orderNumber: o.orderNumber, kind: "Wholesale" }])]);
     const t = { gross: 0, platformFee: 0, developer: 0, affiliates: 0, affiliatesPaidBySellers: 0, gatewayFees: 0, mvecNet: 0, sellers: 0, held: 0, released: 0 };
     for (const s of all) {
       if (["REFUNDED", "CANCELLED"].includes(s.status)) continue;
@@ -159,7 +166,7 @@ exports.getEarnings = async (req, res) => {
     return res.json({
       data: rows.map((s) => ({
         id: idOf(s), reference: s.settlementReference,
-        order: s.order ? { id: idOf(s.order), orderNumber: s.order.orderNumber } : null,
+        order: orderOf.get(idOf(s.order)) || null,
         seller: nameOf(s.vendor), gross: num(s.grossAmount), platformFee: num(s.commissionAmount), rate: s.commissionRate ?? null, gatewayFeePayer: s.gatewayFeePayer,
         developer: num(s.developerShare), affiliate: num(s.affiliateShare), affiliatePaidBySeller: num(s.vendorAffiliateShare),
         gatewayFee: num(s.gatewayFee), mvecNet: num(s.adminShare), sellerNet: num(s.netAmount),

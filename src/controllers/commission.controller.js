@@ -17,8 +17,12 @@ exports.getCommissionRules = async (_req, res) => {
       commission.getSettings(),
     ]);
     const Vendor = require("../models/Vendor");
-    const stores = await Vendor.find({ user: { $in: rules.map((r) => r.targetVendor?._id).filter(Boolean) } }).select("user businessName").lean();
-    const storeOf = new Map(stores.map((v) => [String(v.user), v.businessName]));
+    const targets = rules.map((r) => r.targetVendor?._id).filter(Boolean);
+    const [stores, suppliers] = await Promise.all([
+      Vendor.find({ user: { $in: targets } }).select("user businessName").lean(),
+      require("../models/Supplier").find({ user: { $in: targets } }).select("user businessName").lean(),
+    ]);
+    const storeOf = new Map([...stores, ...suppliers].map((v) => [String(v.user), v.businessName]));
     return res.json({
       success: true,
       count: rules.length,
@@ -104,6 +108,7 @@ exports.previewSplit = async (req, res) => {
       hasAffiliate: req.query.affiliate === "1" || req.query.affiliate === "true",
       gatewayFee: Math.max(0, Number(req.query.gatewayFee) || 0),
       vendorAffiliatePercent: Math.max(0, Number(req.query.sellerAffiliatePercent) || 0),
+      scope: req.query.scope === "WHOLESALE" ? "WHOLESALE" : "RETAIL",
     });
     return res.json({ amount, ...split, rule: split.rule ? { id: String(split.rule._id), name: split.rule.name } : null });
   } catch (error) {

@@ -12,6 +12,10 @@
 //   developerSharePercent     % of the commission paid to the developer
 //   affiliateSharePercent     % of the commission paid to the affiliate
 //   gatewayFeePayer           MVEC (out of the commission) or SELLER (out of the seller's share)
+//   defaultWholesaleCommissionPercent  rate on supplier → vendor orders when no wholesale rule matches
+//
+// Rules have a scope: RETAIL (buyer orders; targetVendor = seller) or
+// WHOLESALE (supplier → vendor orders; targetVendor = supplier).
 //
 // Rules and settings are cached for a few seconds; every change clears the cache.
 const CommissionRule = require("../models/CommissionRule");
@@ -26,6 +30,7 @@ const DEFAULTS = {
   developerSharePercent: DEFAULT_DEVELOPER_SHARE,
   affiliateSharePercent: DEFAULT_AFFILIATE_SHARE,
   gatewayFeePayer: "MVEC",
+  defaultWholesaleCommissionPercent: 0,
 };
 const MAX_RATE = 50;
 const CACHE_MS = 15000;
@@ -53,6 +58,7 @@ async function updateSettings(patch = {}, adminId = null) {
     next[key] = Math.round(v * 100) / 100;
   };
   num("defaultCommissionPercent", MAX_RATE);
+  num("defaultWholesaleCommissionPercent", MAX_RATE);
   num("developerSharePercent", 100);
   num("affiliateSharePercent", 100);
   if (patch.gatewayFeePayer !== undefined) {
@@ -91,13 +97,14 @@ const specificity = (rule, { vendorId, categoryId }) => {
 };
 const SOURCES = { 4: "Seller override for this category", 3: "Seller override", 2: "Category rate", 1: "Default rule" };
 
-/** The commission that applies to a sale by `vendorId` in `categoryId`. */
-async function resolveRate({ vendorId, categoryId }) {
+/** The commission that applies to a sale by `vendorId` (seller, or supplier for wholesale) in `categoryId`. */
+async function resolveRate({ vendorId, categoryId, scope = "RETAIL" }) {
   const ctx = { vendorId: idOf(vendorId), categoryId: idOf(categoryId) };
   const [settings, rules] = await Promise.all([getSettings(), activeRules()]);
   let best = null;
   let bestScore = 0;
   for (const rule of rules) {
+    if ((rule.scope || "RETAIL") !== scope) continue;
     const score = specificity(rule, ctx);
     if (score <= 0) continue;
     const better = !best || score > bestScore
@@ -105,13 +112,13 @@ async function resolveRate({ vendorId, categoryId }) {
         || (rule.priority === best.priority && new Date(rule.updatedAt || rule.createdAt) > new Date(best.updatedAt || best.createdAt))));
     if (better) { best = rule; bestScore = score; }
   }
-  if (!best) return { percent: settings.defaultCommissionPercent, rule: null, source: "Default rate" };
+  if (!best) return { percent: scope === "WHOLESALE" ? settings.defaultWholesaleCommissionPercent : settings.defaultCommissionPercent, rule: null, source: scope === "WHOLESALE" ? "Default wholesale rate" : "Default rate" };
   return { percent: Number(best.rateValue), rule: best, source: SOURCES[bestScore] };
 }
 
 /** Full split for one order line, using the current rules and settings. */
-async function splitFor({ vendorId, categoryId, grossTotal, hasAffiliate, gatewayFee = 0, vendorAffiliatePercent = 0 }) {
-  const [settings, rate] = await Promise.all([getSettings(), resolveRate({ vendorId, categoryId })]);
+async function splitFor({ vendorId, categoryId, grossTotal, hasAffiliate, gatewayFee = 0, vendorAffiliatePercent = 0, scope = "RETAIL" }) {
+  const [settings, rate] = await Promise.all([getSettings(), resolveRate({ vendorId, categoryId, scope })]);
   const split = computeRevenueSplit({
     grossTotal, hasAffiliate, gatewayFee, vendorAffiliatePercent,
     commissionPercent: rate.percent,
@@ -133,19 +140,21 @@ async function validateRule(input, existing = null) {
   const Category = require("../models/Category");
   const User = require("../models/User");
   const ruleType = input.ruleType ?? existing?.ruleType;
+  const scope = input.scope ?? existing?.scope ?? "RETAIL";
+  if (!["RETAIL", "WHOLESALE"].includes(scope)) throw httpError(400, "Choose retail or wholesale.");
   if (!["GLOBAL", "CATEGORY", "VENDOR"].includes(ruleType)) throw httpError(400, "Choose a rule type: default, category or seller.");
   const rateValue = Number(input.rateValue ?? existing?.rateValue);
   if (!Number.isFinite(rateValue) || rateValue < 0 || rateValue > MAX_RATE) throw httpError(400, `The commission must be between 0% and ${MAX_RATE}%.`);
   const targetCategory = input.targetCategory !== undefined ? input.targetCategory || null : idOf(existing?.targetCategory) || null;
   const targetVendor = input.targetVendor !== undefined ? input.targetVendor || null : idOf(existing?.targetVendor) || null;
   if (ruleType === "CATEGORY" && !targetCategory) throw httpError(400, "Choose the category this rate is for.");
-  if (ruleType === "VENDOR" && !targetVendor) throw httpError(400, "Choose the seller this override is for.");
+  if (ruleType === "VENDOR" && !targetVendor) throw httpError(400, scope === "WHOLESALE" ? "Choose the supplier this override is for." : "Choose the seller this override is for.");
   if (targetCategory && !(await Category.exists({ _id: targetCategory }))) throw httpError(400, "That category does not exist.");
-  if (targetVendor && !(await User.exists({ _id: targetVendor, role: { $in: ["vendor", "super_admin"] } }))) throw httpError(400, "That seller does not exist.");
+  if (targetVendor && !(await User.exists({ _id: targetVendor, role: { $in: scope === "WHOLESALE" ? ["supplier"] : ["vendor", "super_admin"] } }))) throw httpError(400, scope === "WHOLESALE" ? "That supplier does not exist." : "That seller does not exist.");
   const priority = Math.round(Number(input.priority ?? existing?.priority ?? 0)) || 0;
   const name = String(input.name ?? existing?.name ?? "").trim() || `${ruleType === "GLOBAL" ? "Default" : ruleType === "CATEGORY" ? "Category" : "Seller"} rate ${rateValue}%`;
   return {
-    name: name.slice(0, 150), ruleType, rateType: "PERCENTAGE", rateValue, priority,
+    name: name.slice(0, 150), ruleType, scope, rateType: "PERCENTAGE", rateValue, priority,
     targetCategory: ruleType === "GLOBAL" ? null : targetCategory,
     targetVendor: ruleType === "VENDOR" ? targetVendor : null,
     targetProduct: null,
