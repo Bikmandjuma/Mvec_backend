@@ -27,10 +27,20 @@ router.post(
   wholesaleController.markShipped
 );
 
-// Escrow hold status transition on payment completion
+// The vendor pays the order; it is held in escrow once the provider confirms.
+router.post(
+  "/orders/:orderId/pay",
+  protect,
+  authorize("vendor", "super_admin"),
+  wholesaleController.payWholesaleOrder
+);
+
+// Manual escrow hold, for an order an admin confirmed was paid outside MVEC
+// (audited). Vendors pay through /pay; nobody else can mark an order paid.
 router.post(
   "/orders/:orderId/hold-escrow",
   protect,
+  authorize("super_admin"),
   wholesaleController.holdEscrow
 );
 

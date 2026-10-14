@@ -160,7 +160,7 @@ exports.getEarnings = async (req, res) => {
       data: rows.map((s) => ({
         id: idOf(s), reference: s.settlementReference,
         order: s.order ? { id: idOf(s.order), orderNumber: s.order.orderNumber } : null,
-        seller: nameOf(s.vendor), gross: num(s.grossAmount), platformFee: num(s.commissionAmount),
+        seller: nameOf(s.vendor), gross: num(s.grossAmount), platformFee: num(s.commissionAmount), rate: s.commissionRate ?? null, gatewayFeePayer: s.gatewayFeePayer,
         developer: num(s.developerShare), affiliate: num(s.affiliateShare), affiliatePaidBySeller: num(s.vendorAffiliateShare),
         gatewayFee: num(s.gatewayFee), mvecNet: num(s.adminShare), sellerNet: num(s.netAmount),
         status: s.status, createdAt: s.createdAt, releasedAt: s.releasedAt,
@@ -351,26 +351,27 @@ exports.getTrust = async (_req, res) => {
 // ─── Platform settings (live, read from the code and environment) ──────────
 exports.getPlatform = async (_req, res) => {
   try {
-    const split = require("../config/revenueSplit");
+    const commission = require("../services/commission.service");
     const { MAX_VENDOR_RATE } = require("../services/affiliateProgram.service");
     const messaging = require("../services/messaging.service");
     const kpay = require("../services/kpay.service");
     const flutterwave = require("../services/flutterwave.service");
     const paypack = require("../services/paypack.service");
     const CommissionRule = require("../models/CommissionRule");
-    const [queued, failed, activeRules] = await Promise.all([
+    const [queued, failed, activeRules, cfg] = await Promise.all([
       Disbursement.countDocuments({ status: { $in: ["QUEUED", "SENT"] } }),
       Disbursement.countDocuments({ status: "FAILED" }),
       CommissionRule.countDocuments({ isActive: true }),
+      commission.getSettings(),
     ]);
     const live = (sandbox) => (sandbox ? "Test mode" : "Live");
     return res.json({
       fees: [
-        { label: "MVEC fee on every sale", value: `${split.TOTAL_PLATFORM_FEE_PERCENT}%`, detail: "Taken from the seller's sale when the buyer pays." },
-        { label: "Developer share", value: `${split.DEVELOPER_PERCENT}%`, detail: "Part of MVEC's fee." },
-        { label: "Affiliate share paid by MVEC", value: `${split.AFFILIATE_PERCENT}%`, detail: "Part of MVEC's fee, only on sales from an affiliate link." },
-        { label: "Affiliate rate a seller can add", value: `0–${MAX_VENDOR_RATE}%`, detail: "Paid by the seller on top, only if they joined the affiliate program." },
-        { label: "Payment provider fees", value: "Deducted from MVEC's fee", detail: "MVEC keeps what is left after developer, affiliate and provider fees." },
+        { label: "Default MVEC commission", value: `${cfg.defaultCommissionPercent}%`, detail: `Used when no category or seller rule matches. ${activeRules} active rule${activeRules === 1 ? "" : "s"}.` },
+        { label: "Developer share", value: `${cfg.developerSharePercent}% of the commission`, detail: "Paid on every sale." },
+        { label: "Affiliate share paid by MVEC", value: `${cfg.affiliateSharePercent}% of the commission`, detail: "Only on sales from an affiliate link." },
+        { label: "Affiliate rate a seller can add", value: `0–${MAX_VENDOR_RATE}% of the sale`, detail: "Paid by the seller on top, only if they joined the affiliate program." },
+        { label: "Payment provider fees paid by", value: cfg.gatewayFeePayer === "SELLER" ? "The seller" : "MVEC", detail: cfg.gatewayFeePayer === "SELLER" ? "Deducted from the seller's share of each sale." : "Deducted from MVEC's commission." },
       ],
       rules: [
         { label: "Time to pay before an order is cancelled", value: "30 minutes" },
@@ -394,7 +395,7 @@ exports.getPlatform = async (_req, res) => {
         { label: "Delivery deadline checks", schedule: "Every 15 minutes" },
       ],
       environment: process.env.NODE_ENV || "development",
-      commissionRules: { active: activeRules, applied: false, note: "Commission rules are stored but not used: every sale uses the fixed fee above." },
+      commissionRules: { active: activeRules, applied: true, note: "Manage rates under Money → Commission rules." },
     });
   } catch (error) {
     return fail(res, error, "platform settings");

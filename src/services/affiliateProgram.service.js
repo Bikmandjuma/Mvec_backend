@@ -3,13 +3,13 @@
 // A product can be promoted by affiliates only when its seller has switched the
 // program on, and (when the seller picked "selected products") the product is
 // one of the chosen ones. The affiliate then earns:
-//   MVEC's share (AFFILIATE_PERCENT, paid out of MVEC's 5% fee)
+//   MVEC's share (a set % of MVEC's commission on that product, see commission.service)
 // + the seller's rate (affiliateRate, paid out of the seller's earnings).
 // The seller's rate is frozen on the order item at checkout, so changing it
 // later never alters orders already placed.
 const Product = require("../models/Product");
 const Vendor = require("../models/Vendor");
-const { AFFILIATE_PERCENT } = require("../config/revenueSplit");
+const commission = require("./commission.service");
 
 const MAX_VENDOR_RATE = 30;
 const PROMOTABLE_STATUSES = ["ACTIVE", "OUT_OF_STOCK"];
@@ -18,13 +18,13 @@ const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const httpError = (status, message) => Object.assign(new Error(message), { statusCode: status });
 const idOf = (v) => String(v?._id || v || "");
 
-/** Program settings in API shape. */
-const settingsOf = (vendor) => ({
+/** Program settings in API shape. platformPercent: MVEC's part on the seller's default rate. */
+const settingsOf = (vendor, platformPercent = 0) => ({
   enabled: Boolean(vendor?.affiliateEnabled),
   ratePercent: Number(vendor?.affiliateRate) || 0,
   scope: vendor?.affiliateScope === "SELECTED" ? "SELECTED" : "ALL",
-  platformPercent: AFFILIATE_PERCENT,
-  totalPercent: round2(AFFILIATE_PERCENT + (Number(vendor?.affiliateRate) || 0)),
+  platformPercent,
+  totalPercent: round2(platformPercent + (Number(vendor?.affiliateRate) || 0)),
   updatedAt: vendor?.affiliateUpdatedAt || null,
 });
 
@@ -34,12 +34,13 @@ const settingsOf = (vendor) => ({
  */
 async function termsFor(productsOrIds) {
   const list = (productsOrIds || []).filter(Boolean);
-  const needLoad = list.filter((p) => typeof p !== "object" || p.affiliateEnabled === undefined || !p.vendor || p.status === undefined);
+  const complete = (p) => typeof p === "object" && p.affiliateEnabled !== undefined && p.vendor && p.status !== undefined && p.category !== undefined;
+  const needLoad = list.filter((p) => !complete(p));
   const loaded = needLoad.length
-    ? await Product.find({ _id: { $in: needLoad.map(idOf) } }).select("vendor status affiliateEnabled")
+    ? await Product.find({ _id: { $in: needLoad.map(idOf) } }).select("vendor status affiliateEnabled category")
     : [];
   const byId = new Map(loaded.map((p) => [idOf(p), p]));
-  const products = list.map((p) => (typeof p === "object" && p.affiliateEnabled !== undefined && p.vendor && p.status !== undefined ? p : byId.get(idOf(p)))).filter(Boolean);
+  const products = list.map((p) => (complete(p) ? p : byId.get(idOf(p)))).filter(Boolean);
 
   const vendorIds = [...new Set(products.map((p) => idOf(p.vendor)))];
   const vendors = vendorIds.length ? await Vendor.find({ user: { $in: vendorIds } }).select("user affiliateEnabled affiliateRate affiliateScope") : [];
@@ -53,7 +54,8 @@ async function termsFor(productsOrIds) {
     else if (!v || !v.affiliateEnabled) reason = "The seller is not running an affiliate program.";
     else if (v.affiliateScope === "SELECTED" && !p.affiliateEnabled) reason = "The seller has not opened this product to affiliates.";
     const vendorRate = reason ? 0 : Number(v.affiliateRate) || 0;
-    out.set(idOf(p), { eligible: !reason, vendorRate, totalPercent: round2(AFFILIATE_PERCENT + vendorRate), reason });
+    const mvec = reason ? 0 : await commission.platformAffiliatePercent({ vendorId: p.vendor, categoryId: p.category });
+    out.set(idOf(p), { eligible: !reason, vendorRate, platformPercent: mvec, totalPercent: round2(mvec + vendorRate), reason });
   }
   return out;
 }
@@ -66,7 +68,8 @@ async function getVendorProgram(vendorUserId) {
   const vendor = await Vendor.findOne({ user: vendorUserId });
   if (!vendor) throw httpError(404, "Complete your store profile (onboarding) before setting up the affiliate program.");
   const selected = await Product.find({ vendor: vendorUserId, affiliateEnabled: true }).select("_id");
-  return { ...settingsOf(vendor), selectedProductIds: selected.map((p) => idOf(p)) };
+  const platformPercent = await commission.platformAffiliatePercent({ vendorId: vendorUserId, categoryId: null });
+  return { ...settingsOf(vendor, platformPercent), selectedProductIds: selected.map((p) => idOf(p)) };
 }
 
 /**

@@ -205,10 +205,11 @@ exports.updateMyProfile = async (req, res) => {
       return res.status(404).json({ message: "Vendor profile not found. Please complete onboarding." });
     }
 
-    const { businessName, description, phone, email, logoUrl, bannerUrl, location, address } = req.body;
+    const { businessName, description, phone, email, logoUrl, bannerUrl, location, address, category } = req.body;
 
     // Editable fields — excludes verificationStatus, ratingAvg, status, commissionRate
     if (businessName !== undefined) vendor.businessName = businessName;
+    if (category !== undefined) vendor.category = String(category || "").slice(0, 120);
     if (description !== undefined) vendor.description = description;
     if (phone !== undefined) vendor.phone = phone;
     if (email !== undefined) vendor.email = email;

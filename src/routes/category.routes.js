@@ -11,9 +11,10 @@ router.get("/:slug", category.getCategoryBySlug);  // GET /api/categories/:slug
 // ─── PROTECTED ROUTES ───────────────────────────────────────────────────────
 router.use(protect);
 
-// Vendors can create categories (needed from product creation form).
-// Staff accounts need the catalog permission to do the same.
-router.post("/", authorize("vendor", "super_admin"), checkStaffPermission("canManageProducts"), category.createCategory);
+// Sellers, suppliers and admins can add a category from any category picker;
+// it then appears in every picker. Seller staff need the catalog permission.
+const sellerStaffCheck = checkStaffPermission("canManageProducts");
+router.post("/", authorize("vendor", "super_admin", "supplier"), (req, res, next) => (req.user.role === "supplier" ? next() : sellerStaffCheck(req, res, next)), category.createCategory);
 
 // Only admins can modify or delete categories
 router.use(authorize("super_admin"));

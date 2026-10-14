@@ -111,7 +111,18 @@ exports.adminUpdateUser = async (req, res) => {
       user.status = normalizedStatus;
     }
 
-    if (role !== undefined) user.role = role;
+    if (role !== undefined && role !== user.role) {
+      // Admins can make an account a courier or an admin (or back to buyer).
+      // Sellers, suppliers and affiliates keep their role: it owns their store/wallet.
+      const ASSIGNABLE = ["buyer", "delivery", "super_admin"];
+      if (String(user._id) === String(req.user._id || req.user.id)) {
+        return res.status(400).json({ message: "You cannot change your own role. Ask another admin." });
+      }
+      if (!ASSIGNABLE.includes(role) || !ASSIGNABLE.includes(user.role)) {
+        return res.status(400).json({ message: "Only buyers, couriers and admins can be switched between those roles. Sellers, suppliers and affiliates keep theirs." });
+      }
+      user.role = role;
+    }
     if (Fullname !== undefined) user.Fullname = Fullname;
     if (email !== undefined) user.email = email;
     if (phone !== undefined) user.phone = phone;

@@ -94,7 +94,17 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
     );
 
     // 5. Generate Pricing Snapshots & Lock Escrow Funds per Vendor Item
-    for (const item of order.items) {
+    // The provider fee is charged once per payment: share it across the lines
+    // by value so it is never counted more than once.
+    const linesTotal = order.items.reduce((sum, it) => sum + (Number(it.price) || 0) * (Number(it.quantity) || 0), 0);
+    let feeLeft = Math.round((Number(gatewayFee) || 0) * 100) / 100;
+    const feeShares = order.items.map((it, i) => {
+      const share = i === order.items.length - 1 ? feeLeft
+        : Math.round(((Number(gatewayFee) || 0) * ((Number(it.price) || 0) * (Number(it.quantity) || 0)) / (linesTotal || 1)) * 100) / 100;
+      feeLeft = Math.round((feeLeft - share) * 100) / 100;
+      return share;
+    });
+    for (const [lineIndex, item] of order.items.entries()) {
       // Attribution is per order item: only promoted items earn a commission.
       const aff = affiliateAttribution.itemAffiliate(order, item);
       const hasAffiliate = !!aff;
@@ -105,7 +115,7 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
         item,
         session,
         hasAffiliate,
-        gatewayFee,
+        gatewayFee: feeShares[lineIndex] || 0,
         // Seller's own affiliate rate, frozen on the item at checkout.
         vendorAffiliatePercent: hasAffiliate ? Number(item.affiliateVendorRate) || 0 : 0,
       });
@@ -236,6 +246,11 @@ exports.settleGatewayPayment = async ({ payment, provider, status, amount, fee =
 exports.fulfilStandalonePayment = async (payment) => {
   if (payment.purpose === "BUYER_PREMIUM" && payment.user) {
     await require("./buyerSubscription.service").activatePremium({ userId: payment.user, paymentId: payment._id });
+  }
+  // A vendor paid a wholesale order (reference WHS-<orderId>-…): lock it in escrow.
+  if (payment.purpose === "WHOLESALE") {
+    const orderId = String(payment.transactionReference || "").split("-")[1];
+    await require("./wholesale.service").markWholesalePaid(orderId, payment);
   }
 };
 
