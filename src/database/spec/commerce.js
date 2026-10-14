@@ -22,7 +22,7 @@ const staffPayout = (ownerField, collection, model, table) => ({
     payoutNumber: str({ len: 60, required: true, unique: true }),
     [ownerField]: ref("users", { required: true, index: true, onDelete: "CASCADE" }),
     amount: money({ required: true }),
-    paymentMethod: en(["MOMO", "AIRTEL"], { default: "MOMO" }),
+    paymentMethod: en(["MOMO", "AIRTEL", "BANK"], { default: "MOMO" }),
     ...accountDetails("accountDetails"),
     status: en(PAYOUT_STATUS, { default: "PENDING", index: true }),
     transactionReference: str({ len: 120 }),
@@ -209,6 +209,9 @@ module.exports = [
       // Part of affiliateShare paid by the seller (their own affiliate rate).
       vendorAffiliateShare: money({ required: true, default: 0 }),
       gatewayFee: money({ required: true, default: 0 }),
+      // Commission % applied (from the matching rule) and who bore the provider fee.
+      commissionRate: num(),
+      gatewayFeePayer: en(["MVEC", "SELLER"], { default: "MVEC", required: true }),
       affiliateUser: ref("users", { fk: false }),
       status: en(["HELD", "RELEASED", "ADMIN_HOLD", "REFUNDED", "CANCELLED"], { default: "HELD", required: true, index: true }),
       releasedAt: date(),
@@ -310,6 +313,8 @@ module.exports = [
     fields: {
       name: str({ len: 150, required: true }),
       ruleType: en(["GLOBAL", "CATEGORY", "VENDOR", "PRODUCT"], { required: true }),
+      // RETAIL: sales to buyers. WHOLESALE: supplier → vendor orders (targetVendor is then the supplier).
+      scope: en(["RETAIL", "WHOLESALE"], { default: "RETAIL", required: true }),
       targetCategory: ref("categories", { fk: false }),
       targetVendor: ref("users", { fk: false }),
       targetProduct: ref("products", { fk: false }),

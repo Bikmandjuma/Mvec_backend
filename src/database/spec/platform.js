@@ -118,6 +118,34 @@ module.exports = [
   subscription("vendor", "MVEC-SUB", "Subscription", "subscriptions", "subscriptions", false),
   subscription("buyer", "MVEC-BSUB", "BuyerSubscription", "buyer_subscriptions", "buyersubscriptions", true),
   {
+    // Marketplace-wide settings an admin can change (commission shares,
+    // provider fee payer…). One row per key; read through services/commission.service.js.
+    model: "PlatformSetting", table: "platform_settings", collection: "platformsettings",
+    fields: {
+      settingKey: str({ len: 80, required: true, unique: true }),
+      value: json(null),
+      updatedBy: ref("users", { fk: false }),
+    },
+  },
+  {
+    // Every change an administrator makes (verify, suspend, refund, approve…),
+    // written automatically by middleware/adminAudit.js.
+    model: "AuditLog", table: "audit_logs", collection: "auditlogs", timestamps: "createdAt",
+    indexes: [{ fields: ["createdAt"] }, { fields: ["targetType", "targetId"] }],
+    fields: {
+      actor: ref("users", { fk: false, index: true }),
+      actorName: str({ len: 150, default: "" }),
+      action: str({ len: 200, required: true }),
+      method: str({ len: 10, default: "" }),
+      path: str({ len: 300, default: "" }),
+      targetType: str({ len: 60, default: "" }),
+      targetId: str({ len: 60, default: "" }),
+      statusCode: int({ default: 200 }),
+      detail: json(null),
+      ip: str({ len: 60, default: "" }),
+    },
+  },
+  {
     model: "Notification", table: "notifications", collection: "notifications",
     indexes: [{ fields: ["recipientId", "isRead", "createdAt"] }],
     fields: {
@@ -177,6 +205,7 @@ module.exports = [
       email: str({ len: 190, required: true, lowercase: true }),
       category: str({ len: 120, default: "" }),
       verificationStatus: en(["UNVERIFIED", "PENDING", "VERIFIED", "REJECTED"], { default: "UNVERIFIED", required: true }),
+      verificationNote: str({ len: 500, default: "" }),
       ratingAvg: num({ required: true, default: 0 }),
       status: en(["ACTIVE", "SUSPENDED", "BLOCKED", "UNDER_REVIEW"], { default: "ACTIVE", required: true }),
       location: json(null),
@@ -512,18 +541,59 @@ module.exports = [
       shippedAt: date(),
       deliveredAt: date(),
       confirmedAt: date(),
+      paidAt: date(),
+      // Set when the order came from an accepted quote (no catalog products).
+      quote: ref("quotes", { fk: false }),
+      category: str({ len: 120, default: "" }),
+      stockReserved: bool(false),
+      cancelledBy: str({ len: 20, default: "" }),
+      cancelReason: str({ len: 300, default: "" }),
+      disputeReason: text({ apiDefault: "" }),
     },
     children: {
       items: {
         model: "WholesaleOrderItem", table: "wholesale_order_items", parentKey: "wholesaleOrderId",
         fields: {
-          product: ref("wholesale_products", { required: true, fk: false }),
+          product: ref("wholesale_products", { fk: false }), // empty for quoted items
+          unit: str({ len: 40, default: "piece" }),
           productName: str({ required: true }),
           unitPrice: money({ required: true }),
           quantity: int({ required: true }),
           moq: int({ required: true }),
         },
       },
+    },
+  },
+  {
+    // A vendor asks suppliers for goods: "50 bags of rice by Friday".
+    model: "QuoteRequest", table: "quote_requests", collection: "quoterequests",
+    indexes: [{ fields: ["status", "neededBy"] }],
+    fields: {
+      reference: str({ len: 40, required: true, unique: true }),
+      vendor: ref("users", { required: true, index: true, fk: false }),
+      category: str({ len: 120, required: true, index: true }),
+      lines: json([]), // [{ product, units, unit, targetPrice }]
+      neededBy: date({ required: true }),
+      deliverTo: str({ len: 200, default: "" }),
+      note: text({ apiDefault: "" }),
+      status: en(["OPEN", "AWARDED", "CANCELLED", "EXPIRED"], { default: "OPEN", required: true, index: true }),
+      acceptedQuote: ref("quotes", { fk: false }),
+      wholesaleOrder: ref("wholesale_orders", { fk: false }),
+    },
+  },
+  {
+    // A supplier's offer for one quote request.
+    model: "Quote", table: "quotes", collection: "quotes",
+    indexes: [{ fields: ["requestId", "supplierId"], unique: true }],
+    fields: {
+      request: ref("quote_requests", { required: true, index: true, fk: false }),
+      supplier: ref("users", { required: true, index: true, fk: false }), // supplier owner account
+      lines: json([]), // [{ product, units, unit, unitPrice }]
+      totalAmount: money({ required: true, default: 0 }),
+      deliveryDays: int({ required: true, default: 1 }),
+      note: text({ apiDefault: "" }),
+      validUntil: date(),
+      status: en(["SUBMITTED", "ACCEPTED", "DECLINED", "WITHDRAWN"], { default: "SUBMITTED", required: true, index: true }),
     },
   },
 ];

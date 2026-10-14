@@ -64,6 +64,8 @@ app.use(express.json({
 app.use(morgan("dev"));
 // Plain-language errors with a support reference on every 5xx.
 app.use(require("./src/middleware/friendlyErrors"));
+// Every successful change an administrator makes goes to the audit log.
+app.use(require("./src/middleware/adminAudit"));
 
 // Uploaded product images are returned as public URLs for storefront display.
 app.use("/uploads", express.static(require("path").resolve(__dirname, "uploads")));
@@ -71,6 +73,7 @@ app.use("/uploads", express.static(require("path").resolve(__dirname, "uploads")
   
 app.use("/api/auth", require("./src/routes/auth.routes"));
 app.use("/api/admin", require("./src/routes/admin.dashboard.routes"));
+app.use("/api/admin", require("./src/routes/admin.ops.routes"));
 app.use("/api/uploads", require("./src/routes/upload.routes"));
 app.use("/api/search", require("./src/routes/search.routes"));
 app.use("/api/products", require("./src/routes/product.routes"));
@@ -87,6 +90,7 @@ app.use("/api/payments", require("./src/routes/payment.routes"));
 app.use("/api/admin", require("./src/routes/admin.financial.routes"));
 app.use("/api/admin", require("./src/routes/admin.commission.routes"));
 app.use("/api/wholesale", require("./src/routes/wholesale.routes"));
+app.use("/api/quotes", require("./src/routes/quote.routes"));
 app.use("/api/disputes", require("./src/routes/dispute.routes"));
 app.use("/api/abuse-reports", require("./src/routes/abuseReport.routes"));
 app.use("/api/conversations", require("./src/routes/conversation.routes"));

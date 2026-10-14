@@ -135,7 +135,7 @@ async function initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService
  * to an order (used by the mobile app for top-ups and manual collections).
  * Orders are always paid with an orderId so the server sets the amount.
  */
-async function initiateStandalonePayment({ amount, phoneNumber, userId, gatewayService, explicitProvider = null, purpose = null }) {
+async function initiateStandalonePayment({ amount, phoneNumber, userId, gatewayService, explicitProvider = null, purpose = null, reference = null }) {
   const value = Number(amount);
   if (!Number.isInteger(value) || value <= 0) {
     throw Object.assign(new Error("Enter an amount in whole Rwandan francs, for example 1000."), { statusCode: 400 });
@@ -152,7 +152,7 @@ async function initiateStandalonePayment({ amount, phoneNumber, userId, gatewayS
   }
   const provider = explicitProvider || phoneInfo.provider;
   const paymentMethod = provider === "MTN" ? "MOMO" : "AIRTEL";
-  const transactionRef = `PAY-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+  const transactionRef = reference || `PAY-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 
   const payment = await Payment.create({
     user: userId,

@@ -163,6 +163,10 @@ exports.initBackgroundWorkers = () => {
   // Run 3-Hour SLA audit every 15 minutes: "*/15 * * * *"
   cron.schedule("*/15 * * * *", () => {
     enforceFulfillmentSLA();
+    // Wholesale: expire unpaid orders, refund unshipped ones, pay suppliers for
+    // shipped orders nobody complained about, and close expired quote requests.
+    require("../services/wholesale.service").runAutomations().catch((err) => console.error("[Wholesale Worker] failed:", err.message));
+    require("../services/quote.service").expireRequests().catch((err) => console.error("[Quote Worker] failed:", err.message));
   });
 
   console.log("🚀 [Background Workers] SLA & Expiry Cron Jobs Initialized.");

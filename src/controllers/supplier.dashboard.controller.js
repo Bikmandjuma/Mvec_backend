@@ -3,7 +3,6 @@ const bcrypt = require("bcryptjs");
 const User = require("../models/User");
 const crypto = require("crypto");
 const Supplier = require("../models/Supplier");
-const SupplierSupplyRequest = require("../models/SupplierSupplyRequest");
 const SupplierTeamMember = require("../models/SupplierTeamMember");
 const SupplierReview = require("../models/SupplierReview");
 const WholesaleOrder = require("../models/WholesaleOrder");
@@ -178,6 +177,10 @@ function payoutJson(payout) {
     destination: payout.payoutDetails?.accountNumber,
     note: payout.note || "",
     arrivedAt: payout.processedAt || null,
+    payoutNumber: payout.payoutNumber,
+    accountName: payout.payoutDetails?.accountName || "",
+    bankName: payout.payoutDetails?.bankName || "",
+    rejectionReason: payout.rejectionReason || "",
   };
 }
 
@@ -223,7 +226,7 @@ function ledgerOrderEntries(orders) {
 
 exports.getFinanceSummary = async (req, res) => {
   try {
-    const userId = req.user._id;
+    const userId = req.supplierUserId;
     const [orders, wallet, payouts, pendingPayouts] = await Promise.all([
       WholesaleOrder.find({ supplier: userId }).sort({ createdAt: -1 }).lean(),
       VendorWallet.findOne({ vendor: userId }).lean(),
@@ -272,8 +275,8 @@ exports.getFinanceLedger = async (req, res) => {
     const limit = limitFrom(req.query, 50, 200);
     const kind = req.query.kind ? String(req.query.kind).toUpperCase() : null;
     const [orders, payouts] = await Promise.all([
-      WholesaleOrder.find({ supplier: req.user._id }).sort({ createdAt: -1 }).lean(),
-      Payout.find({ vendor: req.user._id }).sort({ createdAt: -1 }).lean(),
+      WholesaleOrder.find({ supplier: req.supplierUserId }).sort({ createdAt: -1 }).lean(),
+      Payout.find({ vendor: req.supplierUserId }).sort({ createdAt: -1 }).lean(),
     ]);
     const rows = ledgerOrderEntries(orders);
     for (const payout of payouts) {
@@ -300,7 +303,7 @@ exports.getFinanceLedger = async (req, res) => {
 
 exports.getPayouts = async (req, res) => {
   try {
-    const payouts = await Payout.find({ vendor: req.user._id })
+    const payouts = await Payout.find({ vendor: req.supplierUserId })
       .sort({ createdAt: -1 })
       .limit(limitFrom(req.query, 30))
       .lean();
@@ -335,19 +338,19 @@ exports.requestPayout = async (req, res) => {
     let created;
     await session.withTransaction(async () => {
       const wallet = await VendorWallet.findOneAndUpdate(
-        { vendor: req.user._id, availableBalance: { $gte: amount } },
+        { vendor: req.supplierUserId, availableBalance: { $gte: amount } },
         { $inc: { availableBalance: -amount } },
         { new: true, session },
       );
       if (!wallet) {
-        const current = await VendorWallet.findOne({ vendor: req.user._id }).session(session);
+        const current = await VendorWallet.findOne({ vendor: req.supplierUserId }).session(session);
         const available = current?.availableBalance || 0;
         const error = new Error(`Insufficient available balance. Available: ${available} RWF.`);
         error.statusCode = 400;
         throw error;
       }
       const [payout] = await Payout.create([{
-        vendor: req.user._id,
+        vendor: req.supplierUserId,
         payoutNumber: `SUP-${Date.now()}-${crypto.randomBytes(3).toString("hex").toUpperCase()}`,
         amount,
         payoutMethod,
@@ -361,7 +364,26 @@ exports.requestPayout = async (req, res) => {
       }], { session });
       created = payout;
     });
-    return res.status(201).json({ payout: payoutJson(created) });
+    // Mobile money is sent automatically (like seller withdrawals); a failed
+    // transfer returns the money to the balance. Bank transfers go to an admin.
+    if (payoutMethod === "MOMO" || payoutMethod === "AIRTEL") {
+      await Payout.updateOne({ _id: created._id }, { $set: { status: "PROCESSING" } });
+      await require("../services/disbursement.service").queue({
+        kind: "VENDOR_PAYOUT", recipient: req.supplierUserId, phone: payoutDestination, amount,
+        vendorPayout: created._id, idempotencyKey: `supplier-payout:${created._id}`,
+      });
+      const fresh = await Payout.findById(created._id).lean();
+      return res.status(201).json({
+        message: fresh?.status === "PAID" ? `${amount.toLocaleString("en-RW")} RWF was sent to ${payoutDestination}.` : `Sending ${amount.toLocaleString("en-RW")} RWF to ${payoutDestination}. You will get a message when it arrives.`,
+        payout: payoutJson(fresh || created),
+      });
+    }
+    require("../services/notification.service").adminAlert({
+      title: `Supplier bank payout to send: ${amount.toLocaleString("en-RW")} RWF`,
+      message: `${req.user.Fullname || "A supplier"} asked to be paid to ${payoutDestination}.`,
+      link: "/admin/suppliers?tab=payouts",
+    }).catch(() => {});
+    return res.status(201).json({ message: "Bank payout requested. MVEC sends it and you get a message when it is done.", payout: payoutJson(created) });
   } catch (error) {
     return sendError(res, error);
   } finally {
@@ -373,7 +395,7 @@ exports.getAnalytics = async (req, res) => {
   try {
     const { range, start, end } = analyticsWindow(String(req.query.range || "30d"));
     const orders = await WholesaleOrder.find({
-      supplier: req.user._id,
+      supplier: req.supplierUserId,
       status: { $nin: ["PENDING_PAYMENT", "CANCELLED"] },
       createdAt: { $gte: new Date(start.getTime() - (end.getTime() - start.getTime())), $lte: end },
     })
@@ -388,7 +410,7 @@ exports.getAnalytics = async (req, res) => {
 exports.getDeliveries = async (req, res) => {
   try {
     const orders = await WholesaleOrder.find({
-      supplier: req.user._id,
+      supplier: req.supplierUserId,
       status: { $nin: ["PENDING_PAYMENT", "CANCELLED"] },
     })
       .populate("vendor", "Fullname companyName")
@@ -404,7 +426,7 @@ exports.getDeliveries = async (req, res) => {
 exports.getSettlements = async (req, res) => {
   try {
     const orders = await WholesaleOrder.find({
-      supplier: req.user._id,
+      supplier: req.supplierUserId,
       status: { $nin: ["PENDING_PAYMENT", "CANCELLED"] },
     }).sort({ createdAt: -1 }).limit(limitFrom(req.query, 60)).lean();
     const settlements = [];
@@ -449,7 +471,7 @@ exports.getSettlements = async (req, res) => {
 exports.getDeliverySummary = async (req, res) => {
   try {
     const orders = await WholesaleOrder.find({
-      supplier: req.user._id,
+      supplier: req.supplierUserId,
       status: { $nin: ["PENDING_PAYMENT", "CANCELLED"] },
     }).lean();
     const now = new Date();
@@ -477,160 +499,20 @@ exports.getDeliverySummary = async (req, res) => {
   }
 };
 
-exports.getSupplyProcess = (_req, res) => res.json({
-  steps: [
-    { stage: "request", youDo: "Choose the requested goods, quantities and required date.", mvecDoes: "Records the request for supplier operations review.", timeframe: "About 2 minutes" },
-    { stage: "review", youDo: "Provide details requested by the category manager.", mvecDoes: "Reviews availability and request details.", timeframe: "Pending review" },
-    { stage: "approval", youDo: "Review the quote before accepting it.", mvecDoes: "Provides pricing and terms when available.", timeframe: "Pending review" },
-    { stage: "sourcing", youDo: "Coordinate sourcing details with MVEC.", mvecDoes: "Updates the request as it is processed.", timeframe: "Depends on availability" },
-    { stage: "dispatch", youDo: "Confirm when the delivery can be received.", mvecDoes: "Updates dispatch information when available.", timeframe: "Depends on fulfilment" },
-    { stage: "receiving", youDo: "Inspect and confirm receipt of the goods.", mvecDoes: "Records the completed supply request.", timeframe: "After delivery" },
-  ],
-});
-
-exports.getSupplyRequests = async (req, res) => {
-  try {
-    const supplier = await findSupplier(req.user._id);
-    const requests = await SupplierSupplyRequest.find({ supplier: supplier._id })
-      .sort({ createdAt: -1 })
-      .limit(limitFrom(req.query, 40))
-      .lean();
-    return res.json({ requests });
-  } catch (error) {
-    return sendError(res, error);
-  }
-};
-
-exports.createSupplyRequest = async (req, res) => {
-  try {
-    const supplier = await findSupplier(req.user._id);
-    const { lines, neededBy } = req.body;
-    if (!Array.isArray(lines) || lines.length === 0) {
-      return res.status(400).json({ message: "Add at least one item to the request." });
-    }
-    const neededDate = new Date(neededBy);
-    if (!neededBy || Number.isNaN(neededDate.getTime()) || neededDate < new Date(new Date().setHours(0, 0, 0, 0))) {
-      return res.status(400).json({ message: "Choose a valid needed-by date from today onwards." });
-    }
-    for (const line of lines) {
-      if (!String(line.product || "").trim() || !Number.isInteger(Number(line.units)) || Number(line.units) < 1 ||
-          !Number.isFinite(Number(line.unitPrice)) || Number(line.unitPrice) < 0 || !String(line.unit || "").trim()) {
-        return res.status(400).json({ message: "Each request line needs an item, positive quantity, unit, and non-negative unit price." });
-      }
-    }
-    const createdAt = new Date();
-    const request = await SupplierSupplyRequest.create({
-      supplier: supplier._id,
-      reference: `SR-${Date.now()}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`,
-      lines,
-      neededBy: neededDate,
-      note: String(req.body.note || "").trim(),
-      events: [{ at: createdAt, title: "Request submitted", detail: "Submitted by the supplier for review." }],
-    });
-    return res.status(201).json({ request });
-  } catch (error) {
-    return sendError(res, error);
-  }
-};
-
-exports.cancelSupplyRequest = async (req, res) => {
-  try {
-    const supplier = await findSupplier(req.user._id);
-    const request = await SupplierSupplyRequest.findOne({ _id: req.params.id, supplier: supplier._id });
-    if (!request) return res.status(404).json({ message: "Supply request not found." });
-    if (!["SUBMITTED", "UNDER_REVIEW", "SOURCING"].includes(request.status)) {
-      return res.status(409).json({ message: `A ${request.status.toLowerCase()} request cannot be withdrawn.` });
-    }
-    const reason = String(req.body.reason || "").trim();
-    request.status = "CANCELLED";
-    request.decision = reason || "Withdrawn by the supplier.";
-    request.events.push({ title: "Request withdrawn", detail: reason || "Withdrawn by the supplier." });
-    await request.save();
-    return res.json({ request });
-  } catch (error) {
-    return sendError(res, error);
-  }
-};
-
-exports.resubmitSupplyRequest = async (req, res) => {
-  try {
-    const supplier = await findSupplier(req.user._id);
-    const previous = await SupplierSupplyRequest.findOne({ _id: req.params.id, supplier: supplier._id });
-    if (!previous) return res.status(404).json({ message: "Supply request not found." });
-    if (previous.status !== "CANCELLED") {
-      return res.status(409).json({ message: "Only withdrawn requests can be resubmitted." });
-    }
-    const now = new Date();
-    const request = await SupplierSupplyRequest.create({
-      supplier: supplier._id,
-      reference: `SR-${Date.now()}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`,
-      lines: previous.lines,
-      neededBy: previous.neededBy,
-      note: previous.note,
-      events: [{ at: now, title: "Request resubmitted", detail: `Resubmitted from ${previous.reference}.` }],
-    });
-    return res.status(201).json({ request });
-  } catch (error) {
-    return sendError(res, error);
-  }
-};
-
-exports.adminGetSupplyRequests = async (req, res) => {
-  try {
-    const requests = await SupplierSupplyRequest.find()
-      .populate({ path: "supplier", select: "businessName user", populate: { path: "user", select: "Fullname email" } })
-      .sort({ createdAt: -1 })
-      .limit(limitFrom(req.query, 50))
-      .lean();
-    return res.json({ requests });
-  } catch (error) {
-    return sendError(res, error);
-  }
-};
-
-exports.adminUpdateSupplyRequest = async (req, res) => {
-  try {
-    const request = await SupplierSupplyRequest.findById(req.params.id);
-    if (!request) return res.status(404).json({ message: "Supply request not found." });
-    const transitions = {
-      SUBMITTED: ["UNDER_REVIEW", "APPROVED", "REJECTED"],
-      UNDER_REVIEW: ["APPROVED", "REJECTED"],
-      APPROVED: ["SOURCING", "IN_TRANSIT"],
-      SOURCING: ["IN_TRANSIT", "REJECTED"],
-      IN_TRANSIT: ["RECEIVED"],
-      RECEIVED: [],
-      REJECTED: [],
-      CANCELLED: [],
-    };
-    const status = String(req.body.status || "").toUpperCase();
-    if (!transitions[request.status]?.includes(status)) {
-      return res.status(409).json({ message: `Cannot change a ${request.status} request to ${status || "an unspecified status"}.` });
-    }
-    const decision = String(req.body.decision || "").trim();
-    request.status = status;
-    if (decision) request.decision = decision;
-    request.events.push({
-      title: `Request ${status.toLowerCase().replaceAll("_", " ")}`,
-      detail: decision || "Updated by supplier operations.",
-    });
-    await request.save();
-    return res.json({ request });
-  } catch (error) {
-    return sendError(res, error);
-  }
-};
-
 exports.adminGetPayouts = async (req, res) => {
   try {
     const supplierUserIds = await Supplier.distinct("user");
     const payouts = await Payout.find({
       vendor: { $in: supplierUserIds },
       status: { $in: pendingPayoutStatuses },
+      payoutMethod: "BANK", // mobile money payouts are sent automatically
     })
       .sort({ createdAt: 1 })
       .limit(limitFrom(req.query, 50))
       .lean();
-    return res.json({ payouts: payouts.map(payoutJson) });
+    const suppliers = await Supplier.find({ user: { $in: payouts.map((p) => p.vendor) } }).select("user businessName").lean();
+    const names = new Map(suppliers.map((x) => [String(x.user), x.businessName]));
+    return res.json({ payouts: payouts.map((p) => ({ ...payoutJson(p), supplierName: names.get(String(p.vendor)) || "" })) });
   } catch (error) {
     return sendError(res, error);
   }
@@ -646,6 +528,11 @@ exports.adminUpdatePayout = async (req, res) => {
     let updated;
     await session.withTransaction(async () => {
       const payout = await Payout.findById(req.params.id).session(session);
+      if (payout && payout.payoutMethod !== "BANK") {
+        const error = new Error("Mobile money payouts are sent automatically. See Refunds & Withdrawals if one failed.");
+        error.statusCode = 409;
+        throw error;
+      }
       if (!payout || !payout.payoutNumber.startsWith("SUP-")) {
         const error = new Error("Supplier payout request not found.");
         error.statusCode = 404;
@@ -679,6 +566,12 @@ exports.adminUpdatePayout = async (req, res) => {
       payout.status = status;
       await payout.save({ session });
       updated = payout;
+    });
+    const words = { PROCESSING: "is being sent", PAID: "was sent", REJECTED: "was declined", FAILED: "failed and the money is back in your balance" };
+    await require("../services/notification.service").supplierUpdate(updated.vendor, {
+      title: `Payout ${updated.payoutNumber} ${words[status]}`,
+      message: updated.rejectionReason || "",
+      link: "/supplier/payments",
     });
     return res.json({ payout: payoutJson(updated) });
   } catch (error) {

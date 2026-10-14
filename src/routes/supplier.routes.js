@@ -4,7 +4,17 @@ const supplier = require("../controllers/supplier.controller");
 const dashboard = require("../controllers/supplier.dashboard.controller");
 const { protect, authorize, requireOnboarded } = require("../middleware/auth.middleware");
 const { checkSupplierPermission } = require("../middleware/supplierTeam.middleware");
-const requireSupplier = [protect, authorize("supplier")];
+// Team members act for their supplier: req.supplierUserId is always the owner's account.
+const resolveSupplierOwner = async (req, res, next) => {
+  try {
+    const owner = await require("../utils/accountOwner.util").supplierOwnerOf(req.user);
+    req.supplierUserId = owner ? owner.userId : String(req.user._id);
+    return next();
+  } catch (error) {
+    return next(error);
+  }
+};
+const requireSupplier = [protect, authorize("supplier"), resolveSupplierOwner];
 
 // ─── PUBLIC ROUTES ──────────────────────────────────────────────────────────
 router.get("/", supplier.getSuppliers);                    // GET /api/suppliers?q=&location=&page=
@@ -30,11 +40,6 @@ router.get("/me/deliveries", ...requireSupplier, dashboard.getDeliveries);
 router.get("/me/settlements", ...requireSupplier, dashboard.getSettlements);
 router.get("/me/delivery/summary", ...requireSupplier, dashboard.getDeliverySummary);
 
-router.get("/me/supply-requests/process", ...requireSupplier, dashboard.getSupplyProcess);
-router.get("/me/supply-requests", ...requireSupplier, dashboard.getSupplyRequests);
-router.post("/me/supply-requests", ...requireSupplier, checkSupplierPermission("supply"), dashboard.createSupplyRequest);
-router.post("/me/supply-requests/:id/cancel", ...requireSupplier, checkSupplierPermission("supply"), dashboard.cancelSupplyRequest);
-router.post("/me/supply-requests/:id/resubmit", ...requireSupplier, checkSupplierPermission("supply"), dashboard.resubmitSupplyRequest);
 
 router.get("/me/team", ...requireSupplier, dashboard.getTeam);
 router.get("/me/team/summary", ...requireSupplier, dashboard.getTeamSummary);

@@ -101,6 +101,8 @@ exports.lockPaymentInEscrow = async ({
         affiliateShare: affShare,
         vendorAffiliateShare: vendorAffShare,
         gatewayFee: gwFee,
+        commissionRate: split ? Number(split.commissionRate ?? split.commissionRateValue) || null : null,
+        gatewayFeePayer: split?.gatewayFeePayer === "SELLER" ? "SELLER" : "MVEC",
         affiliateUser: affiliateUserId,
         status: "HELD",
       },
@@ -286,6 +288,19 @@ exports.releaseEscrowToVendor = async ({ settlementId, session, adminUserId = nu
     const gwAccount = await getOrCreateLedgerAccount({ accountType: "GATEWAY_FEES", session });
     gwAccount.balance += gwFee;
     await gwAccount.save({ session });
+    // When the seller bears the provider fee it leaves escrow on its own line
+    // (gross = seller net + commission + seller-paid affiliate share + this fee).
+    if (settlement.gatewayFeePayer === "SELLER") {
+      await LedgerEntry.create([{
+        transactionReference: `MVEC-GWFEE-${Date.now()}`,
+        debitAccount: escrowAccount._id,
+        creditAccount: gwAccount._id,
+        amount: gwFee,
+        entryType: "PLATFORM_COMMISSION_DEDUCTION",
+        relatedOrder: settlement.order,
+        description: `Payment provider fee paid by the seller for settlement ${settlement.settlementReference}`,
+      }], { session });
+    }
   }
 
   settlement.status = "RELEASED";
