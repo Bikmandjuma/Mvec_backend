@@ -42,6 +42,46 @@ const orderLink = (order) => `/orders/${idOf(order)}`;
 module.exports = {
   notify,
 
+  // Something is waiting for an administrator (shown in the bell and the dashboard queue).
+  async adminAlert({ title, message = "", link = "/admin" }) {
+    for (const adminId of await adminIds()) await notify(adminId, { type: "ADMIN", title, message, link });
+  },
+
+  // A seller or supplier sent their profile for review: tell the admins.
+  async profileSubmitted({ kind, name, resubmitted }) {
+    const store = kind === "supplier" ? "supplier" : "seller";
+    for (const adminId of await adminIds()) {
+      await notify(adminId, {
+        type: "ADMIN",
+        title: `${resubmitted ? "Updated" : "New"} ${store} profile to verify: ${name}`,
+        message: `Review the profile and approve or reject it so the ${store} can start working.`,
+        link: kind === "supplier" ? "/admin/suppliers" : "/admin/vendors",
+      });
+    }
+  },
+
+  // MVEC verified or rejected a seller/supplier profile.
+  async verificationDecision(userId, { kind, name, decision, reason }) {
+    const store = kind === "supplier" ? "supplier account" : "store";
+    const approved = decision === "VERIFIED";
+    const text = approved
+      ? `Good news: MVEC verified your ${store} ${name}. You now show as verified to buyers${kind === "supplier" ? " and vendors" : ""}.`
+      : `MVEC could not verify your ${store} ${name}. Reason: ${reason} Update your profile and submit it again.`;
+    await notify(userId, {
+      type: "ADMIN",
+      title: approved ? `Your ${store} is verified` : `Your ${store} needs changes`,
+      message: text,
+      link: kind === "supplier" ? "/supplier/settings" : "/vendor",
+      sms: text,
+      email: text,
+    });
+  },
+
+  // A supply request or supplier payout moved: tell the supplier.
+  async supplierUpdate(userId, { title, message, link }) {
+    await notify(userId, { type: "ADMIN", title, message, link });
+  },
+
   async manualRefundNeeded(order, disbursement) {
     for (const adminId of await adminIds()) {
       await notify(adminId, {
@@ -245,14 +285,14 @@ module.exports = {
     });
   },
 
-  async vendorPayout(vendorId, { amount, status }) {
+  async vendorPayout(vendorId, { amount, status, supplier = false }) {
     await notify(vendorId, {
       type: "PAYOUT",
       title: status === "PAID" ? "Withdrawal sent" : "Withdrawal failed",
       message: status === "PAID"
         ? `${money(amount)} was sent to your mobile money.`
         : `The ${money(amount)} transfer failed and the amount is back in your balance. Check your number and try again.`,
-      link: "/vendor/payouts",
+      link: supplier ? "/supplier/payments" : "/vendor/payouts",
       sms: status === "PAID" ? `MVEC: your ${money(amount)} withdrawal was sent to your mobile money.` : undefined,
     });
   },

@@ -30,6 +30,11 @@ exports.protect = async (req, res, next) => {
         return res.status(401).json({ message: "User no longer exists" });
       }
 
+      // A blocked or suspended account loses access at once, not when its token expires.
+      if (["BLOCK", "BLOCKED", "SUSPEND", "SUSPENDED"].includes(String(req.user.status || "ACTIVE").toUpperCase())) {
+        return res.status(403).json({ message: "Your account is blocked or suspended. Contact MVEC support.", code: "ACCOUNT_BLOCKED" });
+      }
+
       // Sessions created before the latest password change are revoked.
       if (issuedBeforePasswordChange(decoded, req.user)) {
         return res.status(401).json({ message: "Your password was changed. Please log in again." });

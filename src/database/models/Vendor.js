@@ -27,6 +27,8 @@ module.exports = (sequelize) => {
     affiliateRate: { type: DataTypes.DECIMAL(5, 2), allowNull: false, defaultValue: 0 },
     affiliateScope: { type: DataTypes.ENUM("ALL", "SELECTED"), allowNull: false, defaultValue: "ALL" },
     affiliateUpdatedAt: { type: DataTypes.DATE, allowNull: true },
+    // Why MVEC rejected the profile (shown to the seller so they can fix it).
+    verificationNote: { type: DataTypes.STRING(500), allowNull: true, defaultValue: "" },
   }, {
     tableName: "vendors",
     timestamps: true,

@@ -854,13 +854,15 @@ class AffiliateService {
     ]);
     const byUser = new Map(vendors.map((v) => [String(v.user), v]));
     const linkFor = new Map(mine.map((l) => [String(l.targetProduct), l.affiliateCode]));
-    const { AFFILIATE_PERCENT } = require("../config/revenueSplit");
+    // MVEC's part depends on the commission rule for the seller and category.
+    const commission = require("./commission.service");
+    const mvecPart = await Promise.all(rows.map((p) => commission.platformAffiliatePercent({ vendorId: p.vendor, categoryId: p.category?._id || p.category })));
     return {
       total, page: pg, pageSize: size,
-      products: rows.map((p) => {
+      products: rows.map((p, i) => {
         const v = byUser.get(String(p.vendor));
         const price = Number(p.discountPrice) > 0 && Number(p.discountPrice) < Number(p.price) ? Number(p.discountPrice) : Number(p.price);
-        const percent = round2(AFFILIATE_PERCENT + (Number(v?.affiliateRate) || 0));
+        const percent = round2(mvecPart[i] + (Number(v?.affiliateRate) || 0));
         return {
           id: String(p._id), name: p.name, price, stock: p.stockQuantity, image: p.media?.mainImage || "",
           category: p.category?.name || "", vendor: v?.businessName || "Seller",

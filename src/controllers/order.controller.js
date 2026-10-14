@@ -174,7 +174,12 @@ exports.getOrderById = async (req, res) => {
     }
 
     if (isBuyer || isAdmin) {
-      return res.status(200).json({ order });
+      // How the order was actually paid (gateway + method), e.g. K-Pay SPENN,
+      // which the order's own paymentMethod cannot express.
+      const paid = await Payment.findOne({ parentOrder: order._id, status: { $in: ["SUCCESS", "REFUNDED"] } }).sort({ createdAt: -1 });
+      const body = typeof order.toJSON === "function" ? order.toJSON() : { ...order };
+      body.paidVia = paid ? { gateway: paid.gateway, method: paid.method } : null;
+      return res.status(200).json({ order: body });
     }
 
     // A vendor only sees its own lines, and never the buyer's delivery code:
