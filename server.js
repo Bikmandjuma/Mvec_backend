@@ -1,47 +1,26 @@
 const express = require("express");
 const http = require("http");
-const mongoose = require("mongoose");
-// Expose `id` alongside `_id` in every JSON response; the frontend reads `id`.
-mongoose.set("toJSON", { virtuals: true });
 const dotenv = require("dotenv");
 const helmet = require("helmet");
 const morgan = require("morgan");
 const cors = require("cors");
 const socketService = require("./src/services/socket.service");
 
+
 // Swagger setup
 const swaggerUi = require("swagger-ui-express");
 const YAML = require("yamljs");
 const swaggerDocument = YAML.load("./swagger.yaml");
 
-// Load all models into mongoose entry
-const routes = require("./src/routes/auth.routes");
-const User = require("./src/models/User");
-const Category = require("./src/models/Category");
-const Product = require("./src/models/Product");
 const { initBackgroundWorkers } = require("./src/workers/slaWorker");
 
 dotenv.config();
 
-// Ensure directConnection or explicit replicaSet options are provided
-const MONGO_URI = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/your_database_name?replicaSet=rs0&directConnection=true";
-
-// DB_DRIVER=mysql runs the same app on MySQL (src/database); MongoDB is the default.
-const { isMysql } = require("./src/database/driver");
-
-if (isMysql) {
-  const { sequelize } = require("./src/database");
-  sequelize.authenticate()
-    .then(() => {
-      console.log(`Connected to MySQL database "${sequelize.config.database}" successfully`);
-      initBackgroundWorkers();
-    })
-    .catch((err) => console.error("Error connecting to MySQL:", err.message));
-} else {
-  mongoose.connect(MONGO_URI)
-    .then(() => console.log("Connected to MongoDB Replica Set successfully"))
-    .catch((err) => console.error("Error connecting to MongoDB:", err));
-}
+// All data lives in MySQL (src/database). Run directly, the server refuses to
+// start without a reachable, fully migrated database. Required by tests, it
+// only exports the app (tests manage their own test database).
+const { connectDatabase } = require("./src/database/startup");
+const isMain = require.main === module;
 
 const app = express();
 
@@ -53,34 +32,48 @@ app.use(helmet({
     directives: { upgradeInsecureRequests: isProduction ? [] : null },
   },
   strictTransportSecurity: isProduction,
+  // The React app is served from its own origin (Vite on :5173 in dev, its own
+  // host in production) while product images live on this API. helmet's default
+  // `same-origin` Cross-Origin-Resource-Policy made the browser throw away
+  // every cross-origin <img src="…/uploads/…"> even though the server returned
+  // 200 OK, so the UI always fell back to the placeholder image.
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  crossOriginEmbedderPolicy: false,
 }));
+// Which websites may call this API from a browser. CORS_ORIGINS is a comma
+// separated list (e.g. "https://mvec.rw,https://www.mvec.rw"). Production
+// falls back to FRONTEND_URL only; development allows any origin so phones on
+// the local network can test.
+const allowedOrigins = (process.env.CORS_ORIGINS || (isProduction ? process.env.FRONTEND_URL || "" : ""))
+  .split(",").map((o) => o.trim().replace(/\/+$/, "")).filter(Boolean);
 app.use(cors({
-  origin: "*",
+  origin: allowedOrigins.length ? allowedOrigins : !isProduction,
   credentials: true,
 }));
+if (process.env.TRUST_PROXY) app.set("trust proxy", Number(process.env.TRUST_PROXY) || 1);
 // Keep the raw body so webhook signatures (Paypack, Airtel) can be verified.
+// The JSON limit is raised well above Express' 100kb default: product payloads
+// (and any client that inlines image data) used to die with a 413 before the
+// request ever reached a controller.
 app.use(express.json({
+  limit: "10mb",
   verify: (req, res, buf) => {
     req.rawBody = buf;
   },
 }));
 app.use(morgan("dev"));
+// Plain-language errors with a support reference on every 5xx.
+app.use(require("./src/middleware/friendlyErrors"));
+// Every successful change an administrator makes goes to the audit log.
+app.use(require("./src/middleware/adminAudit"));
 
 // Uploaded product images are returned as public URLs for storefront display.
-// helmet defaults Cross-Origin-Resource-Policy to same-origin, which stops the
-// frontend (a different origin) from rendering them, so relax it here only.
-app.use(
-  "/uploads",
-  (req, res, next) => {
-    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
-    next();
-  },
-  express.static(require("path").resolve(__dirname, "uploads")),
-);
+app.use("/uploads", express.static(require("path").resolve(__dirname, "uploads")));
 
   
 app.use("/api/auth", require("./src/routes/auth.routes"));
 app.use("/api/admin", require("./src/routes/admin.dashboard.routes"));
+app.use("/api/admin", require("./src/routes/admin.ops.routes"));
 app.use("/api/uploads", require("./src/routes/upload.routes"));
 app.use("/api/search", require("./src/routes/search.routes"));
 app.use("/api/products", require("./src/routes/product.routes"));
@@ -97,6 +90,7 @@ app.use("/api/payments", require("./src/routes/payment.routes"));
 app.use("/api/admin", require("./src/routes/admin.financial.routes"));
 app.use("/api/admin", require("./src/routes/admin.commission.routes"));
 app.use("/api/wholesale", require("./src/routes/wholesale.routes"));
+app.use("/api/quotes", require("./src/routes/quote.routes"));
 app.use("/api/disputes", require("./src/routes/dispute.routes"));
 app.use("/api/abuse-reports", require("./src/routes/abuseReport.routes"));
 app.use("/api/conversations", require("./src/routes/conversation.routes"));
@@ -110,6 +104,7 @@ app.use("/api/webhooks", require("./src/routes/webhook.routes"));
 app.use("/api/vendor", require("./src/routes/vendor.service.routes"));
 app.use("/api/buyer", require("./src/routes/buyer.service.routes"));
 app.use("/api/admin", require("./src/routes/admin.monetization.routes"));
+app.use("/api/admin/disbursements", require("./src/routes/admin.disbursement.routes"));
 app.use("/api/admin/payouts", require("./src/routes/admin.payout.routes"));
 app.use("/api/admin/vendor-payouts", require("./src/routes/vendorPayoutAdmin.routes"));
 app.use("/api/developer/payouts", require("./src/routes/developer.payout.routes"));
@@ -120,6 +115,7 @@ app.use("/api/ads", require("./src/routes/ads.routes"));
 app.use("/api/shipping", require("./src/routes/shipping.routes"));
 app.use("/api/notifications", require("./src/routes/notification.routes"));
 app.use("/api/reports", require("./src/routes/report.routes"));
+app.use("/api/advertisements", require("./src/routes/advertisement.routes"));
 
 // Real-time Server-Sent Events (SSE) stream for browsers
 app.get("/api/events", (req, res) => {
@@ -153,6 +149,12 @@ app.get("/api/events", (req, res) => {
 // Swagger documentation route
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
+// Liveness/readiness probe for the hosting platform and uptime monitors.
+app.get("/health", async (req, res) => {
+  const dbUp = await require("./src/database").sequelize.authenticate().then(() => true, () => false);
+  res.status(dbUp ? 200 : 503).json({ status: dbUp ? "ok" : "degraded", db: dbUp ? "up" : "down", uptime: Math.round(process.uptime()) });
+});
+
 app.get("/", (req, res) => {
   res.json({
     message: "Multi-Vendor E-Commerce API is working!",
@@ -169,48 +171,16 @@ app.use((req, res, next) => {
 // 3. Global Error Handling Middleware (MUST have 4 arguments: err, req, res, next)
 // Express identifies this as an error handler strictly because it has 4 parameters.
 app.use((err, req, res, next) => {
-  console.error(err.stack);
-  
-  const statusCode = err.statusCode || 500;
-  const message = err.message || "Internal Server Error";
-
-  res.status(statusCode).json({
-    success: false,
-    message,
-    // Show stack trace only in development environment
-    ...(process.env.NODE_ENV === "development" && { stack: err.stack }),
-  });
+  // Requests the server could not read are the caller's problem, not ours.
+  if (err.type === "entity.parse.failed") return res.status(400).json({ message: "The request could not be read. Refresh the page and try again." });
+  if (err.type === "entity.too.large") return res.status(413).json({ message: "What you sent is too large. Use a smaller file or less text." });
+  if (err.code === "LIMIT_FILE_SIZE") return res.status(413).json({ message: "That file is too large. Choose a smaller one and try again." });
+  const statusCode = err.statusCode || err.status || 500;
+  if (statusCode < 500) return res.status(statusCode).json({ message: err.message });
+  console.error(err.stack || err);
+  // friendlyErrors turns technical messages into plain ones and adds a reference.
+  return res.status(statusCode).json({ message: err.message });
 });
-
-// Initialize background cron tasks once DB connection is established
-if (!isMysql) mongoose.connection.once("open", () => {
-  console.log("Connected to MongoDB.");
-  rebuildSparseUserIndexes();
-  initBackgroundWorkers();
-});
-
-// The users.email / users.phone unique indexes were created non-sparse, so
-// every account missing one of them indexed as `null` and collided with the
-// next one (phone-only sign-ups, Google accounts). Mongoose only creates
-// indexes, so an existing deployment must drop the old option before the
-// sparse schema indexes can be rebuilt.
-async function rebuildSparseUserIndexes() {
-  try {
-    const collection = mongoose.connection.collection("users");
-    const existing = await collection.indexes();
-    const stale = ["email_1", "phone_1"].filter((name) => {
-      const index = existing.find((i) => i.name === name);
-      return index && index.unique && !index.sparse;
-    });
-    for (const name of stale) {
-      await collection.dropIndex(name);
-      console.log(`Rebuilding users.${name} as a sparse unique index.`);
-    }
-    if (stale.length) await User.syncIndexes();
-  } catch (err) {
-    console.error("Could not rebuild user indexes:", err.message);
-  }
-}
 
 const PORT = process.env.PORT || 4000;
 const HOST = process.env.HOST || "0.0.0.0";
@@ -218,7 +188,20 @@ const HOST = process.env.HOST || "0.0.0.0";
 const httpServer = http.createServer(app);
 socketService.init(httpServer);
 
-httpServer.listen(PORT, HOST, () => {
-  console.log(`🚀 Server listening on ${HOST}:${PORT}`);
-  console.log(`🏠 Local access: http://localhost:${PORT}`);
-});
+if (isMain) {
+  connectDatabase()
+    .then((name) => {
+      console.log(`Connected to MySQL database "${name}"`);
+      initBackgroundWorkers();
+      httpServer.listen(PORT, HOST, () => {
+        console.log(`🚀 Server listening on ${HOST}:${PORT}`);
+        console.log(`🏠 Local access: http://localhost:${PORT}`);
+      });
+    })
+    .catch((err) => {
+      console.error(`\n[database] ${err.message}\n`);
+      process.exit(1);
+    });
+}
+
+module.exports = app;

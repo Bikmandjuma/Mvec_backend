@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Product = require("../models/Product");
 const StockMovement = require("../models/StockMovement");
 const { getPrimaryStore, resolveOwnedStore } = require("../utils/vendorStore.util");
@@ -47,7 +47,7 @@ exports.adjustStock = async (req, res) => {
     if (!Number.isInteger(quantity) || quantity < 0 || (mode !== "set" && quantity === 0)) {
       return res.status(400).json({ message: mode === "set" ? "Enter a whole number of 0 or more." : "Enter a whole number greater than 0." });
     }
-    if (!mongoose.isValidObjectId(id)) return res.status(404).json({ message: "Product not found." });
+    if (!orm.isValidObjectId(id)) return res.status(404).json({ message: "Product not found." });
 
     const owned = { _id: id, vendor: { $in: ownerIds(req) } };
     const current = await Product.findOne(owned).select("stockQuantity name vendor store status");
@@ -100,7 +100,7 @@ exports.adjustStock = async (req, res) => {
 exports.moveProductsToStore = async (req, res) => {
   try {
     const { productIds, storeId, note = "" } = req.body;
-    if (!Array.isArray(productIds) || !productIds.length || !productIds.every((p) => mongoose.isValidObjectId(p))) {
+    if (!Array.isArray(productIds) || !productIds.length || !productIds.every((p) => orm.isValidObjectId(p))) {
       return res.status(400).json({ message: "Select at least one product." });
     }
     const owners = ownerIds(req);
@@ -153,8 +153,8 @@ exports.moveProductsToStore = async (req, res) => {
 exports.listStockMovements = async (req, res) => {
   try {
     const query = { vendor: { $in: ownerIds(req) } };
-    if (mongoose.isValidObjectId(req.query.product)) query.product = req.query.product;
-    if (mongoose.isValidObjectId(req.query.store)) {
+    if (orm.isValidObjectId(req.query.product)) query.product = req.query.product;
+    if (orm.isValidObjectId(req.query.store)) {
       query.$or = [{ store: req.query.store }, { fromStore: req.query.store }];
     }
     const limit = Math.min(Number(req.query.limit) || 50, 200);

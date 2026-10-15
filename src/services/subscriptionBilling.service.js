@@ -2,7 +2,8 @@
 // balance (sales earnings). Cancelling stops auto-renew; Premium stays active
 // until the paid period ends. renewDueSubscriptions() runs hourly (slaWorker).
 const Subscription = require("../models/Subscription");
-const { VendorBalance } = require("../models/Payout");
+// Seller money lives in VendorWallet (credited when escrow is released).
+const VendorWallet = require("../models/VendorWallet");
 const sellerFinance = require("./sellerFinance.service");
 const { notify } = sellerFinance;
 
@@ -23,7 +24,7 @@ async function startPremium(vendorId) {
     if (!sub.autoRenew) { sub.autoRenew = true; await sub.save(); return { sub, message: "Auto-renew is back on. Premium continues after this period." }; }
     return { sub, message: "Premium is already active." };
   }
-  const balance = await VendorBalance.findOne({ vendor: vendorId });
+  const balance = await VendorWallet.findOne({ vendor: vendorId });
   const now = new Date();
   const ref = `SUB-${now.getTime()}`;
   const charged = await chargeBalance(vendorId, PREMIUM_PRICE, ref, `Vendor Premium · ${now.toLocaleDateString("en-GB")} – ${addDays(now, PERIOD_DAYS).toLocaleDateString("en-GB")}`);

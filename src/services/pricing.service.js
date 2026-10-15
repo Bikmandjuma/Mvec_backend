@@ -1,53 +1,29 @@
-const CommissionRule = require("../models/CommissionRule");
 const PricingSnapshot = require("../models/PricingSnapshot");
-const { computeRevenueSplit, TOTAL_PLATFORM_FEE_PERCENT } = require("../config/revenueSplit");
+const { computeRevenueSplit } = require("../config/revenueSplit");
+const commission = require("./commission.service");
 
-async function getApplicableCommissionRule({ productId, vendorId, categoryId }) {
-  const activeRules = await CommissionRule.find({
-    isActive: true,
-    $or: [
-      { ruleType: "PRODUCT", targetProduct: productId },
-      { ruleType: "VENDOR", targetVendor: vendorId },
-      { ruleType: "CATEGORY", targetCategory: categoryId },
-      { ruleType: "GLOBAL" },
-    ],
-  }).sort({ priority: -1, createdAt: -1 });
-
-  if (!activeRules.length) {
-    return {
-      _id: null,
-      rateType: "PERCENTAGE",
-      rateValue: TOTAL_PLATFORM_FEE_PERCENT,
-    };
-  }
-
-  return activeRules[0];
-}
-
-exports.createItemPricingSnapshot = async ({ orderId, item, session, hasAffiliate = false, gatewayFee = 0 }) => {
+/**
+ * Price one paid order line: find the commission rule that applies (seller
+ * override, category rate or default), split the money and freeze the result
+ * in a pricing snapshot so later rule changes never alter a paid order.
+ * Returns the snapshot plus the split details the escrow lock needs.
+ */
+exports.createItemPricingSnapshot = async ({ orderId, item, session, hasAffiliate = false, gatewayFee = 0, vendorAffiliatePercent = 0 }) => {
   const { product, vendor, category, price, quantity } = item;
   const unitPrice = price;
   // Coupon discounts are paid by the seller, so escrow uses the discounted line.
   const grossTotal = Math.max(0, unitPrice * quantity - (Number(item.discount) || 0));
 
-  const rule = await getApplicableCommissionRule({
-    productId: product._id || product,
+  const split = await commission.splitFor({
     vendorId: vendor._id || vendor,
     categoryId: category,
+    grossTotal,
+    hasAffiliate,
+    gatewayFee,
+    vendorAffiliatePercent,
   });
 
-  let commissionAmount = 0;
-  if (rule.rateType === "PERCENTAGE") {
-    commissionAmount = (grossTotal * rule.rateValue) / 100;
-  } else if (rule.rateType === "FIXED") {
-    commissionAmount = rule.rateValue * quantity;
-  }
-
-  commissionAmount = Math.min(commissionAmount, grossTotal);
-
-  const split = computeRevenueSplit({ grossTotal, hasAffiliate, gatewayFee });
-
-  const snapshot = await PricingSnapshot.create(
+  const [snapshot] = await PricingSnapshot.create(
     [
       {
         order: orderId,
@@ -56,14 +32,15 @@ exports.createItemPricingSnapshot = async ({ orderId, item, session, hasAffiliat
         unitPrice,
         quantity,
         grossTotal,
-        commissionRuleApplied: rule._id,
-        commissionRateType: rule.rateType,
-        commissionRateValue: rule.rateValue,
+        commissionRuleApplied: split.rule?._id || null,
+        commissionRateType: "PERCENTAGE",
+        commissionRateValue: split.commissionPercent,
         commissionAmount: split.totalPlatformFee,
         vendorNetEarnings: split.vendorNet,
         developerShare: split.developerShare,
         adminShare: split.adminShare,
         affiliateShare: split.affiliateShare,
+        vendorAffiliateShare: split.vendorAffiliateShare,
         gatewayFee: split.gatewayFee,
         hasAffiliate,
       },
@@ -71,7 +48,8 @@ exports.createItemPricingSnapshot = async ({ orderId, item, session, hasAffiliat
     { session }
   );
 
-  return snapshot[0];
+  const plain = typeof snapshot.toObject === "function" ? snapshot.toObject() : snapshot;
+  return { ...plain, totalPlatformFee: split.totalPlatformFee, vendorNet: split.vendorNet, commissionRate: split.commissionPercent, gatewayFeePayer: split.gatewayFeePayer, commissionSource: split.source };
 };
 
 exports.computeRevenueSplit = computeRevenueSplit;

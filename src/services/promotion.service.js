@@ -19,7 +19,8 @@ function effectiveStatus(p, now = new Date()) {
   return p.status === "SCHEDULED" ? "ACTIVE" : p.status;
 }
 
-const fail = (message, status = 400) => Object.assign(new Error(message), { status });
+// `statusCode` is what checkout.service and the order controller read.
+const fail = (message, status = 400) => Object.assign(new Error(message), { status, statusCode: status });
 
 const lineMatches = (promo, product) => {
   if (!product || String(product.vendor) !== String(promo.vendor)) return false;

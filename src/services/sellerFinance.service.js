@@ -116,8 +116,8 @@ async function notify(recipient, title, message, reference = "", type = "PAYOUT"
 // Takes `amount` from the seller's available balance atomically and records
 // the charge. Returns null when the balance is too low.
 async function chargeBalance(vendorId, amount, { type, reference, description }) {
-  const { VendorBalance } = require("../models/Payout");
-  const charged = await VendorBalance.findOneAndUpdate(
+  const VendorWallet = require("../models/VendorWallet");
+  const charged = await VendorWallet.findOneAndUpdate(
     { vendor: vendorId, availableBalance: { $gte: amount } },
     { $inc: { availableBalance: -amount } },
     { new: true },
@@ -130,8 +130,8 @@ async function chargeBalance(vendorId, amount, { type, reference, description })
 // Puts money back on the available balance, recorded as a negative charge.
 async function creditBalance(vendorId, amount, { type, reference, description }) {
   if (!(amount > 0)) return;
-  const { VendorBalance } = require("../models/Payout");
-  await VendorBalance.findOneAndUpdate({ vendor: vendorId }, { $inc: { availableBalance: amount } }, { upsert: true });
+  const VendorWallet = require("../models/VendorWallet");
+  await VendorWallet.findOneAndUpdate({ vendor: vendorId }, { $inc: { availableBalance: amount } }, { upsert: true });
   await SellerCharge.create({ vendor: vendorId, type, amount: -amount, reference, description });
 }
 

@@ -31,6 +31,7 @@ const subscription = (owner, prefix, model, table, collection, skipFree) => ({
     startDate: date(),
     renewalDate: date(),
     autoRenew: bool(true),
+    lastPaymentId: str({ len: 24 }), // payment that last activated/extended the plan (idempotency)
   },
 });
 const affiliateAccountDetails = {
@@ -120,6 +121,34 @@ module.exports = [
   subscription("vendor", "MVEC-SUB", "Subscription", "subscriptions", "subscriptions", false),
   subscription("buyer", "MVEC-BSUB", "BuyerSubscription", "buyer_subscriptions", "buyersubscriptions", true),
   {
+    // Marketplace-wide settings an admin can change (commission shares,
+    // provider fee payer…). One row per key; read through services/commission.service.js.
+    model: "PlatformSetting", table: "platform_settings", collection: "platformsettings",
+    fields: {
+      settingKey: str({ len: 80, required: true, unique: true }),
+      value: json(null),
+      updatedBy: ref("users", { fk: false }),
+    },
+  },
+  {
+    // Every change an administrator makes (verify, suspend, refund, approve…),
+    // written automatically by middleware/adminAudit.js.
+    model: "AuditLog", table: "audit_logs", collection: "auditlogs", timestamps: "createdAt",
+    indexes: [{ fields: ["createdAt"] }, { fields: ["targetType", "targetId"] }],
+    fields: {
+      actor: ref("users", { fk: false, index: true }),
+      actorName: str({ len: 150, default: "" }),
+      action: str({ len: 200, required: true }),
+      method: str({ len: 10, default: "" }),
+      path: str({ len: 300, default: "" }),
+      targetType: str({ len: 60, default: "" }),
+      targetId: str({ len: 60, default: "" }),
+      statusCode: int({ default: 200 }),
+      detail: json(null),
+      ip: str({ len: 60, default: "" }),
+    },
+  },
+  {
     model: "Notification", table: "notifications", collection: "notifications",
     indexes: [{ fields: ["recipientId", "isRead", "createdAt"] }],
     fields: {
@@ -128,6 +157,7 @@ module.exports = [
       title: str({ required: true }),
       message: text({ apiDefault: "" }),
       reference: str({ default: "" }),
+      link: str({ len: 500, default: "" }),
       channel: en(["IN_APP", "SMS", "PUSH", "EMAIL"], { default: "IN_APP", required: true }),
       isRead: bool(false),
       readAt: date(),
@@ -176,7 +206,9 @@ module.exports = [
       description: text({ apiDefault: "" }),
       phone: str({ len: 30, required: true }),
       email: str({ len: 190, required: true, lowercase: true }),
+      category: str({ len: 120, default: "" }),
       verificationStatus: en(["UNVERIFIED", "PENDING", "VERIFIED", "REJECTED"], { default: "UNVERIFIED", required: true }),
+      verificationNote: str({ len: 500, default: "" }),
       ratingAvg: num({ required: true, default: 0 }),
       status: en(["ACTIVE", "SUSPENDED", "BLOCKED", "UNDER_REVIEW"], { default: "ACTIVE", required: true }),
       location: json(null),
@@ -322,7 +354,22 @@ module.exports = [
       link: ref("affiliate_links", { fk: false, index: true }),
       affiliateCode: str({ len: 60, default: "", index: true }),
       buyerUser: ref("users", { fk: false }),
+      product: ref("products", { fk: false, index: true }),
+      visitorId: str({ len: 120, default: "", index: true }),
       visitorIp: str({ len: 64, default: "" }),
+    },
+  },
+  {
+    // Last affiliate click per visitor and product (drives order attribution).
+    model: "AffiliateAttribution", table: "affiliate_attributions", collection: "affiliateattributions",
+    indexes: [{ fields: ["visitorId", "productId"], unique: true }],
+    fields: {
+      visitorId: str({ len: 120, required: true }),
+      product: ref("products", { required: true, fk: false }),
+      link: ref("affiliate_links", { required: true, fk: false }),
+      affiliateUser: ref("users", { required: true, fk: false, index: true }),
+      affiliateCode: str({ len: 60, required: true }),
+      clickedAt: date({ required: true }),
     },
   },
   {
@@ -337,6 +384,8 @@ module.exports = [
       clickCount: int({ required: true, default: 0 }),
       conversionCount: int({ required: true, default: 0 }),
       isActive: bool(true),
+      status: en(["ACTIVE", "TERMINATED"], { default: "ACTIVE", required: true, index: true }),
+      terminatedAt: date(),
     },
   },
   {
@@ -367,8 +416,16 @@ module.exports = [
   },
   {
     model: "ConversionAudit", table: "conversion_audits", collection: "conversionaudits",
-    indexes: [{ fields: ["affiliateUserId", "convertedAt"] }],
+    indexes: [{ fields: ["affiliateUserId", "convertedAt"] }, { fields: ["orderId", "orderItemId"], unique: true }],
     fields: {
+      orderItemId: { type: "ref", ref: "order_items", fk: false, column: "orderItemId" },
+      settlement: ref("settlements", { fk: false }),
+      buyer: ref("users", { fk: false }),
+      quantity: int({ required: true, default: 1 }),
+      clickedAt: date(),
+      reversedAmount: money({ required: true, default: 0 }),
+      unrecoveredAmount: money({ required: true, default: 0 }),
+      approvedAt: date(),
       affiliateUser: ref("users", { required: true, fk: false }),
       link: ref("affiliate_links", { fk: false }),
       targetProduct: ref("products", { fk: false }),
@@ -376,8 +433,79 @@ module.exports = [
       referralCode: str({ len: 60, default: "" }),
       conversionValue: money({ required: true, default: 0 }),
       commissionEarned: money({ required: true, default: 0 }),
-      status: en(["PENDING", "APPROVED", "PAID", "REJECTED"], { default: "PENDING", required: true, index: true }),
+      status: en(["PENDING", "APPROVED", "PAID", "REJECTED", "REVERSED"], { default: "PENDING", required: true, index: true }),
       convertedAt: date(),
+    },
+    children: {
+      // Commission clawed back after a refund or cancellation.
+      reversals: {
+        model: "ConversionReversal", table: "conversion_reversals", parentKey: "conversionAuditId",
+        fields: {
+          key: str({ len: 120, required: true }),
+          amount: money({ required: true }),
+          reason: str({ len: 300, default: "" }),
+          at: date({ default: "now" }),
+        },
+      },
+    },
+  },
+  {
+    model: "SupplierReview", table: "supplier_reviews", collection: "supplierreviews",
+    indexes: [{ fields: ["supplierId", "vendorId", "wholesaleOrderId"], unique: true }, { fields: ["supplierId", "createdAt"] }],
+    fields: {
+      supplier: ref("suppliers", { required: true, fk: false }),
+      vendor: ref("users", { required: true, fk: false }),
+      wholesaleOrder: ref("wholesale_orders", { required: true, fk: false }),
+      rating: num({ required: true }),
+      comment: text({ apiDefault: "" }),
+      reply: text({ apiDefault: "" }),
+    },
+  },
+  {
+    model: "SupplierSupplyRequest", table: "supplier_supply_requests", collection: "suppliersupplyrequests",
+    indexes: [{ fields: ["supplierId", "createdAt"] }],
+    fields: {
+      supplier: ref("suppliers", { required: true, fk: false, index: true }),
+      reference: str({ len: 60, required: true, unique: true }),
+      neededBy: date({ required: true }),
+      note: text({ apiDefault: "" }),
+      status: en(["SUBMITTED", "UNDER_REVIEW", "APPROVED", "SOURCING", "IN_TRANSIT", "RECEIVED", "REJECTED", "CANCELLED"], { default: "SUBMITTED", required: true, index: true }),
+      decision: text({ apiDefault: "" }),
+    },
+    children: {
+      lines: {
+        model: "SupplierSupplyRequestLine", table: "supplier_supply_request_lines", parentKey: "supplyRequestId",
+        fields: {
+          product: str({ len: 200, required: true }),
+          category: str({ len: 120, default: "General" }),
+          units: num({ required: true }),
+          unit: str({ len: 40, required: true }),
+          unitPrice: money({ required: true }),
+          note: str({ len: 500, default: "" }),
+        },
+      },
+      events: {
+        model: "SupplierSupplyRequestEvent", table: "supplier_supply_request_events", parentKey: "supplyRequestId",
+        fields: {
+          at: date({ default: "now" }),
+          title: str({ len: 200, required: true }),
+          detail: text({ apiDefault: "" }),
+        },
+      },
+    },
+  },
+  {
+    model: "SupplierTeamMember", table: "supplier_team_members", collection: "supplierteammembers",
+    indexes: [{ fields: ["supplierId", "createdAt"] }],
+    fields: {
+      supplier: ref("suppliers", { required: true, fk: false, index: true }),
+      user: ref("users", { fk: false, index: true }),
+      fullName: str({ len: 150, required: true }),
+      phone: str({ len: 30, required: true }),
+      email: str({ len: 190, default: "" }),
+      role: en(["OPERATIONS", "WAREHOUSE", "FULFILMENT", "FINANCE", "VIEWER"], { default: "VIEWER", required: true }),
+      status: en(["ACTIVE", "INVITED", "SUSPENDED"], { default: "ACTIVE", required: true }),
+      note: str({ len: 500, default: "" }),
     },
   },
   {
@@ -441,18 +569,59 @@ module.exports = [
       shippedAt: date(),
       deliveredAt: date(),
       confirmedAt: date(),
+      paidAt: date(),
+      // Set when the order came from an accepted quote (no catalog products).
+      quote: ref("quotes", { fk: false }),
+      category: str({ len: 120, default: "" }),
+      stockReserved: bool(false),
+      cancelledBy: str({ len: 20, default: "" }),
+      cancelReason: str({ len: 300, default: "" }),
+      disputeReason: text({ apiDefault: "" }),
     },
     children: {
       items: {
         model: "WholesaleOrderItem", table: "wholesale_order_items", parentKey: "wholesaleOrderId",
         fields: {
-          product: ref("wholesale_products", { required: true, fk: false }),
+          product: ref("wholesale_products", { fk: false }), // empty for quoted items
+          unit: str({ len: 40, default: "piece" }),
           productName: str({ required: true }),
           unitPrice: money({ required: true }),
           quantity: int({ required: true }),
           moq: int({ required: true }),
         },
       },
+    },
+  },
+  {
+    // A vendor asks suppliers for goods: "50 bags of rice by Friday".
+    model: "QuoteRequest", table: "quote_requests", collection: "quoterequests",
+    indexes: [{ fields: ["status", "neededBy"] }],
+    fields: {
+      reference: str({ len: 40, required: true, unique: true }),
+      vendor: ref("users", { required: true, index: true, fk: false }),
+      category: str({ len: 120, required: true, index: true }),
+      lines: json([]), // [{ product, units, unit, targetPrice }]
+      neededBy: date({ required: true }),
+      deliverTo: str({ len: 200, default: "" }),
+      note: text({ apiDefault: "" }),
+      status: en(["OPEN", "AWARDED", "CANCELLED", "EXPIRED"], { default: "OPEN", required: true, index: true }),
+      acceptedQuote: ref("quotes", { fk: false }),
+      wholesaleOrder: ref("wholesale_orders", { fk: false }),
+    },
+  },
+  {
+    // A supplier's offer for one quote request.
+    model: "Quote", table: "quotes", collection: "quotes",
+    indexes: [{ fields: ["requestId", "supplierId"], unique: true }],
+    fields: {
+      request: ref("quote_requests", { required: true, index: true, fk: false }),
+      supplier: ref("users", { required: true, index: true, fk: false }), // supplier owner account
+      lines: json([]), // [{ product, units, unit, unitPrice }]
+      totalAmount: money({ required: true, default: 0 }),
+      deliveryDays: int({ required: true, default: 1 }),
+      note: text({ apiDefault: "" }),
+      validUntil: date(),
+      status: en(["SUBMITTED", "ACCEPTED", "DECLINED", "WITHDRAWN"], { default: "SUBMITTED", required: true, index: true }),
     },
   },
 ];

@@ -223,7 +223,12 @@ exports.handleAirtelWebhook = async (req, res) => {
 // @access  Public (Provider Verified via X-Paypack-Signature)
 exports.handlePaypackWebhook = async (req, res) => {
   try {
-    // Verify the signature whenever a webhook secret is configured.
+    // Production must verify every callback; without a secret anyone could
+    // post a fake "payment successful" event.
+    if (!process.env.PAYPACK_WEBHOOK_SECRET && process.env.NODE_ENV === "production") {
+      console.error("[Paypack Webhook] PAYPACK_WEBHOOK_SECRET is not set; rejecting callback.");
+      return res.status(503).json({ message: "Webhook verification is not configured." });
+    }
     if (process.env.PAYPACK_WEBHOOK_SECRET) {
       const isValid = paypackService.verifyWebhookSignature(
         req.rawBody,
@@ -236,6 +241,15 @@ exports.handlePaypackWebhook = async (req, res) => {
 
     // Payload: { event_id, event_kind, created_at, data: { ref, kind, amount, fee, status, ... } }
     const { event_kind: eventKind, data = {} } = req.body;
+
+    // Money MVEC sent out (refunds, affiliate withdrawals).
+    if (eventKind === "transaction:processed" && data.kind === "CASHOUT") {
+      await require("../services/disbursement.service").handleCallback({
+        ref: data.ref,
+        status: paypackService.normalizeStatus(data.status),
+      });
+      return res.status(200).json({ success: true, message: "Transfer update recorded." });
+    }
 
     // Only a processed CASHIN carries a final status; ignore everything else.
     if (eventKind !== "transaction:processed" || data.kind !== "CASHIN") {
@@ -266,5 +280,67 @@ exports.handlePaypackWebhook = async (req, res) => {
     console.error("[Paypack Webhook Error]:", error);
     // Respond with 500 so Paypack retries later
     return res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Flutterwave card payment webhook (charge.completed)
+// @route   POST /api/webhooks/flutterwave
+// @access  Public (verified with the dashboard secret hash, then re-checked with Flutterwave's API)
+exports.handleFlutterwaveWebhook = async (req, res) => {
+  const flutterwaveService = require("../services/flutterwave.service");
+  try {
+    if (!flutterwaveService.verifyWebhook(req.headers)) {
+      return res.status(401).json({ message: "Invalid webhook signature" });
+    }
+    const txRef = req.body?.data?.tx_ref;
+    if (!txRef) return res.status(200).json({ success: true, message: "Ignored: no transaction reference." });
+
+    const payment = await Payment.findOne({ transactionReference: txRef, gateway: "FLUTTERWAVE" });
+    if (!payment) return res.status(200).json({ success: true, message: "Ignored: unknown payment." });
+    if (payment.status !== "PENDING") return res.status(200).json({ success: true, message: "Already processed." });
+
+    // Never trust the webhook body: ask Flutterwave for the real status and amount.
+    const result = await flutterwaveService.verifyByReference(txRef);
+    if (result.status === "SUCCESSFUL" && result.currency && result.currency !== "RWF") {
+      return res.status(200).json({ success: false, message: "Unexpected currency; payment left for review." });
+    }
+    const outcome = await paymentService.settleGatewayPayment({
+      payment,
+      provider: "FLUTTERWAVE",
+      status: result.status,
+      amount: result.amount ?? payment.amount,
+      fee: result.fee || 0,
+      payload: result.raw || {},
+      externalTransactionId: result.id,
+    });
+    return res.status(200).json({ success: true, result: outcome?.status || result.status });
+  } catch (error) {
+    console.error("Flutterwave webhook failed:", error);
+    // 500 makes Flutterwave retry later.
+    return res.status(500).json({ message: "Webhook processing failed; it will be retried." });
+  }
+};
+
+// @desc    K-Pay payment callback. K-Pay does not sign callbacks, so the body is
+//          never trusted: the status is re-checked with K-Pay before anything changes.
+// @route   POST /api/webhooks/kpay   { tid, refid, statusid, ... }
+// @access  Public
+exports.handleKpayWebhook = async (req, res) => {
+  const kpayService = require("../services/kpay.service");
+  const { tid = "", refid = "" } = req.body || {};
+  const ack = () => res.status(200).json({ tid, refid, reply: "OK" });
+  try {
+    if (!refid) return ack();
+    const payment = await Payment.findOne({ transactionReference: String(refid), gateway: "KPAY" });
+    if (!payment || payment.status !== "PENDING") return ack();
+    const result = await kpayService.checkStatus(String(refid));
+    await paymentService.settleGatewayPayment({
+      payment, provider: "KPAY", status: result.status, amount: payment.amount,
+      payload: result.raw || {}, externalTransactionId: result.tid || String(tid) || payment.gatewayReference,
+    });
+    return ack();
+  } catch (error) {
+    console.error("K-Pay webhook failed:", error);
+    return res.status(500).json({ tid, refid, reply: "RETRY" });
   }
 };

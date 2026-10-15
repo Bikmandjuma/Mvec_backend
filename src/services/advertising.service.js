@@ -4,7 +4,7 @@
 // back to the balance when the campaign is rejected, ended or runs out of time.
 const Advertisement = require("../models/Advertisement");
 const Vendor = require("../models/Vendor");
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Product = require("../models/Product");
 const Category = require("../models/Category");
 const sellerFinance = require("./sellerFinance.service");
@@ -62,7 +62,7 @@ const isLive = (ad, now = new Date()) =>
 async function serve({ surface = "shop", q = "", category = "", limit = 4, exclude = [] } = {}) {
   const placements = SURFACES[surface] || SURFACES.shop;
   // The storefront filters by category name; accept a name or an id.
-  if (category && !mongoose.isValidObjectId(category)) {
+  if (category && !orm.isValidObjectId(category)) {
     const cat = await Category.findOne({ name: category }).select("_id");
     if (!cat) return [];
     category = String(cat._id);

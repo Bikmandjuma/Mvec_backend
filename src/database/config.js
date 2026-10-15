@@ -1,5 +1,5 @@
 // MySQL connection settings for Sequelize and sequelize-cli, read from .env.
-require("dotenv").config({ path: require("path").resolve(__dirname, "../../.env") });
+require("dotenv").config({ path: require("path").resolve(__dirname, "../../.env"), quiet: true });
 
 // Accepts DB_* (DB_HOST, DB_USERNAME, …) or MYSQL_* names.
 const env = (...keys) => keys.map((k) => process.env[k]).find((v) => v !== undefined && v !== "");
@@ -10,7 +10,7 @@ const base = {
   port: Number(env("DB_PORT", "MYSQL_PORT")) || 3306,
   username: env("DB_USERNAME", "MYSQL_USER") || "root",
   password: env("DB_PASSWORD", "MYSQL_PASSWORD") || null,
-  database: env("DB_DATABASE", "MYSQL_DATABASE") || "mvec",
+  database: env("DB_DATABASE", "MYSQL_DATABASE") || "ikiguzi",
   logging: env("DB_LOGGING", "MYSQL_LOGGING") === "true" ? console.log : false,
   define: { charset: "utf8mb4", collate: "utf8mb4_unicode_ci" },
   dialectOptions: { charset: "utf8mb4", dateStrings: false },

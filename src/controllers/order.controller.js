@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Order = require("../models/Order");
 const Cart = require("../models/Cart");
 const Product = require("../models/Product");
@@ -8,289 +8,99 @@ const LedgerEntry = require("../models/LedgerEntry");
 const VendorWallet = require("../models/VendorWallet");
 const payoutController = require("./payout.controller");
 const socketService = require("../services/socket.service");
-const shippingService = require("../services/shipping.service");
-const financialService = require("../services/financial.service");
-const Dispute = require("../models/Dispute");
-const AffiliateLink = require("../models/AffiliateLink");
-const ConversionAudit = require("../models/ConversionAudit");
+const affiliateAttribution = require("../services/affiliateAttribution.service");
 const promotionService = require("../services/promotion.service");
-const { AFFILIATE_PERCENT } = require("../config/revenueSplit");
 
-// Delivery fees are always computed server-side from seller shipping zones.
-// Returns { shipping } or { error } when a seller doesn't deliver to the address.
-const priceShipping = async (lines, shippingAddress, shippingMethod) => {
-  const quote = await shippingService.quoteShipping({ lines, address: shippingAddress, method: shippingMethod });
-  if (!quote.deliverable) {
-    return { error: quote.groups.filter((g) => !g.deliverable).map((g) => g.message).join(" ") };
+// A cancelled/refunded/returned/failed order can never pay out affiliate
+// commission: reverse whatever is still standing (idempotent per order).
+const VOIDING_ORDER_STATUSES = ["CANCELLED", "REFUNDED", "RETURNED", "FAILED"];
+const VOIDING_PAYMENT_STATUSES = ["REFUNDED", "FAILED"];
+async function reverseCommissionIfVoided(order) {
+  if (
+    !VOIDING_ORDER_STATUSES.includes(order.orderStatus) &&
+    !VOIDING_PAYMENT_STATUSES.includes(order.paymentStatus)
+  ) {
+    return;
   }
-  const { province, district } = quote.address;
-  return {
-    shipping: {
-      shippingFee: quote.shippingFee,
-      shippingMethod: quote.method,
-      shippingBreakdown: quote.groups.map((g) => ({
-        vendor: g.vendor, store: g.store, storeName: g.storeName, zone: g.zone, zoneName: g.zoneName,
-        method: g.method, fee: g.fee, eta: g.eta,
-      })),
-      address: {
-        ...shippingAddress,
-        province: province || shippingAddress.province,
-        district: district || shippingAddress.district || shippingAddress.city,
-        state: province || shippingAddress.state || shippingAddress.province,
-      },
-    },
-  };
-};
-
-// A referral code from an affiliate link the buyer followed (?ref=CODE).
-// Self-referrals and inactive links are ignored rather than failing checkout.
-async function affiliateReferral(code, buyerId) {
-  if (!code) return null;
-  const link = await AffiliateLink.findOne({ affiliateCode: String(code).trim(), isActive: true });
-  if (!link || String(link.affiliateUser) === String(buyerId)) return null;
-  return link;
-}
-
-// Coupon + affiliate fields for a new order. lines: [{ product, quantity, price }].
-// Mutates items (line discounts) and shipping (free delivery). Throws on a bad coupon.
-async function checkoutExtras(req, lines, items, shipping) {
-  const extras = { fields: { discountAmount: 0 }, itemDiscount: 0, promotionId: null, link: null };
-  if (req.body.couponCode) {
-    const q = await promotionService.quote(req.body.couponCode, { lines, parcels: shipping.shippingBreakdown, userId: req.user.id });
-    const applied = promotionService.applyToOrder(q, items, shipping);
-    extras.fields.coupon = applied.coupon;
-    extras.fields.discountAmount = applied.discountAmount;
-    extras.itemDiscount = applied.itemDiscount;
-    extras.promotionId = q.promotion._id;
-  }
-  extras.link = await affiliateReferral(req.body.affiliateCode, req.user.id);
-  if (extras.link) {
-    extras.fields.affiliateCode = extras.link.affiliateCode;
-    extras.fields.affiliateUser = extras.link.affiliateUser;
-  }
-  return extras;
-}
-
-// Creates the order, counting the coupon use first and giving it back on failure.
-async function createOrderWithExtras(data, extras) {
-  if (extras.promotionId) await promotionService.redeem(extras.promotionId);
-  let order;
   try {
-    order = await Order.create({ ...data, ...extras.fields });
+    await affiliateAttribution.reverseOrderCommission({
+      orderId: order._id,
+      key: `order-void:${order._id}`,
+      reason: `Order ${order.orderStatus}/${order.paymentStatus}`,
+    });
   } catch (err) {
-    if (extras.promotionId) await promotionService.release({ coupon: { promotion: extras.promotionId } });
-    throw err;
+    console.error(`Affiliate commission reversal failed for order ${order._id}:`, err.message);
   }
-  if (extras.link) {
-    const value = order.subtotal - extras.itemDiscount;
-    ConversionAudit.create({
-      affiliateUser: extras.link.affiliateUser, link: extras.link._id, targetProduct: extras.link.targetProduct || null,
-      order: order._id, referralCode: extras.link.affiliateCode, conversionValue: value,
-      commissionEarned: Math.round((value * AFFILIATE_PERCENT) / 100), status: "PENDING",
-    }).catch((e) => console.error("Could not record affiliate conversion:", e.message));
-  }
-  return order;
 }
-const sendCheckoutError = (res, error) => res.status(error.status || 500).json({ message: error.message });
 
-// Helper function to generate unique order numbers
-const generateOrderNumber = () => {
-  return `ORD-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
+const checkoutService = require("../services/checkout.service");
+const financialService = require("../services/financial.service");
+const notifications = require("../services/notification.service");
+const disbursementService = require("../services/disbursement.service");
+
+const sendError = (res, error, fallback = "Something went wrong. Please try again.") => {
+  if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
+  console.error(error);
+  return res.status(500).json({ message: fallback });
 };
 
-// @desc    Checkout user cart & create order
+const deliveryFromBody = (body = {}) => ({
+  shippingAddress: body.shippingAddress,
+  recipient: body.recipient,
+  deliveryMethod: body.deliveryMethod,
+  shippingMethod: body.shippingMethod,
+});
+
+// @desc    Checkout the buyer's server-side cart & create a PENDING order
 // @route   POST /api/orders/checkout
 // @access  Private (Buyer/User)
 exports.createCheckoutOrder = async (req, res) => {
   try {
-    const { shippingAddress, paymentMethod = "CARD", shippingMethod = "STANDARD" } = req.body;
-
-    if (!shippingAddress || !shippingAddress.street || !shippingAddress.city) {
-      return res
-        .status(400)
-        .json({ message: "Complete shipping address is required." });
-    }
-
-    // 1. Fetch user's active cart
-    const cart = await Cart.findOne({ user: req.user.id }).populate(
-      "items.product",
-    );
-
+    const cart = await Cart.findOne({ user: req.user.id });
     if (!cart || cart.items.length === 0) {
       return res.status(400).json({ message: "Your cart is empty." });
     }
 
-    const orderItems = [];
-    const shippingLines = [];
-    let calculatedTotal = 0;
+    const order = await checkoutService.createOrder({
+      userId: req.user.id,
+      lines: cart.items.map((item) => ({ productId: String(item.product), quantity: item.quantity })),
+      delivery: deliveryFromBody(req.body),
+      paymentMethod: req.body.paymentMethod,
+      visitorId: req.body.visitorId,
+      couponCode: req.body.couponCode,
+    });
 
-    // 2. Validate stock & prepare snapshot items
-    for (const item of cart.items) {
-      const product = await Product.findById(item.product._id);
-
-      if (!product || product.status === "INACTIVE") {
-        return res.status(400).json({
-          message: `Product ${item.product.name || ""} is no longer available.`,
-        });
-      }
-
-      if (product.stockQuantity < item.quantity) {
-        return res.status(400).json({
-          message: `Insufficient stock for ${product.name}. Available: ${product.stockQuantity}`,
-        });
-      }
-
-      const activePrice = product.discountPrice || product.price;
-      calculatedTotal += activePrice * item.quantity;
-      shippingLines.push({ product, quantity: item.quantity, price: activePrice });
-
-      orderItems.push({
-        product: product._id,
-        vendor: product.vendor,
-        name: product.name,
-        price: activePrice,
-        quantity: item.quantity,
-      });
-    }
-
-    const priced = await priceShipping(shippingLines, shippingAddress, shippingMethod);
-    if (priced.error) return res.status(400).json({ message: priced.error });
-    const extras = await checkoutExtras(req, shippingLines, orderItems, priced.shipping);
-
-    // 3. Create the Order document
-    const order = await createOrderWithExtras({
-      user: req.user.id,
-      orderNumber: generateOrderNumber(),
-      items: orderItems,
-      shippingAddress: priced.shipping.address,
-      subtotal: calculatedTotal,
-      shippingFee: priced.shipping.shippingFee,
-      shippingMethod: priced.shipping.shippingMethod,
-      shippingBreakdown: priced.shipping.shippingBreakdown,
-      totalAmount: calculatedTotal - extras.itemDiscount + priced.shipping.shippingFee,
-      paymentMethod,
-    }, extras);
-
-    // 4. Update stock levels for purchased items
-    for (const item of cart.items) {
-      const product = await Product.findById(item.product._id);
-      product.stockQuantity -= item.quantity;
-
-      if (product.stockQuantity <= 0) {
-        product.stockQuantity = 0;
-        product.status = "OUT_OF_STOCK";
-      }
-      await product.save();
-    }
-
-    // 5. Clear user cart
     cart.items = [];
     cart.totalAmount = 0;
     await cart.save();
 
-    return res.status(201).json({
-      message: "Order placed successfully",
-      order,
-    });
+    socketService.emitOrderCreated(order);
+    notifications.orderPlaced(order).catch(() => {});
+    return res.status(201).json({ message: "Order placed successfully", order });
   } catch (error) {
-    return sendCheckoutError(res, error);
+    return sendError(res, error, "We could not place your order. Please try again.");
   }
 };
 
-// @desc    Direct checkout — accepts items in request body (for frontend-driven orders)
+// @desc    Direct checkout ("Buy now") with items in the request body
 // @route   POST /api/orders/direct-checkout
 // @access  Private (Buyer/User)
 exports.directCheckout = async (req, res) => {
   try {
-    const { items, shippingAddress, paymentMethod = "MOMO", shippingMethod = "STANDARD" } = req.body;
+    const order = await checkoutService.createOrder({
+      userId: req.user.id,
+      lines: req.body.items,
+      delivery: deliveryFromBody(req.body),
+      paymentMethod: req.body.paymentMethod,
+      visitorId: req.body.visitorId,
+      couponCode: req.body.couponCode,
+    });
 
-    if (!shippingAddress || !shippingAddress.street || !shippingAddress.city) {
-      return res.status(400).json({ message: "Complete shipping address is required." });
-    }
-
-    if (!items || !items.length) {
-      return res.status(400).json({ message: "At least one item is required." });
-    }
-
-    const orderItems = [];
-    const productsToDecrement = [];
-    const reservedQuantities = new Map();
-    let calculatedTotal = 0;
-
-    for (const item of items) {
-      if (!item.productId || !mongoose.isValidObjectId(item.productId)) {
-        return res.status(400).json({ message: "Every checkout item must reference a valid product." });
-      }
-      const product = await Product.findById(item.productId);
-      if (!product || ["INACTIVE", "OUT_OF_STOCK"].includes(product.status)) {
-        return res.status(400).json({ message: "A product in your cart is no longer available." });
-      }
-      const qty = Number(item.qty || item.quantity);
-      if (!Number.isInteger(qty) || qty < 1) {
-        return res.status(400).json({ message: "Product quantity must be a positive whole number." });
-      }
-      const productKey = product._id.toString();
-      const reservedQty = (reservedQuantities.get(productKey) || 0) + qty;
-      if (product.stockQuantity < reservedQty) {
-        return res.status(400).json({
-          message: `Insufficient stock for ${product.name}. Available: ${product.stockQuantity}`,
-        });
-      }
-      reservedQuantities.set(productKey, reservedQty);
-      const resolvedPrice = product.discountPrice || product.price;
-      calculatedTotal += resolvedPrice * qty;
-      const resolvedProduct = product._id;
-      const resolvedVendor = product.vendor || null;
-      const resolvedName = product.name;
-      const resolvedImage = product.media?.mainImage || "";
-
-      productsToDecrement.push({ product, qty, price: resolvedPrice });
-
-      orderItems.push({
-        product: resolvedProduct,
-        vendor: resolvedVendor,
-        name: resolvedName,
-        price: resolvedPrice,
-        quantity: qty,
-        image: resolvedImage,
-      });
-    }
-
-    const lines = productsToDecrement.map(({ product, qty, price }) => ({ product, quantity: qty, price }));
-    const priced = await priceShipping(lines, shippingAddress, shippingMethod);
-    if (priced.error) return res.status(400).json({ message: priced.error });
-    const extras = await checkoutExtras(req, lines, orderItems, priced.shipping);
-
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-
-    const order = await createOrderWithExtras({
-      user: req.user.id,
-      orderNumber: generateOrderNumber(),
-      items: orderItems,
-      shippingAddress: priced.shipping.address,
-      subtotal: calculatedTotal,
-      shippingFee: priced.shipping.shippingFee,
-      shippingMethod: priced.shipping.shippingMethod,
-      shippingBreakdown: priced.shipping.shippingBreakdown,
-      totalAmount: calculatedTotal - extras.itemDiscount + priced.shipping.shippingFee,
-      paymentMethod,
-      paymentStatus: "PENDING",
-      orderStatus: "PENDING",
-      deliveryOtp: otp,
-    }, extras);
-
-    for (const { product, qty } of productsToDecrement) {
-      product.stockQuantity = Math.max(0, product.stockQuantity - qty);
-      if (product.stockQuantity === 0) product.status = "OUT_OF_STOCK";
-      await product.save();
-    }
-
-    // Notify connected clients in real-time
     socketService.emitOrderCreated(order);
-
+    notifications.orderPlaced(order).catch(() => {});
     return res.status(201).json({ message: "Order placed successfully", order });
   } catch (error) {
-    return sendCheckoutError(res, error);
+    return sendError(res, error, "We could not place your order. Please try again.");
   }
 };
 
@@ -308,13 +118,42 @@ exports.getMyOrders = async (req, res) => {
   }
 };
 
+// @desc    Get paid orders awaiting delivery confirmation
+// @route   GET /api/orders/deliverable
+// @desc    Paid orders waiting for delivery (scoped to the caller)
+// @route   GET /api/orders/deliverable
+exports.getDeliverable = async (req, res) => {
+  try {
+    // Paid orders, plus confirmed cash-on-delivery orders (paid at the door).
+    const query = {
+      $or: [
+        { paymentStatus: "PAID" },
+        { paymentMethod: "CASH_ON_DELIVERY", paymentStatus: "PENDING", orderStatus: { $ne: "PENDING" } },
+      ],
+      orderStatus: { $nin: ["PENDING", "DELIVERED", "COMPLETED", "CANCELLED", "REFUNDED", "RETURNED", "FAILED"] },
+    };
+    if (req.user.role === "vendor") query["items.vendor"] = req.user.id;
+    if (["delivery", "courier"].includes(req.user.role)) query.courier = req.user.id;
+
+    const orders = await Order.find(query)
+      .select("-deliveryOtp")
+      .populate("user", "Fullname phone")
+      .populate("items.vendor", "Fullname companyName")
+      .populate("courier", "Fullname phone")
+      .sort({ createdAt: -1 });
+    return res.status(200).json({ orders });
+  } catch (error) {
+    return sendError(res, error);
+  }
+};
+
 // @desc    Get single order details
 // @route   GET /api/orders/:id
 // @access  Private
 exports.getOrderById = async (req, res) => {
   try {
     const { id } = req.params;
-    if (!id || id === "undefined" || !mongoose.isValidObjectId(id)) {
+    if (!id || id === "undefined" || !orm.isValidObjectId(id)) {
       return res.status(400).json({ message: "A valid order ID is required." });
     }
 
@@ -337,7 +176,23 @@ exports.getOrderById = async (req, res) => {
       return res.status(403).json({ message: "Access denied." });
     }
 
-    return res.status(200).json({ order });
+    if (isBuyer || isAdmin) {
+      // How the order was actually paid (gateway + method), e.g. K-Pay SPENN,
+      // which the order's own paymentMethod cannot express.
+      const paid = await Payment.findOne({ parentOrder: order._id, status: { $in: ["SUCCESS", "REFUNDED"] } }).sort({ createdAt: -1 });
+      const body = typeof order.toJSON === "function" ? order.toJSON() : { ...order };
+      body.paidVia = paid ? { gateway: paid.gateway, method: paid.method } : null;
+      return res.status(200).json({ order: body });
+    }
+
+    // A vendor only sees its own lines, and never the buyer's delivery code:
+    // the code is the buyer's proof of receipt and must stay with the buyer.
+    const vendorView = typeof order.toJSON === "function" ? order.toJSON() : { ...order };
+    delete vendorView.deliveryOtp;
+    vendorView.items = vendorView.items.filter(
+      (item) => item.vendor && String(item.vendor._id || item.vendor) === String(req.user.id),
+    );
+    return res.status(200).json({ order: vendorView });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }
@@ -371,10 +226,15 @@ exports.getVendorOrders = async (req, res) => {
         paidOffline: order.paidOffline,
         paymentMethod: order.paymentMethod,
         shippingAddress: order.shippingAddress,
+        recipient: order.recipient,
         paymentStatus: order.paymentStatus,
         orderStatus: order.orderStatus,
         createdAt: order.createdAt,
+        updatedAt: order.updatedAt,
         items: vendorItems,
+        // Whether this seller already handed its items over (multi-seller orders).
+        deliveredVendors: order.deliveredVendors || [],
+        shippingBreakdown: (order.shippingBreakdown || []).filter((s) => s.vendor && vendorIds.includes(s.vendor.toString())),
         vendorSubtotal: vendorItems.reduce(
           (sum, item) => sum + item.price * item.quantity - (item.discount || 0),
           0,
@@ -392,7 +252,7 @@ exports.getVendorOrders = async (req, res) => {
 
     return res.status(200).json({ orders: filteredOrders });
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    return sendError(res, error, "We could not load your orders right now. Please refresh in a moment.");
   }
 };
 
@@ -428,7 +288,7 @@ exports.sellerNextStatuses = sellerNextStatuses;
 // Seller cancellation: restock their items and, for orders paid through MVEC,
 // refund the buyer by unwinding the held escrow.
 async function cancelBySeller(order, vendorIds, reason) {
-  const session = await mongoose.startSession();
+  const session = await orm.startSession();
   session.startTransaction();
   try {
     const paidThroughMvec = order.paymentStatus === "PAID" && !order.paidOffline;
@@ -477,175 +337,101 @@ async function cancelBySeller(order, vendorIds, reason) {
 }
 
 // @desc    Update vendor-specific order status / item status
-// @route   PATCH /api/orders/vendor/status   { orderId, status?, paymentStatus?, reason? }
-// @access  Private (Vendor / Super Admin)
+// @route   PATCH /api/orders/vendor/:id/status
+// @access  Private (Vendor)
+// Fulfilment steps a seller (or admin) may move a PAID order through.
+// DELIVERED is only reachable through delivery confirmation with the buyer's
+// code, and payment status only through the payment provider.
+const FULFILMENT_FLOW = ["CONFIRMED", "PROCESSING", "READY_FOR_SHIPMENT", "SHIPPED", "OUT_FOR_DELIVERY"];
+const DELIVERY_OTP_MAX_ATTEMPTS = 5;
+
+async function advanceFulfilment({ order, status, actor }) {
+  const next = String(status || "").toUpperCase();
+  if (!FULFILMENT_FLOW.includes(next)) {
+    throw checkoutService.httpError(400, "Choose one of: processing, ready for shipment, shipped, out for delivery. Delivery is confirmed with the buyer's code.");
+  }
+  // Paid orders, and cash-on-delivery orders recorded by the seller (the
+  // customer pays when the parcel arrives).
+  const isCashOnDelivery = order.paymentMethod === "CASH_ON_DELIVERY" && order.paymentStatus === "PENDING" && order.orderStatus !== "PENDING";
+  if (order.paymentStatus !== "PAID" && !isCashOnDelivery) {
+    throw checkoutService.httpError(400, order.paymentStatus === "DISPUTED"
+      ? "This order is under dispute review. Wait for MVEC's decision before moving it."
+      : "This order isn't paid yet, so it can't be prepared or shipped.");
+  }
+  const current = FULFILMENT_FLOW.indexOf(order.orderStatus === "PENDING" ? "CONFIRMED" : order.orderStatus);
+  if (current === -1) {
+    throw checkoutService.httpError(400, `This order is ${String(order.orderStatus).toLowerCase()} and can no longer change.`);
+  }
+  if (FULFILMENT_FLOW.indexOf(next) <= current) {
+    throw checkoutService.httpError(400, `This order is already ${String(order.orderStatus).toLowerCase().replace(/_/g, " ")}. Choose a later step.`);
+  }
+  order.orderStatus = next;
+  if (next === "SHIPPED" && !order.shippedAt) order.shippedAt = new Date();
+  await order.save();
+  socketService.emitOrderStatusUpdate(order);
+  notifications.orderStatusChanged(order, actor).catch(() => {});
+  return order;
+}
+
+// @desc    Seller moves its order forward (processing → shipped → out for delivery)
+// @route   PATCH /api/orders/vendor/status   { orderId, status }
+// @access  Private (Vendor, vendor staff with canManageOrders, Super Admin)
 exports.updateVendorOrderStatus = async (req, res) => {
   try {
-    const { orderId, status, paymentStatus, reason } = req.body;
-    const allowedOrderStatuses = [
-      "PENDING", "CONFIRMED", "PROCESSING", "READY_FOR_SHIPMENT", "SHIPPED", "OUT_FOR_DELIVERY",
-      "DELIVERED", "COMPLETED", "CANCELLED", "RETURNED", "REFUNDED", "FAILED",
-    ];
-    const allowedPaymentStatuses = ["PENDING", "CONFIRMED", "PAID", "FAILED", "REFUNDED"];
-
-    if (!mongoose.isValidObjectId(orderId)) {
+    const { orderId, status, paymentStatus } = req.body;
+    if (paymentStatus !== undefined) {
+      return res.status(400).json({ message: "Payment status is set by the payment provider and cannot be changed here." });
+    }
+    if (!orm.isValidObjectId(orderId)) {
       return res.status(400).json({ message: "A valid order ID is required." });
     }
     const order = await Order.findById(orderId);
-    if (!order) {
-      return res.status(404).json({ message: "Order not found." });
-    }
+    if (!order) return res.status(404).json({ message: "Order not found." });
 
-    // Verify vendor ownership
-    const vendorId = req.vendorId || req.targetVendorId || req.user.id;
-    const vendorIds = [req.user.id.toString()];
-    if (vendorId) vendorIds.push(vendorId.toString());
-    const isAdmin = req.user.role === "super_admin" && !(order.items || []).some((item) => item.vendor && vendorIds.includes(item.vendor.toString()));
-
-    const hasVendorItems = order.items && order.items.some(
-      (item) => item.vendor && vendorIds.includes(item.vendor.toString()),
-    );
-    if (!hasVendorItems && req.user.role !== "super_admin") {
+    const vendorIds = [String(req.user.id)];
+    if (req.vendorId || req.targetVendorId) vendorIds.push(String(req.vendorId || req.targetVendorId));
+    const ownsItems = order.items.some((item) => item.vendor && vendorIds.includes(String(item.vendor)));
+    if (!ownsItems && req.user.role !== "super_admin") {
       return res.status(403).json({ message: "Access denied: You do not own items in this order." });
     }
 
-    if (status && !allowedOrderStatuses.includes(status)) {
-      return res.status(400).json({ message: `Invalid order status: ${status}` });
+    if (String(status || "").toUpperCase() === "CANCELLED") {
+      const result = await cancelOrder({ orderId: order._id, actor: req.user });
+      return res.status(200).json({ message: "Order cancelled and the buyer refunded.", order: result.order });
     }
-    if (paymentStatus && !allowedPaymentStatuses.includes(paymentStatus)) {
-      return res.status(400).json({ message: `Invalid payment status: ${paymentStatus}` });
-    }
-
-    // ---- Sellers: only the next steps of the flow --------------------------
-    if (!isAdmin) {
-      if (status && status !== order.orderStatus && !sellerNextStatuses(order).includes(status)) {
-        const hint = status === "DELIVERED"
-          ? "Delivery is confirmed with the buyer's delivery code, which releases the payment."
-          : `Allowed next: ${sellerNextStatuses(order).join(", ") || "none"}.`;
-        return res.status(400).json({ message: `This order can't move from ${order.orderStatus} to ${status}. ${hint}` });
-      }
-      if (paymentStatus && paymentStatus !== order.paymentStatus) {
-        const codCollected = paymentStatus === "PAID" && order.source === "MANUAL" && order.paymentMethod === "CASH_ON_DELIVERY";
-        if (!codCollected) {
-          return res.status(403).json({ message: "Payment status is set by MVEC payments. You can only record cash collected on your own cash-on-delivery orders." });
-        }
-      }
-      if (status === "CANCELLED" && status !== order.orderStatus) {
-        const otherSellers = (order.items || []).some((item) => item.vendor && !vendorIds.includes(item.vendor.toString()));
-        if (otherSellers) {
-          return res.status(409).json({ message: "This order includes items from other sellers. Contact MVEC support to cancel your part." });
-        }
-        const result = await cancelBySeller(order, vendorIds, reason);
-        socketService.emitOrderStatusUpdate(order);
-        return res.status(200).json({
-          message: result.refunded ? "Order cancelled. The buyer's payment has been refunded and stock restored." : "Order cancelled and stock restored.",
-          order,
-        });
-      }
-    }
-
-    if (status) {
-      order.orderStatus = status;
-      if (status === "DELIVERED") {
-        order.isDelivered = true;
-        order.deliveredAt = new Date();
-        // Cash on delivery: the seller collected the money at hand-over.
-        if (!isAdmin && order.paymentMethod === "CASH_ON_DELIVERY") order.paymentStatus = "PAID";
-      }
-    }
-    if (paymentStatus) order.paymentStatus = paymentStatus;
-
-    await order.save();
-
-    // Notify connected buyers, vendors, and admins in real-time
-    socketService.emitOrderStatusUpdate(order);
-
-    // Trigger payout release if order is marked as DELIVERED
-    if (status === "DELIVERED") {
-      await payoutController.releaseOrderEarnings(order._id, vendorId);
-    }
-
-    return res.status(200).json({
-      message: "Order updated successfully",
-      order,
-      nextStatuses: sellerNextStatuses(order),
-    });
+    await advanceFulfilment({ order, status, actor: req.user });
+    return res.status(200).json({ message: "Order updated successfully", order });
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    return sendError(res, error);
   }
 };
 
 // @desc    Update Order Status (e.g., PENDING -> PROCESSING -> SHIPPED -> DELIVERED)
 // @route   PATCH /api/orders/:id/status
 // @access  Private (Vendor / Admin)
+// @desc    Move an order forward by id (same rules as the vendor route)
+// @route   PATCH /api/orders/:id/status   { status }
+// @access  Private (Vendor owning items, Super Admin)
 exports.updateOrderStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
-
-    const validStatuses = [
-      "PENDING",
-      "CONFIRMED",
-      "PROCESSING",
-      "READY_FOR_SHIPMENT",
-      "SHIPPED",
-      "OUT_FOR_DELIVERY",
-      "DELIVERED",
-      "COMPLETED",
-      "CANCELLED",
-    ];
-    if (!status || !validStatuses.includes(status.toUpperCase())) {
-      return res.status(400).json({ message: "Invalid order status provided." });
-    }
-
+    if (!orm.isValidObjectId(id)) return res.status(400).json({ message: "A valid order ID is required." });
     const order = await Order.findById(id);
-    if (!order) {
-      return res.status(404).json({ message: "Order not found." });
+    if (!order) return res.status(404).json({ message: "Order not found." });
+
+    if (req.user.role !== "super_admin") {
+      const ownsItems = order.items.some((item) => item.vendor && String(item.vendor) === String(req.user.id));
+      if (!ownsItems) return res.status(403).json({ message: "Access denied: You do not own items in this order." });
     }
 
-    const updatedStatus = status.toUpperCase();
-
-    // Prevent re-processing already delivered orders
-    if (order.orderStatus === "DELIVERED" && updatedStatus !== "COMPLETED") {
-      return res.status(400).json({ message: "Order has already been marked as DELIVERED." });
+    if (String(req.body.status || "").toUpperCase() === "CANCELLED") {
+      const result = await cancelOrder({ orderId: order._id, actor: req.user });
+      return res.status(200).json({ message: "Order cancelled and the buyer refunded.", order: result.order });
     }
-
-    order.orderStatus = updatedStatus;
-    
-    if (updatedStatus === "DELIVERED") {
-      order.deliveredAt = new Date();
-      order.isDelivered = true;
-    }
-
-    await order.save();
-
-    // Real-time broadcast
-    socketService.emitOrderStatusUpdate(order);
-
-    // 🚀 EARNINGS RELEASE ENGINE
-    // If status reaches DELIVERED, release pending earnings per vendor in the order
-    if (updatedStatus === "DELIVERED") {
-      // Find all unique vendors involved in this order
-      const vendorIds = [
-        ...new Set(
-          (order.items || [])
-            .filter((item) => item.vendor)
-            .map((item) => item.vendor.toString())
-        ),
-      ];
-
-      // Release earnings for each vendor asynchronously
-      for (const vendorId of vendorIds) {
-        await payoutController.releaseOrderEarnings(order._id, vendorId);
-      }
-    }
-
-    return res.status(200).json({
-      message: `Order status successfully updated to ${updatedStatus}.`,
-      order,
-    });
+    await advanceFulfilment({ order, status: req.body.status, actor: req.user });
+    return res.status(200).json({ message: `Order status updated to ${order.orderStatus}.`, order });
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    return sendError(res, error);
   }
 };
 
@@ -653,76 +439,161 @@ exports.updateOrderStatus = async (req, res) => {
 // @desc    Confirm Order Delivery & Release Escrow Funds
 // @route   PATCH /api/orders/:id/deliver
 // @access  Private (Admin / Delivery Agent)
+// @desc    Confirm delivery with the buyer's 6-digit code and release escrow
+// @route   PATCH /api/orders/:id/deliver   { deliveryOtp }
+// @access  Private (Super Admin, assigned courier, or a vendor for its own items)
+// A vendor's confirmation releases only that vendor's money; the order is
+// DELIVERED once every vendor in it has handed over (or a courier/admin
+// confirms the whole order).
 exports.confirmOrderDelivery = async (req, res) => {
-  const session = await mongoose.startSession();
+  const { id } = req.params;
+  if (!id || !orm.isValidObjectId(id)) {
+    return res.status(400).json({ message: "A valid order ID is required." });
+  }
+  const code = String(req.body.deliveryOtp || "").trim();
+
+  const session = await orm.startSession();
   session.startTransaction();
-
   try {
-    const { id } = req.params;
-    const { deliveryOtp } = req.body; // Proof of delivery check
-
     const order = await Order.findById(id).session(session);
     if (!order) {
       await session.abortTransaction();
       return res.status(404).json({ message: "Order not found." });
     }
 
-    if (order.orderStatus === "DELIVERED") {
+    const role = req.user.role;
+    const orderVendors = [...new Set(order.items.filter((i) => i.vendor).map((i) => String(i.vendor)))];
+    const isVendor = role === "vendor" || (role === "super_admin" && req.user.isSellerEnabled && orderVendors.includes(String(req.user.id)));
+    if (role === "vendor" && !orderVendors.includes(String(req.user.id))) {
       await session.abortTransaction();
-      return res.status(400).json({ message: "Order is already marked as DELIVERED." });
+      return res.status(403).json({ message: "You do not sell items in this order." });
+    }
+    if (role === "delivery" && String(order.courier || "") !== String(req.user.id)) {
+      await session.abortTransaction();
+      return res.status(403).json({ message: "This delivery is not assigned to you." });
     }
 
-    // 1. Verify Delivery OTP if enforced
-    if (order.deliveryOtp && order.deliveryOtp !== deliveryOtp) {
+    if (["DELIVERED", "COMPLETED"].includes(order.orderStatus)) {
       await session.abortTransaction();
-      return res.status(400).json({ message: "Invalid delivery verification code." });
+      return res.status(400).json({ message: "This order is already delivered." });
+    }
+    if (["CANCELLED", "REFUNDED", "RETURNED", "FAILED"].includes(order.orderStatus)) {
+      await session.abortTransaction();
+      return res.status(400).json({ message: `A ${order.orderStatus.toLowerCase()} order cannot be delivered.` });
+    }
+    // Cash on delivery: the seller collected the money at the door, so the
+    // code also confirms payment. Nothing went through MVEC escrow.
+    const cashOnDelivery = order.paymentMethod === "CASH_ON_DELIVERY" && order.paymentStatus === "PENDING" && order.orderStatus !== "PENDING";
+    // Only paid orders can be delivered. This also keeps a DISPUTED order's
+    // escrow frozen until an admin resolves the dispute.
+    if (order.paymentStatus !== "PAID" && !cashOnDelivery) {
+      await session.abortTransaction();
+      return res.status(400).json({
+        message: order.paymentStatus === "DISPUTED"
+          ? "This order is under dispute review and cannot be delivered yet."
+          : "Only paid orders can be marked as delivered.",
+      });
     }
 
-    // 2. Update Order Delivery Metadata
-    order.orderStatus = "DELIVERED";
-    order.isDelivered = true;
-    order.deliveredAt = new Date();
-    // Cash on delivery is collected at hand-over.
-    if (order.paymentMethod === "CASH_ON_DELIVERY" && order.paymentStatus !== "PAID") order.paymentStatus = "PAID";
+    if ((order.deliveryOtpAttempts || 0) >= DELIVERY_OTP_MAX_ATTEMPTS) {
+      await session.abortTransaction();
+      return res.status(423).json({ message: "Too many wrong codes. MVEC support must confirm this delivery." });
+    }
+    if (!order.deliveryOtp || code !== order.deliveryOtp) {
+      await session.abortTransaction();
+      await Order.updateOne({ _id: order._id }, { $inc: { deliveryOtpAttempts: 1 } });
+      const left = DELIVERY_OTP_MAX_ATTEMPTS - (order.deliveryOtpAttempts || 0) - 1;
+      return res.status(400).json({ message: left > 0 ? `Wrong delivery code. ${left} attempt${left === 1 ? "" : "s"} left.` : "Wrong delivery code. This delivery is now locked for MVEC support." });
+    }
+
+    const releaseFor = isVendor && role !== "super_admin" ? [String(req.user.id)] : orderVendors;
+    for (const vendorId of releaseFor) {
+      await releaseVendorEscrowFunds(order._id, vendorId, session);
+    }
+    const delivered = new Set([...(order.deliveredVendors || []).map(String), ...releaseFor]);
+    order.deliveredVendors = [...delivered];
+
+    const complete = orderVendors.every((v) => delivered.has(v));
+    if (cashOnDelivery && complete) {
+      order.paymentStatus = "PAID";
+      order.paidOffline = true;
+      order.paidAt = new Date();
+    }
+    if (complete) {
+      order.orderStatus = "DELIVERED";
+      order.isDelivered = true;
+      order.deliveredAt = new Date();
+    }
     await order.save({ session });
 
-    // 3. Extract unique vendor IDs involved in the order
-    const vendorIds = [
-      ...new Set(
-        order.items
-          .filter((item) => item.vendor)
-          .map((item) => item.vendor.toString())
-      ),
-    ];
-
-    // 4. Release every held settlement (items + delivery fee) through the
-    //    ledger. Disputed parts stay frozen (ADMIN_HOLD) for arbitration.
-    const held = await Settlement.find({ order: order._id, status: "HELD" }).session(session);
-    for (const settlement of held) {
-      await financialService.releaseEscrowToVendor({ settlementId: settlement._id, session });
+    // Affiliate commission is approved once the whole order is delivered.
+    if (complete) {
+      await financialService.approveAffiliateCommissionsForOrder({ orderId: order._id, session });
     }
 
     await session.commitTransaction();
-    session.endSession();
-
-    // 5. Seller balances shown on the Payouts page (skipped while a dispute is open).
-    const disputed = await Dispute.find({ order: order._id, status: { $in: ["OPEN", "UNDER_REVIEW", "EVIDENCE_SUBMITTED"] } }).distinct("vendor");
-    const frozen = new Set(disputed.map(String));
-    for (const vendorId of vendorIds) {
-      if (!frozen.has(String(vendorId))) await payoutController.releaseOrderEarnings(order._id, vendorId);
-    }
-
-    // Real-time broadcast
     socketService.emitOrderStatusUpdate(order);
+    notifications.orderDelivered(order, { complete, vendorIds: releaseFor }).catch(() => {});
 
     return res.status(200).json({
-      message: "Order delivered successfully and funds released from escrow.",
-      order,
+      message: complete
+        ? "Delivery confirmed. The seller's payment has been released."
+        : "Your items are confirmed delivered and your payment is released. The order completes when the other sellers deliver.",
+      order: (() => { const o = order.toJSON(); delete o.deliveryOtp; return o; })(),
     });
   } catch (error) {
-    await session.abortTransaction();
+    if (session.inTransaction()) await session.abortTransaction();
+    return sendError(res, error, "We could not confirm this delivery. Please try again.");
+  } finally {
     session.endSession();
-    return res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Assigned courier picked the parcel up
+// @route   PATCH /api/orders/:id/out-for-delivery
+// @access  Private (assigned courier, Super Admin)
+exports.markOutForDelivery = async (req, res) => {
+  try {
+    if (!orm.isValidObjectId(req.params.id)) return res.status(400).json({ message: "A valid order ID is required." });
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ message: "Order not found." });
+    if (req.user.role !== "super_admin" && String(order.courier || "") !== String(req.user.id)) {
+      return res.status(403).json({ message: "This delivery is not assigned to you." });
+    }
+    await advanceFulfilment({ order, status: "OUT_FOR_DELIVERY", actor: req.user });
+    return res.status(200).json({ message: "Marked out for delivery. The buyer has been notified.", order });
+  } catch (error) {
+    return sendError(res, error);
+  }
+};
+
+// @desc    Assign (or clear) the courier delivering an order
+// @route   PATCH /api/orders/:id/courier   { courierId | null }
+// @access  Private (Super Admin)
+exports.assignCourier = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { courierId } = req.body;
+    if (!orm.isValidObjectId(id)) return res.status(400).json({ message: "A valid order ID is required." });
+    const order = await Order.findById(id);
+    if (!order) return res.status(404).json({ message: "Order not found." });
+    if (order.paymentStatus !== "PAID" || ["DELIVERED", "COMPLETED", "CANCELLED"].includes(order.orderStatus)) {
+      return res.status(400).json({ message: "Only paid orders that are not yet delivered can be assigned." });
+    }
+    if (courierId) {
+      const User = require("../models/User");
+      const courier = orm.isValidObjectId(courierId) ? await User.findOne({ _id: courierId, role: "delivery" }) : null;
+      if (!courier) return res.status(400).json({ message: "Choose a courier account." });
+      order.courier = courier._id;
+    } else {
+      order.courier = null;
+    }
+    await order.save();
+    socketService.emitOrderStatusUpdate(order);
+    if (order.courier) notifications.courierAssigned(order).catch(() => {});
+    return res.status(200).json({ message: order.courier ? "Courier assigned." : "Courier removed.", order });
+  } catch (error) {
+    return sendError(res, error);
   }
 };
 
@@ -743,74 +614,169 @@ exports.getAllOrders = async (req, res) => {
 };
 
 /*
- * Buyer-initiated cancellation with a 30-minute refund window.
- * Restores stock, marks the order/payment as cancelled/refunded and notifies
- * connected clients in real-time.
+ * Buyer-initiated cancellation.
+ *  - An unpaid order can be cancelled at any time before payment.
+ *  - A paid order can be cancelled within 30 minutes of payment, before the
+ *    seller starts shipping. Held escrow is reversed and a refund is recorded.
+ * Stock is always returned.
  */
-// @desc    Buyer cancels own order within 30 minutes of payment
 // @route   POST /api/orders/:id/cancel
 // @access  Private (Buyer / Super Admin)
 const BUYER_CANCEL_WINDOW_MS = 30 * 60 * 1000;
+const BUYER_CANCELLABLE = ["PENDING", "CONFIRMED", "PROCESSING"];
+const SELLER_CANCELLABLE = ["PENDING", "CONFIRMED", "PROCESSING", "READY_FOR_SHIPMENT"];
 
+/**
+ * Cancel an order and undo everything it set in motion: held escrow, payment
+ * records, stock, affiliate commission. A paid order's money is sent back to
+ * the number that paid. Used by buyers (30 minutes after paying), sellers who
+ * cannot fulfil (before shipping) and admins.
+ * @returns {{ order, isPaid, refundSent }}
+ */
+async function cancelOrder({ orderId, actor, reason }) {
+  const session = await orm.startSession();
+  session.startTransaction();
+  let order;
+  let isPaid = false;
+  let paidOutsideMvec = false;
+  let paidWith = null;
+  try {
+    order = await Order.findById(orderId).session(session);
+    if (!order) throw checkoutService.httpError(404, "Order not found.");
+
+    const role = actor.role;
+    const isBuyer = String(order.user) === String(actor.id);
+    const sellerOwnsAll = order.items.length > 0 && order.items.every((i) => i.vendor && String(i.vendor) === String(actor.id));
+    if (role === "super_admin") {
+      // admins may cancel anything not yet shipped
+    } else if (isBuyer) {
+      if (!BUYER_CANCELLABLE.includes(order.orderStatus)) {
+        throw checkoutService.httpError(400, "This order is already being delivered or closed and cannot be cancelled.");
+      }
+    } else if (role === "vendor" && order.items.some((i) => String(i.vendor) === String(actor.id))) {
+      if (!sellerOwnsAll) throw checkoutService.httpError(400, "This order includes other sellers' items. Ask MVEC support to cancel it.");
+    } else {
+      throw checkoutService.httpError(403, "Access denied.");
+    }
+    if (!isBuyer && !SELLER_CANCELLABLE.includes(order.orderStatus)) {
+      throw checkoutService.httpError(400, "Orders can only be cancelled before they ship.");
+    }
+    if (!["PENDING", "PAID"].includes(order.paymentStatus)) {
+      throw checkoutService.httpError(400, "This order is under review and cannot be cancelled right now.");
+    }
+
+    isPaid = order.paymentStatus === "PAID";
+    // Paid to the seller outside MVEC: MVEC holds nothing and refunds nothing.
+    paidOutsideMvec = isPaid && Boolean(order.paidOffline);
+    if (paidOutsideMvec) {
+      if (isBuyer && role !== "super_admin") {
+        throw checkoutService.httpError(400, "You paid the seller directly for this order. Contact the seller to cancel and get your money back.");
+      }
+      order.paymentStatus = "REFUNDED";
+    } else if (isPaid) {
+      if (isBuyer && role !== "super_admin") {
+        const paidAt = new Date(order.paidAt || order.updatedAt || order.createdAt).getTime();
+        if (!Number.isFinite(paidAt) || Date.now() - paidAt >= BUYER_CANCEL_WINDOW_MS) {
+          throw checkoutService.httpError(400, "The 30-minute cancellation period has ended. Use Report a problem instead.");
+        }
+      }
+      await financialService.refundHeldEscrowForOrder({ orderId: order._id, session });
+      paidWith = await Payment.findOne({ parentOrder: order._id, status: "SUCCESS" }).sort({ paidAt: -1, createdAt: -1 }).session(session);
+      await Payment.updateMany({ parentOrder: order._id, status: "SUCCESS" }, { status: "REFUNDED" }, { session });
+      order.paymentStatus = "REFUNDED";
+    } else {
+      await Payment.updateMany({ parentOrder: order._id, status: "PENDING" }, { status: "CANCELLED" }, { session });
+    }
+    order.cancellationReason = reason || (isBuyer
+      ? (isPaid ? "Buyer cancelled within 30 minutes of payment" : "Buyer cancelled before payment")
+      : role === "vendor" ? "Seller could not fulfil the order" : "Cancelled by MVEC");
+    order.orderStatus = "CANCELLED";
+    await order.save({ session });
+    await session.commitTransaction();
+    // Give back the coupon use this order held.
+    await promotionService.release(order);
+  } catch (error) {
+    if (session.inTransaction()) await session.abortTransaction();
+    throw error;
+  } finally {
+    session.endSession();
+  }
+
+  // The cancellation is committed; the follow-ups below are logged on failure
+  // instead of being reported as a failed cancel.
+  try {
+    await affiliateAttribution.reverseOrderCommission({
+      orderId: order._id,
+      key: `order-cancel:${order._id}`,
+      reason: isPaid ? "Order cancelled and refunded" : "Order cancelled before payment",
+    });
+  } catch (err) {
+    console.error(`Affiliate commission reversal failed for order ${order._id}:`, err.message);
+  }
+  await checkoutService.restoreStock(
+    (order.items || []).filter((item) => item.product).map((item) => ({ product: item.product, quantity: item.quantity })),
+  );
+  socketService.emitOrderStatusUpdate(order);
+
+  let refundSent = false;
+  if (isPaid && !paidOutsideMvec) {
+    const refund = await disbursementService.refundPayment({
+      order, payment: paidWith, amount: order.totalAmount, idempotencyKey: `refund:${order._id}`,
+    }).catch((err) => { console.error("Refund queue failed:", err.message); return null; });
+    refundSent = refund?.status === "SUCCESS";
+  }
+  await notifications.orderCancelled(order, {
+    refunded: isPaid && !paidOutsideMvec,
+    reason: String(order.user) === String(actor.id) ? undefined : `${order.cancellationReason}.${isPaid ? ` Your full refund is on its way to your ${paidWith?.method === "CARD" ? "card" : "mobile money"}.` : ""}`,
+  }).catch(() => {});
+  return { order, isPaid: isPaid && !paidOutsideMvec, refundSent, refundTo: paidWith?.method === "CARD" ? "card" : "mobile money number" };
+}
+
+// @desc    Cancel an order (buyer, the seller before shipping, or an admin)
+// @route   POST /api/orders/:id/cancel   { reason? }
+// @access  Private
 exports.cancelOrderByBuyer = async (req, res) => {
   try {
-    const { id } = req.params;
-    const order = await Order.findById(id);
-
-    if (!order) {
-      return res.status(404).json({ message: "Order not found." });
+    if (!orm.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ message: "A valid order ID is required." });
     }
-    if (String(order.user) !== String(req.user.id) && req.user.role !== "super_admin") {
-      return res.status(403).json({ message: "Access denied." });
-    }
-    if (order.paymentStatus !== "PAID" && order.paymentStatus !== "CONFIRMED") {
-      return res.status(400).json({ message: "Only paid orders can be cancelled from this page." });
-    }
-    if (["CANCELLED", "REFUNDED", "COMPLETED", "DELIVERED", "RETURNED"].includes(order.orderStatus)) {
-      return res.status(400).json({ message: "This order cannot be cancelled anymore." });
-    }
-    if (!["PENDING", "CONFIRMED", "PROCESSING"].includes(order.orderStatus)) {
-      return res.status(400).json({ message: "This order is already being fulfilled and cannot be cancelled." });
-    }
-
-    // The cancellation deadline is fixed from order creation time.
-    const payment = await Payment.findOne({ parentOrder: order._id, status: "SUCCESS" }).sort({ createdAt: -1 });
-    const cancellationDeadline = new Date(order.createdAt).getTime() + BUYER_CANCEL_WINDOW_MS;
-    if (!order.createdAt || !Number.isFinite(cancellationDeadline) || Date.now() >= cancellationDeadline) {
-      return res.status(400).json({ message: "The 30-minute cancellation period has ended." });
-    }
-
-    order.orderStatus = "CANCELLED";
-    order.paymentStatus = "REFUNDED";
-    order.cancellationReason = "Buyer cancelled within 30 minutes of payment";
-    await order.save();
-    await promotionService.release(order);
-
-    if (payment) {
-      payment.status = "REFUNDED";
-      await payment.save();
-    }
-
-    // Restore stock for each product that was snapshot into this order
-    for (const item of order.items || []) {
-      if (!item.product) continue;
-      const product = await Product.findById(item.product);
-      if (product) {
-        product.stockQuantity = Math.max(0, (product.stockQuantity || 0) + (item.quantity || 0));
-        if (product.status === "OUT_OF_STOCK" && product.stockQuantity > 0) product.status = "ACTIVE";
-        await product.save();
-      }
-    }
-
-    socketService.emitOrderStatusUpdate(order);
-
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim().slice(0, 200) : undefined;
+    const { order, isPaid, refundSent, refundTo } = await cancelOrder({ orderId: req.params.id, actor: req.user, reason });
     return res.status(200).json({
-      message: "Order cancelled successfully. A full refund has been recorded.",
+      message: isPaid
+        ? refundSent
+          ? `Order cancelled. The refund was sent to the buyer's ${refundTo}.`
+          : `Order cancelled. The refund is being sent to the buyer's ${refundTo}.`
+        : "Order cancelled.",
       order,
     });
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    return sendError(res, error, "We could not cancel this order. Please try again.");
   }
 };
 
+/**
+ * Internal Escrow Release Helper
+ * One settlement exists per order item, so a vendor can have several. Each is
+ * released through the financial service, which keeps the double-entry ledger,
+ * platform shares and wallets consistent (and is the same code the admin manual
+ * release uses).
+ */
+async function releaseVendorEscrowFunds(orderId, vendorId, session) {
+  const settlements = await Settlement.find({
+    order: orderId,
+    vendor: vendorId,
+    status: "HELD",
+  }).session(session);
 
+  for (const settlement of settlements) {
+    await financialService.releaseEscrowToVendor({ settlementId: settlement._id, session });
+  }
+}
+
+// Delegate to the finance service so delivery releases escrow exactly like
+// the admin release does: correct double-entry ledger rows, platform /
+// developer / admin shares and wallet balances in one place.
+async function releaseSettlement(settlement, orderId, vendorId, session) {
+  await financialService.releaseEscrowToVendor({ settlementId: settlement._id, session });
+}

@@ -1,10 +1,11 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
+const User = require("../models/User");
 const Subscription = require("../models/Subscription");
 const BuyerSubscription = require("../models/BuyerSubscription");
 const Advertisement = require("../models/Advertisement");
 const Vendor = require("../models/Vendor");
 const SellerCharge = require("../models/SellerCharge");
-const { VendorBalance } = require("../models/Payout");
+const VendorWallet = require("../models/VendorWallet");
 const subscriptionBilling = require("../services/subscriptionBilling.service");
 const advertising = require("../services/advertising.service");
 const sellerFinance = require("../services/sellerFinance.service");
@@ -147,6 +148,9 @@ const buildBuyerTierRows = (subscription) => {
 
 const mapAdvertisement = (ad) => ({
   id: ad.publicId,
+  // Database id: what the status endpoints expect in the URL.
+  _id: String(ad._id),
+  placementKey: ad.placement,
   product: ad.product,
   productId: ad.productId,
   placement: AD_PLACEMENTS[ad.placement] || ad.placement,
@@ -188,7 +192,7 @@ exports.getVendorSubscription = async (req, res) => {
 
     const subscription = await Subscription.findOne({ vendor: req.user.id });
     const [balance, charges] = await Promise.all([
-      VendorBalance.findOne({ vendor: req.user.id }),
+      VendorWallet.findOne({ vendor: req.user.id }),
       SellerCharge.find({ vendor: req.user.id, type: "SUBSCRIPTION" }).sort({ createdAt: -1 }).limit(24),
     ]);
 
@@ -221,7 +225,7 @@ exports.upgradeVendorSubscription = async (req, res) => {
       ? await subscriptionBilling.startPremium(req.user.id)
       : await subscriptionBilling.cancelPremium(req.user.id);
 
-    const balance = await VendorBalance.findOne({ vendor: req.user.id });
+    const balance = await VendorWallet.findOne({ vendor: req.user.id });
     return res.status(200).json({
       message,
       subscription: subscription ? mapSubscription(subscription, vendor.businessName) : null,
@@ -261,6 +265,13 @@ exports.upgradeBuyerSubscription = async (req, res) => {
     const plan = normalizePlan(req.body.plan);
     let subscription = await BuyerSubscription.findOne({ buyer: req.user.id });
 
+    // Premium is switched on only by a payment (POST /api/buyer/subscription/checkout).
+    if (plan === "PREMIUM" && !(subscription?.plan === "PREMIUM" && subscription?.status === "ACTIVE")) {
+      return res.status(402).json({
+        message: "Premium needs a payment. Choose mobile money or card to subscribe; you have not been charged.",
+      });
+    }
+
     if (plan === "PREMIUM") {
       const tier = BuyerSubscriptionTier.PREMIUM;
       if (!subscription) {
@@ -297,6 +308,58 @@ exports.upgradeBuyerSubscription = async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Pay for Premium (5,000 RWF / 30 days) by mobile money or card.
+//          Premium switches on when the payment succeeds.
+// @route   POST /api/buyer/subscription/checkout   { method: "momo" | "card", phoneNumber? }
+// @access  Private (buyer)
+exports.buyerPremiumCheckout = async (req, res) => {
+  const payments = require("./payment.controller");
+  const flutterwave = require("../services/flutterwave.service");
+  const paymentService = require("../services/payment.service");
+  const Payment = require("../models/Payment");
+  const { PREMIUM } = require("../services/buyerSubscription.service");
+  try {
+    const method = String(req.body.method || "momo").toLowerCase();
+    const userId = req.user.id;
+
+    if (method === "momo") {
+      const result = await payments.initiateStandalonePayment({
+        amount: PREMIUM.price, phoneNumber: req.body.phoneNumber, userId,
+        gatewayService: payments.paypackGateway, purpose: "BUYER_PREMIUM",
+      });
+      return res.status(200).json(result);
+    }
+    if (method !== "card") return res.status(400).json({ message: "Choose mobile money or card." });
+
+    if (flutterwave.isSandbox() && process.env.NODE_ENV === "production") {
+      return res.status(503).json({ message: "Card payments are temporarily unavailable. Please pay with mobile money." });
+    }
+    const txRef = `PREM-${userId}-${Date.now()}`;
+    const payment = await Payment.create({
+      user: userId, transactionReference: txRef, method: "CARD", gateway: "FLUTTERWAVE", provider: "CARD",
+      amount: PREMIUM.price, currency: "RWF", status: "PENDING", purpose: "BUYER_PREMIUM",
+    });
+    if (flutterwave.isSandbox()) {
+      const result = await flutterwave.verifyByReference(txRef);
+      await paymentService.settleGatewayPayment({ payment, provider: "FLUTTERWAVE", status: result.status, amount: PREMIUM.price, payload: result.raw, externalTransactionId: result.id });
+      return res.status(200).json({ message: "Card payment confirmed (test mode).", paymentId: payment._id, status: "SUCCESS", checkoutUrl: null });
+    }
+    const buyer = await User.findById(userId).select("Fullname email phone");
+    const frontend = (process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
+    const checkout = await flutterwave.createCheckout({
+      txRef, amount: PREMIUM.price,
+      customer: { email: buyer?.email, phone: buyer?.phone, name: buyer?.Fullname },
+      redirectUrl: `${frontend}/buyer/subscription?paymentId=${payment._id}`,
+      description: "MVEC Premium (30 days)",
+    });
+    return res.status(200).json({ message: "Opening the secure card page…", paymentId: payment._id, status: "PENDING", checkoutUrl: checkout.link });
+  } catch (error) {
+    if (error.statusCode && error.statusCode < 500) return res.status(error.statusCode).json({ message: error.message });
+    console.error("Premium checkout failed:", error);
+    return res.status(502).json({ message: "We could not start the payment right now. You have not been charged; please try again." });
   }
 };
 
@@ -386,7 +449,7 @@ exports.createAdvertisement = async (req, res) => {
 
     const { placement, startDate, endDate, productId } = req.body;
     const budget = Number(req.body.budget);
-    if (!productId || !mongoose.isValidObjectId(productId)) {
+    if (!productId || !orm.isValidObjectId(productId)) {
       return res.status(400).json({ message: "Choose one of your products to advertise." });
     }
     const product = await Product.findOne({ _id: productId, vendor: req.user.id });
@@ -423,7 +486,7 @@ exports.createAdvertisement = async (req, res) => {
       type: "ADVERTISING", reference: ad.publicId, description: `Ad budget · ${product.name} · ${AD_PLACEMENTS[ad.placement]}`,
     });
     if (!charged) {
-      const balance = await VendorBalance.findOne({ vendor: req.user.id });
+      const balance = await VendorWallet.findOne({ vendor: req.user.id });
       return res.status(402).json({
         message: `The ${budget.toLocaleString("en-RW")} RWF budget is paid from your available balance (${Math.round(balance?.availableBalance || 0).toLocaleString("en-RW")} RWF). Lower the budget or wait for more sales to be released.`,
       });
@@ -450,7 +513,7 @@ const findOwnAd = async (req) => {
   if (!vendor) return null;
   const adId = req.params.id;
   return Advertisement.findOne({
-    ...(mongoose.isValidObjectId(adId) ? { _id: adId } : { publicId: adId }),
+    ...(orm.isValidObjectId(adId) ? { _id: adId } : { publicId: adId }),
     vendor: vendor._id,
   });
 };
@@ -473,12 +536,18 @@ exports.updateMyAdvertisementStatus = async (req, res) => {
       return res.status(400).json({ message: status === "ACTIVE" ? "This campaign is already live." : "This campaign is already paused." });
     }
     if (ad.status !== from) {
-      return res.status(400).json({
+      // Approving a campaign is MVEC's decision, so a pending one is forbidden (403).
+      return res.status(ad.status === "PENDING" ? 403 : 400).json({
         message: ad.status === "PENDING" ? "This campaign is still being reviewed by MVEC." : `A ${AD_STATUS_LABEL[ad.status].toLowerCase()} campaign can't be ${status === "PAUSED" ? "paused" : "resumed"}.`,
       });
     }
     if (status === "ACTIVE" && ad.endDate && new Date(ad.endDate) < new Date(new Date().toDateString())) {
       return res.status(400).json({ message: "This campaign's end date has passed." });
+    }
+    // Vendors can pause and resume approved campaigns only. A pending or
+    // rejected campaign goes live only after MVEC admin approval.
+    if (!["ACTIVE", "PAUSED"].includes(ad.status)) {
+      return res.status(403).json({ message: "This campaign is waiting for MVEC approval." });
     }
 
     ad.status = status;
@@ -633,9 +702,9 @@ exports.adminUpdateAdvertisementStatus = async (req, res) => {
       return res.status(400).json({ message: "Invalid advertisement status" });
     }
 
-    // The list exposes publicId as `id`; accept either identifier.
-    const adId = req.params.id;
-    const ad = await Advertisement.findOne(mongoose.isValidObjectId(adId) ? { _id: adId } : { publicId: adId });
+    // Lists expose publicId as `id`; accept either identifier.
+    const adId = String(req.params.id);
+    const ad = await Advertisement.findOne(orm.isValidObjectId(adId) ? { _id: adId } : { publicId: adId });
     if (!ad) {
       return res.status(404).json({ message: "Advertisement campaign not found" });
     }
@@ -666,5 +735,59 @@ exports.adminUpdateAdvertisementStatus = async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Live, approved ads for one placement (e.g. the home page hero)
+// @route   GET /api/advertisements?placement=HOMEPAGE_HERO
+// @access  Public
+// Only ACTIVE (admin-approved) campaigns inside their date range, linked to a
+// live product that belongs to the advertising vendor, are returned.
+exports.listLiveAdvertisements = async (req, res) => {
+  try {
+    const placement = String(req.query.placement || "HOMEPAGE_HERO");
+    if (!AD_PLACEMENTS[placement]) {
+      return res.status(400).json({ message: "Unknown placement" });
+    }
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 6, 1), 12);
+    const now = new Date();
+
+    const ads = await Advertisement.find({
+      placement,
+      status: "ACTIVE",
+      productId: { $ne: null },
+      startDate: { $lte: now },
+      $or: [{ endDate: null }, { endDate: { $gte: now } }],
+    })
+      .sort({ budget: -1, createdAt: -1 })
+      .limit(limit * 3)
+      .populate("vendor", "user businessName")
+      .populate({
+        path: "productId",
+        match: { status: "ACTIVE" },
+        select: "name price discountPrice media stockQuantity status vendor category averageRating reviewCount publicId",
+        populate: [
+          { path: "vendor", select: "Fullname companyName" },
+          { path: "category", select: "name slug" },
+        ],
+      });
+
+    const seen = new Set();
+    const data = [];
+    for (const ad of ads) {
+      const product = ad.productId;
+      if (!product || !ad.vendor) continue;
+      const productVendor = String(product.vendor?._id || product.vendor);
+      if (productVendor !== String(ad.vendor.user)) continue;
+      if (seen.has(String(product._id))) continue;
+      seen.add(String(product._id));
+      data.push({ id: ad.publicId, placement, product });
+      if (data.length >= limit) break;
+    }
+
+    return res.status(200).json({ data });
+  } catch (error) {
+    console.error("Error listing advertisements:", error);
+    return res.status(500).json({ message: "Could not load promotions." });
   }
 };

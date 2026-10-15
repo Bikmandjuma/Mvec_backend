@@ -9,7 +9,7 @@ router.get("/product/:productId", review.listProductReviews);
 // ─── AUTHENTICATED ────────────────────────────────────────────────────────────
 router.use(protect);
 
-router.post("/", review.createReview);
+router.post("/", require("../middleware/rateLimits").write, review.createReview);
 router.get("/mine", review.listMyReviews);
 router.patch("/:id", review.updateReview);
 router.delete("/:id", review.deleteReview);

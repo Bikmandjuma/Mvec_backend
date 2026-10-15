@@ -1,7 +1,7 @@
 openapi: 3.0.0
 info:
   title: MVEC Multi-Vendor Marketplace API
-  description: Consolidated OpenAPI 3.0 specification covering Authentication, Cart, Orders, Products, Stores, Staff Management, Double-Entry Ledger, Commission Rules, Payment Webhooks, B2B Wholesale, Disputes & Arbitration, and Affiliate Marketing Engine.
+  description: Consolidated OpenAPI 3.0 specification covering Authentication, Cart, Orders, Products, Stores, Staff Management, Double-Entry Ledger, Commission Rules, Payment Webhooks, B2B Wholesale, Disputes & Arbitration, Affiliate Marketing Engine, and the Supplier Dashboard.
   version: 1.0.0
 servers:
   - url: /api
@@ -46,7 +46,7 @@ paths:
                   example: "male"
                 role:
                   type: string
-                  enum: [buyer, vendor, supplier, affiliate, developer]
+                  enum: [buyer, vendor, supplier, affiliate]
                   example: "buyer"
                 phone:
                   type: string
@@ -58,6 +58,9 @@ paths:
                 verificationToken:
                   type: string
                   description: Optional. Token from the phone OTP verification flow; omit it when sending phone directly.
+                staffInviteToken:
+                  type: string
+                  description: One-time token from a vendor-team invitation email. Completes registration as a team member.
       responses:
         '201':
           description: User registered successfully (returns user and token)
@@ -82,6 +85,9 @@ paths:
                 password:
                   type: string
                   example: "Password123!"
+                staffInviteToken:
+                  type: string
+                  description: One-time token from a vendor-team invitation email. Accepts the invitation after sign-in.
       responses:
         '200':
           description: Successfully authenticated (Returns JWT)
@@ -695,21 +701,21 @@ paths:
           description: Store updated successfully
 
   # ==========================================
-  # STORE STAFF MANAGEMENT ROUTES
+  # VENDOR ACCOUNT TEAM ROUTES
   # ==========================================
   /staff:
     get:
-      summary: Get Vendor Store Staff Members
-      tags: [Store Staff]
+      summary: Get Vendor Account Team Members
+      tags: [Vendor Team]
       security:
         - BearerAuth: []
       responses:
         '200':
-          description: List of assigned store staff
+          description: List of staff assigned to the authenticated vendor account. A store is not required.
 
     post:
-      summary: Add New Store Staff Member
-      tags: [Store Staff]
+      summary: Add Vendor Account Team Member
+      tags: [Vendor Team]
       security:
         - BearerAuth: []
       requestBody:
@@ -718,10 +724,13 @@ paths:
           application/json:
             schema:
               type: object
-              required: [email, permissions]
+              required: [email]
               properties:
                 email:
                   type: string
+                role:
+                  type: string
+                  enum: [STORE_MANAGER, ORDER_MANAGER, CATALOG_MANAGER]
                 permissions:
                   type: object
                   properties:
@@ -731,12 +740,14 @@ paths:
                       type: boolean
       responses:
         '201':
-          description: Staff member assigned successfully
+          description: |
+            Staff member assigned to the vendor account. The email must belong
+            to an existing MVEC account. MVEC sends the member a sign-in invitation.
 
   /staff/{id}:
     put:
       summary: Update Staff Member Permissions
-      tags: [Store Staff]
+      tags: [Vendor Team]
       security:
         - BearerAuth: []
       parameters:
@@ -760,7 +771,7 @@ paths:
 
     delete:
       summary: Remove Staff Member
-      tags: [Store Staff]
+      tags: [Vendor Team]
       security:
         - BearerAuth: []
       parameters:
@@ -788,11 +799,15 @@ paths:
           application/json:
             schema:
               type: object
-              required: [amount, phoneNumber]
+              required: [phoneNumber]
               properties:
+                orderId:
+                  type: string
+                  description: Pay for this order. The server sets the amount (order total).
+                  example: "665f1c2e8a1b2c3d4e5f6789"
                 amount:
                   type: integer
-                  description: Amount in RWF (whole number)
+                  description: Standalone payment in whole RWF, only when no orderId is sent.
                   example: 1000
                 phoneNumber:
                   type: string
@@ -801,7 +816,9 @@ paths:
         '200':
           description: Payment prompt sent to the phone. Poll /payments/status/{paymentId} for the result.
         '400':
-          description: Invalid amount, invalid phone number, or wrong network
+          description: Invalid amount or phone number, wrong network, or order already paid
+        '404':
+          description: Order not found
         '502':
           description: Paypack could not be reached or rejected the request
 
@@ -817,11 +834,15 @@ paths:
           application/json:
             schema:
               type: object
-              required: [amount, phoneNumber]
+              required: [phoneNumber]
               properties:
+                orderId:
+                  type: string
+                  description: Pay for this order. The server sets the amount (order total).
+                  example: "665f1c2e8a1b2c3d4e5f6789"
                 amount:
                   type: integer
-                  description: Amount in RWF (whole number)
+                  description: Standalone payment in whole RWF, only when no orderId is sent.
                   example: 1000
                 phoneNumber:
                   type: string
@@ -830,7 +851,9 @@ paths:
         '200':
           description: Payment prompt sent to the phone. Poll /payments/status/{paymentId} for the result.
         '400':
-          description: Invalid amount, invalid phone number, or wrong network
+          description: Invalid amount or phone number, wrong network, or order already paid
+        '404':
+          description: Order not found
         '502':
           description: Paypack could not be reached or rejected the request
 
@@ -846,11 +869,15 @@ paths:
           application/json:
             schema:
               type: object
-              required: [amount, phoneNumber]
+              required: [phoneNumber]
               properties:
+                orderId:
+                  type: string
+                  description: Pay for this order. The server sets the amount (order total).
+                  example: "665f1c2e8a1b2c3d4e5f6789"
                 amount:
                   type: integer
-                  description: Amount in RWF (whole number)
+                  description: Standalone payment in whole RWF, only when no orderId is sent.
                   example: 1000
                 phoneNumber:
                   type: string
@@ -859,13 +886,46 @@ paths:
         '200':
           description: Payment prompt sent to the phone. Poll /payments/status/{paymentId} for the result.
         '400':
-          description: Invalid amount, invalid phone number, or wrong network
+          description: Invalid amount or phone number, wrong network, or order already paid
+        '404':
+          description: Order not found
         '502':
           description: Paypack could not be reached or rejected the request
 
+  /payments/pay/card:
+    post:
+      summary: Pay an Order by Card (Visa/Mastercard on Flutterwave's hosted checkout)
+      description: |
+        Returns `checkoutUrl`; send the buyer there. Flutterwave redirects back to
+        `/payment/{orderId}?paymentId=…`, and `/payments/status/{paymentId}` (or the
+        Flutterwave webhook) verifies the result with Flutterwave before the order is paid.
+        Without FLW_SECRET_KEY (development) the payment succeeds immediately.
+      tags: [Payments]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [orderId]
+              properties:
+                orderId:
+                  type: string
+      responses:
+        '200':
+          description: "{ paymentId, status: PENDING | SUCCESS, checkoutUrl }"
+        '400':
+          description: Order already paid or no longer payable
+        '404':
+          description: Not your order
+        '503':
+          description: Card payments not configured (production)
+
   /payments/status/{paymentId}:
     get:
-      summary: Check Payment Status (reconciles with Paypack while pending)
+      summary: Check Payment Status (reconciles with Paypack or Flutterwave while pending)
       tags: [Payments]
       security:
         - BearerAuth: []
@@ -877,9 +937,48 @@ paths:
             type: string
       responses:
         '200':
-          description: Current payment status (PENDING, SUCCESS or FAILED)
+          description: Current payment status (PENDING, SUCCESS or FAILED) and, for order payments, the order status
         '404':
           description: Payment not found
+
+  /webhooks/flutterwave:
+    post:
+      summary: Flutterwave Card Payment Webhook (verif-hash header, re-verified with Flutterwave)
+      tags: [Payments]
+      parameters:
+        - in: header
+          name: verif-hash
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Processed, ignored or already processed
+        '401':
+          description: Wrong or missing verif-hash
+
+  /buyer/subscription/checkout:
+    post:
+      summary: Pay for Buyer Premium (5,000 RWF / 30 days) by mobile money or card
+      tags: [Buyer Subscription]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                method:
+                  type: string
+                  enum: [momo, card]
+                phoneNumber:
+                  type: string
+                  description: Required for momo
+      responses:
+        '200':
+          description: "{ paymentId, status, checkoutUrl? }; Premium switches on when the payment succeeds"
 
   /webhooks/paypack:
     post:
@@ -1036,7 +1135,7 @@ paths:
   # ==========================================
   # FINANCIAL LEDGER & ESCROW (SUPER ADMIN)
   # ==========================================
-  /financial/ledger:
+  /admin/ledger:
     get:
       summary: Get Double-Entry Ledger Entries (Super Admin Only)
       tags: [Financial Ledger (Admin)]
@@ -1046,7 +1145,7 @@ paths:
         '200':
           description: Audit ledger entries list
 
-  /financial/settlements/{id}/hold:
+  /admin/settlements/{id}/hold:
     patch:
       summary: Place Administrative Hold on Vendor Settlement (Super Admin Only)
       tags: [Financial Ledger (Admin)]
@@ -1061,8 +1160,24 @@ paths:
       responses:
         '200':
           description: Administrative hold applied
+    delete:
+      summary: Lift an Administrative Hold (settlement becomes HELD and releasable again)
+      tags: [Financial Ledger (Admin)]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Hold lifted
+        '400':
+          description: Settlement is not on hold
 
-  /financial/settlements/{id}/release:
+  /admin/settlements/{id}/release:
     post:
       summary: Manually Release Escrow Settlement (Super Admin Only)
       tags: [Financial Ledger (Admin)]
@@ -1388,6 +1503,432 @@ paths:
       responses:
         '200':
           description: Affiliate payout status updated
+
+  /suppliers/me/finance/summary:
+    get:
+      summary: Get supplier earnings and payout balances
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Supplier finance summary
+        '401':
+          description: Authentication required
+
+  /suppliers/me/finance/ledger:
+    get:
+      summary: List supplier ledger movements
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+        - in: query
+          name: kind
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Supplier ledger entries
+
+  /suppliers/me/finance/payouts:
+    get:
+      summary: List supplier payout requests
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Supplier payouts
+    post:
+      summary: Request a supplier payout
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, method, destination]
+              properties:
+                amount:
+                  type: number
+                  minimum: 50000
+                method:
+                  type: string
+                  enum: [MTN_MOMO, AIRTEL_MONEY, BANK_TRANSFER]
+                destination:
+                  type: string
+                note:
+                  type: string
+      responses:
+        '201':
+          description: Payout request created
+        '400':
+          description: Invalid payout request or insufficient balance
+
+  /suppliers/me/finance/analytics:
+    get:
+      summary: Get supplier analytics for a date range
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: query
+          name: range
+          schema:
+            type: string
+            enum: [30d, 3m, 1y]
+      responses:
+        '200':
+          description: Period totals, trend series, category revenue, and top products
+
+  /suppliers/me/deliveries:
+    get:
+      summary: List supplier wholesale deliveries
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Deliveries and recorded milestones
+
+  /suppliers/me/settlements:
+    get:
+      summary: List supplier escrow holds and releases
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Settlement schedule entries
+
+  /suppliers/me/delivery/summary:
+    get:
+      summary: Get supplier delivery and settlement metrics
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Delivery and escrow summary
+
+  /suppliers/me/supply-requests:
+    get:
+      summary: List the supplier's supply requests
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Supplier supply requests
+    post:
+      summary: Create a supplier supply request
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lines, neededBy]
+              properties:
+                lines:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [product, units, unit, unitPrice]
+                    properties:
+                      product:
+                        type: string
+                      category:
+                        type: string
+                      units:
+                        type: integer
+                        minimum: 1
+                      unit:
+                        type: string
+                      unitPrice:
+                        type: number
+                        minimum: 0
+                      note:
+                        type: string
+                neededBy:
+                  type: string
+                  format: date-time
+                note:
+                  type: string
+      responses:
+        '201':
+          description: Supply request created
+        '400':
+          description: Invalid supply request
+
+  /suppliers/me/supply-requests/process:
+    get:
+      summary: Get the supplier supply-request workflow
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Workflow steps
+
+  /suppliers/me/supply-requests/{id}/cancel:
+    post:
+      summary: Withdraw an eligible supply request
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+      responses:
+        '200':
+          description: Request withdrawn
+        '409':
+          description: Request cannot be withdrawn in its current status
+
+  /suppliers/me/supply-requests/{id}/resubmit:
+    post:
+      summary: Resubmit a withdrawn supply request
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '201':
+          description: A new request was created from the withdrawn request
+        '409':
+          description: Request is not withdrawn
+
+  /suppliers/me/team:
+    get:
+      summary: List supplier staff records
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Owner and staff roster
+    post:
+      summary: Add a supplier staff record
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fullName, phone, role]
+              properties:
+                fullName:
+                  type: string
+                phone:
+                  type: string
+                email:
+                  type: string
+                role:
+                  type: string
+                  enum: [OPERATIONS, WAREHOUSE, FULFILMENT, FINANCE, VIEWER]
+                note:
+                  type: string
+      responses:
+        '201':
+          description: Staff record created
+
+  /suppliers/me/team/summary:
+    get:
+      summary: Get supplier team counts
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Staff status counts
+
+  /suppliers/me/team/{memberId}:
+    patch:
+      summary: Update a supplier staff record
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: memberId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Staff record updated
+    delete:
+      summary: Remove a supplier staff record
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: memberId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Staff record removed
+
+  /suppliers/me/reviews:
+    get:
+      summary: List reviews of the supplier
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Supplier reviews and vendor replies
+
+  /suppliers/{supplierId}/reviews:
+    post:
+      summary: Review a supplier after a completed wholesale order
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: supplierId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rating]
+              properties:
+                rating:
+                  type: integer
+                  minimum: 1
+                  maximum: 5
+                comment:
+                  type: string
+      responses:
+        '201':
+          description: Supplier review created
+        '403':
+          description: Completed wholesale order required
+
+  /admin/suppliers/supply-requests:
+    get:
+      summary: List supplier supply requests for review
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Requests awaiting supplier operations
+        '403':
+          description: Super administrator access required
+
+  /admin/suppliers/supply-requests/{id}:
+    patch:
+      summary: Advance or reject a supplier supply request
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [UNDER_REVIEW, APPROVED, SOURCING, IN_TRANSIT, RECEIVED, REJECTED]
+                decision:
+                  type: string
+      responses:
+        '200':
+          description: Request status updated
+        '409':
+          description: Invalid status transition
+
+  /admin/suppliers/payouts:
+    get:
+      summary: List pending supplier payouts
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Supplier payout requests awaiting processing
+
+  /admin/suppliers/payouts/{id}:
+    patch:
+      summary: Process or reject a supplier payout
+      tags: [Supplier Dashboard]
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [PROCESSING, PAID, REJECTED, FAILED]
+                reason:
+                  type: string
+      responses:
+        '200':
+          description: Payout status updated
+        '409':
+          description: Payout cannot be processed from its current status
 
 # ==========================================
 # REUSABLE COMPONENTS & SCHEMAS

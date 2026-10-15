@@ -45,7 +45,8 @@ exports.getSummary = async (req, res) => {
         isAdmin ? User.countDocuments() : Promise.resolve(null),
         isAdmin ? Vendor.countDocuments() : Promise.resolve(null),
         Product.countDocuments({ ...productWindow, stockQuantity: { $lte: 5 } }),
-        Payment.find({ createdAt: { $gte: since } }).select("amount status"),
+        // Sellers: money from their own sales (settlements); admins: every payment.
+        isAdmin ? Payment.find({ createdAt: { $gte: since } }).select("amount status") : Promise.resolve([]),
       ]);
 
     const orders = await Order.find({ ...orderQuery, createdAt: { $gte: since } }).select(
@@ -56,7 +57,13 @@ exports.getSummary = async (req, res) => {
     const successfulPayments = payments.filter((p) =>
       ["PAID", "CONFIRMED", "SUCCESS"].includes(String(p.status).toUpperCase())
     );
-    const paymentVolume = successfulPayments.reduce((s, p) => s + Number(p.amount || 0), 0);
+    const Settlement = require("../models/Settlement");
+    const settlements = await Settlement.find({ ...(isVendor ? { vendor: req.user._id } : {}), createdAt: { $gte: since }, status: { $nin: ["CANCELLED"] } }).select("grossAmount commissionAmount status").lean();
+    const paymentVolume = isAdmin
+      ? successfulPayments.reduce((s, p) => s + Number(p.amount || 0), 0)
+      : settlements.filter((x) => x.status !== "REFUNDED").reduce((s, x) => s + Number(x.grossAmount || 0), 0);
+    const commission = settlements.filter((x) => x.status !== "REFUNDED").reduce((s, x) => s + Number(x.commissionAmount || 0), 0);
+    const refunds = orders.filter((o) => o.paymentStatus === "REFUNDED").length;
 
     return res.status(200).json({
       range,
@@ -68,8 +75,8 @@ exports.getSummary = async (req, res) => {
         activeVendors: vendors,
         lowStockProducts: productsLowStock,
         paymentVolume,
-        commission: Math.round(gmv * 0.05),
-        refunds: Math.max(1, Math.round(periodOrders * 0.033)),
+        commission: Math.round(commission),
+        refunds,
       },
     });
   } catch (error) {
@@ -86,7 +93,13 @@ exports.getRevenueSeries = async (req, res) => {
     const range = req.query.range || "30d";
     const since = rangeStart(range);
 
-    const orders = await Order.find({ createdAt: { $gte: since } }).select(
+    // Sellers only see days with orders containing their products.
+    let scope = {};
+    if (req.user.role === "vendor") {
+      const productIds = await Product.find({ vendor: req.user._id }).distinct("_id");
+      scope = { "items.product": { $in: productIds } };
+    }
+    const orders = await Order.find({ ...scope, createdAt: { $gte: since } }).select(
       "totalAmount createdAt"
     );
 

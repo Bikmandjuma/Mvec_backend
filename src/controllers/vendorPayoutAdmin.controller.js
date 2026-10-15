@@ -1,8 +1,9 @@
 // MVEC finance: review and pay out seller withdrawal requests.
 // PENDING -> PROCESSING (approved) -> PAID (transfer reference recorded)
 // PENDING/PROCESSING -> REJECTED (amount returned to the seller's balance)
-const mongoose = require("mongoose");
-const { Payout, VendorBalance } = require("../models/Payout");
+const orm = require("../database/orm");
+const { Payout } = require("../models/Payout");
+const VendorWallet = require("../models/VendorWallet");
 const User = require("../models/User");
 const paypack = require("../services/paypack.service");
 const { notify } = require("../services/sellerFinance.service");
@@ -26,7 +27,7 @@ exports.listVendorPayouts = async (req, res) => {
       Payout.find({}).select("status amount"),
     ]);
     const vendorIds = [...new Set(data.map((p) => String(p.vendor?._id || p.vendor)))];
-    const balances = await VendorBalance.find({ vendor: { $in: vendorIds } });
+    const balances = await VendorWallet.find({ vendor: { $in: vendorIds } });
     const balanceBy = new Map(balances.map((b) => [String(b.vendor), Number(b.availableBalance || 0)]));
     const totals = ["PENDING", "PROCESSING", "PAID", "REJECTED", "CANCELLED", "FAILED"].reduce((o, s) => {
       const rows = all.filter((p) => p.status === s);
@@ -48,7 +49,7 @@ exports.listVendorPayouts = async (req, res) => {
 // With PAYOUT_AUTO_DISBURSE=true the money is sent through Paypack right away.
 exports.approveVendorPayout = async (req, res) => {
   try {
-    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ message: "Payout not found." });
+    if (!orm.isValidObjectId(req.params.id)) return res.status(404).json({ message: "Payout not found." });
     let payout = await transition(req.params.id, ["PENDING"], { status: "PROCESSING" });
     if (!payout) return res.status(400).json({ message: "Only pending requests can be approved." });
 
@@ -59,7 +60,7 @@ exports.approveVendorPayout = async (req, res) => {
           transferReference: result.ref || null,
           ...(result.status === "SUCCESSFUL" ? { status: "PAID", processedAt: new Date() } : {}),
         });
-        if (payout.status === "PAID") await VendorBalance.updateOne({ vendor: payout.vendor }, { $inc: { withdrawnAmount: Number(payout.amount) } });
+        if (payout.status === "PAID") await VendorWallet.updateOne({ vendor: payout.vendor }, { $inc: { totalWithdrawn: Number(payout.amount) } });
       } catch (err) {
         payout = await transition(payout._id, ["PROCESSING"], { status: "PENDING" });
         return res.status(502).json({ message: `Approval undone: ${err.message}`, payout });
@@ -77,10 +78,10 @@ exports.markVendorPayoutPaid = async (req, res) => {
   try {
     const ref = String(req.body.transferReference || "").trim();
     if (!ref) return res.status(400).json({ message: "Enter the mobile money transaction reference." });
-    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ message: "Payout not found." });
+    if (!orm.isValidObjectId(req.params.id)) return res.status(404).json({ message: "Payout not found." });
     const payout = await transition(req.params.id, ["PENDING", "PROCESSING"], { status: "PAID", transferReference: ref, processedAt: new Date() });
     if (!payout) return res.status(400).json({ message: "This payout was already completed, rejected or cancelled." });
-    await VendorBalance.updateOne({ vendor: payout.vendor }, { $inc: { withdrawnAmount: Number(payout.amount) } });
+    await VendorWallet.updateOne({ vendor: payout.vendor }, { $inc: { totalWithdrawn: Number(payout.amount) } });
     await notify(payout.vendor, "Payout sent", `${fmt(payout.amount)} was sent to ${payout.payoutDetails?.accountNumber || "your mobile money"} (ref ${ref}).`, payout.payoutNumber);
     return res.status(200).json({ message: "Payout marked as paid.", payout });
   } catch (error) {
@@ -93,10 +94,10 @@ exports.rejectVendorPayout = async (req, res) => {
   try {
     const reason = String(req.body.reason || "").trim();
     if (!reason) return res.status(400).json({ message: "Tell the seller why the payout was rejected." });
-    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ message: "Payout not found." });
+    if (!orm.isValidObjectId(req.params.id)) return res.status(404).json({ message: "Payout not found." });
     const payout = await transition(req.params.id, ["PENDING", "PROCESSING"], { status: "REJECTED", rejectionReason: reason, processedAt: new Date() });
     if (!payout) return res.status(400).json({ message: "This payout was already completed, rejected or cancelled." });
-    await VendorBalance.updateOne({ vendor: payout.vendor }, { $inc: { availableBalance: Number(payout.amount) } });
+    await VendorWallet.updateOne({ vendor: payout.vendor }, { $inc: { availableBalance: Number(payout.amount) } });
     await notify(payout.vendor, "Payout rejected", `Your payout ${payout.payoutNumber} was rejected: ${reason}. ${fmt(payout.amount)} is back in your available balance.`, payout.payoutNumber);
     return res.status(200).json({ message: "Payout rejected and the amount returned to the seller.", payout });
   } catch (error) {
