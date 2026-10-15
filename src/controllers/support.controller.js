@@ -1,4 +1,11 @@
 const SupportCase = require("../models/SupportCase");
+const notifications = require("../services/notification.service");
+
+// Where the person who opened a request reads it, by their role.
+const supportPageFor = async (userId) => {
+  const user = await require("../models/User").findById(userId).select("role").lean();
+  return { vendor: "/vendor/support", supplier: "/supplier/support", affiliate: "/affiliate/support", delivery: "/delivery/support" }[user?.role] || "/support";
+};
 
 // Utility helper to generate unique ticket numbers
 const generateTicketNumber = () => {
@@ -12,18 +19,28 @@ exports.createSupportCase = async (req, res) => {
   try {
     const { subject, category, priority, description } = req.body;
 
+    if (req.user.role === "super_admin") {
+      return res.status(400).json({ message: "Admins answer support requests; they don't open them." });
+    }
     if (!subject || !description) {
       return res.status(400).json({ message: "Subject and description are required" });
     }
+    const CATEGORIES = ["ORDER", "PAYMENT", "ACCOUNT", "VENDOR_ONBOARDING", "TECHNICAL", "OTHER"];
+    const PRIORITIES = ["LOW", "MEDIUM", "HIGH", "URGENT"];
 
     const supportCase = await SupportCase.create({
       ticketNumber: generateTicketNumber(),
       openedBy: req.user.id,
-      subject,
-      category: category || "OTHER",
-      priority: priority || "MEDIUM",
+      subject: String(subject).slice(0, 200),
+      category: CATEGORIES.includes(category) ? category : "OTHER",
+      priority: PRIORITIES.includes(priority) ? priority : "MEDIUM",
       description,
     });
+    notifications.adminAlert({
+      title: `${supportCase.priority === "URGENT" ? "URGENT support request" : "New support request"}: ${supportCase.subject}`,
+      message: `${req.user.Fullname || "A user"} (${req.user.role}) · ${supportCase.ticketNumber}`,
+      link: `/admin/support?case=${supportCase._id}`,
+    }).catch(() => {});
 
     return res.status(201).json({
       message: "Support ticket created successfully",
@@ -117,9 +134,17 @@ exports.updateSupportCaseStatus = async (req, res) => {
       return res.status(404).json({ message: "Support case not found" });
     }
 
+    const changed = supportCase.status !== status;
     supportCase.status = status;
     if (assignedTo) supportCase.assignedTo = assignedTo;
     await supportCase.save();
+    if (changed) {
+      const words = { IN_PROGRESS: "is being handled", RESOLVED: "was resolved", CLOSED: "was closed", OPEN: "was reopened" };
+      notifications.notify(supportCase.openedBy, {
+        type: "ADMIN", title: `Your support request ${supportCase.ticketNumber} ${words[status] || "was updated"}`,
+        message: supportCase.subject, link: await supportPageFor(supportCase.openedBy),
+      }).catch(() => {});
+    }
 
     return res.status(200).json({ message: "Support case updated", case: supportCase });
   } catch (error) {
@@ -157,12 +182,26 @@ exports.addCaseComment = async (req, res) => {
       attachments: attachments || [],
     });
 
-    // Re-open case if customer replies to a resolved case
+    // Re-open case if customer replies to a resolved case; MVEC answering an open case means it is in progress.
     if (isOwner && supportCase.status === "RESOLVED") {
       supportCase.status = "IN_PROGRESS";
     }
+    if (isAdmin && !isOwner && supportCase.status === "OPEN") {
+      supportCase.status = "IN_PROGRESS";
+      if (!supportCase.assignedTo) supportCase.assignedTo = req.user.id;
+    }
 
     await supportCase.save();
+    if (isAdmin && !isOwner) {
+      notifications.notify(supportCase.openedBy, {
+        type: "ADMIN", title: `MVEC replied to ${supportCase.ticketNumber}`, message: String(message).slice(0, 200), link: await supportPageFor(supportCase.openedBy),
+        sms: `MVEC replied to your support request ${supportCase.ticketNumber}. Open MVEC to read it.`,
+      }).catch(() => {});
+    } else {
+      const to = supportCase.assignedTo ? [supportCase.assignedTo] : null;
+      const alert = { title: `Reply on ${supportCase.ticketNumber}: ${supportCase.subject}`, message: String(message).slice(0, 200), link: `/admin/support?case=${supportCase._id}` };
+      (to ? notifications.notify(to[0], { type: "ADMIN", ...alert }) : notifications.adminAlert(alert)).catch(() => {});
+    }
     await supportCase.populate("comments.author", "Fullname email role");
 
     return res.status(200).json({

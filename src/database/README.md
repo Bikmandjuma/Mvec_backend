@@ -1,36 +1,48 @@
-# MySQL
+# Database (MySQL / MariaDB)
 
-The backend runs on **MongoDB or MySQL** with the same code. `DB_DRIVER` in `.env`
-chooses which one; every route, controller, service and worker behaves the same.
+All application data lives in MySQL (MySQL 8 or MariaDB 10.4+, e.g. XAMPP). MongoDB is
+no longer used; it is only read once by the data-copy script below.
+
+## Setup
+
+`.env`:
 
 ```
-DB_DRIVER=mysql          # or mongo
 DB_HOST=127.0.0.1
 DB_PORT=3306
-DB_DATABASE=mvec
+DB_DATABASE=ikiguzi
 DB_USERNAME=root
-DB_PASSWORD="..."        # quote it if it contains # or spaces
+DB_PASSWORD=             # quote it if it contains # or spaces
 ```
 
-Create the database once: `CREATE DATABASE mvec CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`
+1. Create the database once (XAMPP: phpMyAdmin → SQL, or the `mysql` client):
+   `CREATE DATABASE ikiguzi CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`
+2. `npm run db:migrate` – creates/updates every table.
+3. Optional: `npm run db:seed` for demo accounts and catalog, or copy old data (below).
+4. `npm run dev` – the server checks the connection and that every migration is applied
+   before it starts listening, and prints what to do if not (start MySQL, create the
+   database, run migrations, fix credentials).
+
+`GET /health` reports `{ db: "up" | "down" }`.
 
 ## How it works
 
-- **Tables** – Sequelize migrations in `migrations/` (57 tables). Phase 1–2 tables have
-  hand-written models in `models/`; the rest are declared once as specs in `spec/`
-  (`commerce.js`, `platform.js`) and built by `spec/define.js`.
-- **Same API, no controller changes** – with `DB_DRIVER=mysql`, each `src/models/*.js`
-  exports a model from `mongoose-compat/` instead of Mongoose. It implements the Mongoose
-  API the app uses: `find/findOne/findById` with `populate/sort/select/limit/skip/lean/session`,
-  `doc.save()` (with model hooks), `create`/`new Model()`, `findOneAndUpdate`
-  (`$set $inc $addToSet $push $pull`, upserts), `updateMany`, `deleteOne/Many`, `countDocuments`,
-  `exists`, `distinct`, `aggregate`, sessions/transactions, embedded arrays (`.id()`,
-  sub-document `deleteOne()`), duplicate-key errors (`code 11000`), `CastError`, `ValidationError`.
-- **Ids** – primary keys are `CHAR(24)` MongoDB ObjectIds, so `_id`, links and the frontend
-  are unchanged and copied rows keep their ids.
-- **Dates** – `DATETIME(3)` in UTC (millisecond precision, like MongoDB).
-- **Embedded data** – sub-document arrays are child tables (`order_items`, `order_parcels`,
-  `cart_items`, …); nested objects are flattened columns; lists and `Mixed` are `JSON`.
+- **Tables** – Sequelize migrations in `migrations/`. Users, vendors, stores, staff,
+  categories, products and stock movements have hand-written models in `models/`; every
+  other table is declared once as a spec in `spec/` (`commerce.js`, `platform.js`) and built
+  by `spec/define.js`.
+- **Models** – each `src/models/*.js` exports a model from `mongoose-compat/`, which gives
+  controllers a familiar document API (`find/findOne/findById` with `populate/sort/select/
+  limit/skip/lean`, `save()`, `create`, `findOneAndUpdate` with `$set $inc $push $pull
+  $addToSet`, `updateMany`, `deleteMany`, `countDocuments`, `distinct`, `aggregate`) and runs
+  it as SQL through Sequelize.
+- **Ids and transactions** – `src/database/orm.js` provides `isValidObjectId`,
+  `Types.ObjectId` and `startSession()`. Ids are 24-character hex strings (CHAR(24) primary
+  keys). `startSession()` + `startTransaction()` is a MySQL transaction; it opens its
+  connection on the first query and is rolled back automatically if it is ever left open.
+- **Data shapes** – dates are `DATETIME(3)` in UTC; embedded lists are child tables
+  (`order_items`, `cart_items`, `user_wishlist_items`, …); nested objects are flattened
+  columns; free-form values are `JSON` (MariaDB stores them as text; they are parsed on read).
 
 ## Commands
 
@@ -39,47 +51,28 @@ Create the database once: `CREATE DATABASE mvec CHARACTER SET utf8mb4 COLLATE ut
 | `npm run db:migrate` | Create / update tables |
 | `npm run db:migrate:status` | Applied and pending migrations |
 | `npm run db:migrate:undo` | Roll back the last migration |
-| `npm run db:copy-from-mongo` | Copy all MongoDB data into MySQL (read-only on MongoDB, re-runnable; add table names to copy only some) |
-| `npm run db:seed` | Super admin + demo vendors, stores, staff, buyer and catalog |
-| `npm run db:seed:undo` | Remove the demo data (a copied admin is kept) |
-| `npm run test:e2e` | Run the API flows on MongoDB and on MySQL (throwaway databases) and diff them |
+| `npm run db:seed` / `db:seed:undo` | Demo vendors, stores, staff, buyer and catalog (refused in production unless `SEED_ALLOW_PRODUCTION=true`) |
+| `npm run db:copy-from-mongo` | One-time copy of old MongoDB data (`MONGO_URI`) into MySQL; read-only on MongoDB, re-runnable |
+| `npm test` | Unit + integration tests on `<DB_DATABASE>_test` (created and migrated automatically) |
+| `npm run test:e2e` | 163 API steps against a throwaway `ikiguzi_e2e_test` database |
 
-Order for a fresh database: **migrate → copy-from-mongo → seed**.
+Tests refuse to run against a database whose name does not end in `_test`, never call real
+payment providers and never send real email or SMS.
 
-Demo logins (passwords `SEED_VENDOR_PASSWORD` / `SEED_BUYER_PASSWORD`, defaults `Vendor@12345` /
-`Buyer@12345`): `vendor.kigalitech@mvec.test`, `vendor.urbancloset@mvec.test`,
-`vendor.homestyle@mvec.test`, `staff.kigalitech@mvec.test`, `buyer@mvec.test`.
-Demo seeders refuse to run when `NODE_ENV=production` unless `SEED_ALLOW_PRODUCTION=true`.
+## Migrations
 
-## Switching a server to MySQL
+Migrations only add tables/columns/indexes, widen enums and relax NOT NULL; none drops data.
+Each has a `down` that removes what it added. Recent ones:
 
-1. `npm run db:migrate`
-2. Stop the app (no more writes to MongoDB), then `npm run db:copy-from-mongo` for a final sync.
-3. Set `DB_DRIVER=mysql` and start the app.
+- `20261013000100-ikiguzi-buyer-affiliate-supplier` – order recipient/courier/disputes,
+  affiliate attribution and reversals, refunds & withdrawals, wishlists, onboarding,
+  staff invitations, supplier reviews/supply requests/team.
+- `20261013000200-card-payments` – card payments (Flutterwave) and card refunds.
+- `20261013000300-paid-subscriptions` – payments record what they buy (buyer Premium).
 
-**Rollback:** set `DB_DRIVER=mongo` and restart. Data written while on MySQL is not copied
-back to MongoDB.
+## Differences from the old MongoDB behaviour
 
-## Verification
-
-- `npm run test:e2e` – 165 API steps (auth, multi-store, catalog, inventory, shipping, cart,
-  checkout, manual orders, MoMo payment + escrow, fulfilment, payouts, cancellations, OTP
-  delivery, disputes, wholesale, affiliates, abuse reports, commissions, subscriptions/ads,
-  messaging, notifications, support, admin): identical results on both databases.
-- Unit tests give the same results with `DB_DRIVER=mongo` and `DB_DRIVER=mysql`
-  (use a `*_test` database for the latter).
-- Live data: public, vendor, buyer and admin endpoints return the same JSON from MongoDB and
-  from a fresh MySQL copy.
-
-## Differences to know
-
-- **Text comparison**: equality and unique indexes are case-insensitive in MySQL
-  (`utf8mb4_unicode_ci`); MongoDB is case-sensitive. Sorting is case-sensitive to match MongoDB.
-- **Missing vs null**: a field never set in MongoDB is absent from JSON; MySQL returns `null`.
-- **Aggregations** run their first `$match` in SQL and the remaining stages in Node — fine at
-  the dashboards' data sizes; move hot ones to SQL if they grow large.
-- `[mysql-compat] query on unknown path …` warnings mean code queries a field the model
-  doesn't have (it matches nothing on MongoDB either).
-
-Never run `DB_DRIVER=mysql npm test` against the real database: set `DB_DATABASE` to a `*_test`
-database. Unit tests that stub only part of a model can write rows.
+- Text equality and unique indexes are case-insensitive (`utf8mb4_unicode_ci`).
+- A field that was never set comes back as `null` instead of being absent.
+- Aggregations run their first `$match` in SQL and the remaining stages in Node; fine at
+  dashboard sizes, move hot ones to SQL if they grow large.

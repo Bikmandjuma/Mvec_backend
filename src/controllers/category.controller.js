@@ -1,6 +1,8 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
+const jwt = require("jsonwebtoken");
 const Category = require("../models/Category");
 const Product = require("../models/Product");
+const User = require("../models/User");
 
 // Helper: turn a name into a slug
 const slugify = (str) =>
@@ -9,6 +11,45 @@ const slugify = (str) =>
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)/g, "");
+
+// ─── OPTIONAL REQUESTER RESOLUTION ─────────────────────────────────────────
+// GET /api/categories is a public route, but the dashboard still sends its
+// Bearer token. We resolve the caller on a best-effort basis (never failing the
+// request) so we can also return per-vendor product counts.
+const resolveRequester = async (req) => {
+  try {
+    const header = req.headers.authorization || "";
+    if (!header.startsWith("Bearer ")) return null;
+    const token = header.split(" ")[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    return await User.findById(decoded.userId || decoded.id).select("_id role").lean();
+  } catch (error) {
+    return null;
+  }
+};
+
+// ─── PRODUCT COUNTS ─────────────────────────────────────────────────────────
+// Returns each category as a plain object enriched with:
+//   productCount   - live (ACTIVE) marketplace products in this category
+//   myProductCount - all of the requesting vendor's products (when identified)
+// Plain finds + counting in JS so it runs the same on MongoDB and MySQL.
+const attachProductCounts = async (categories, requester) => {
+  const rows = categories.map((cat) => (cat.toJSON ? cat.toJSON() : { ...cat }));
+  if (!rows.length) return rows;
+  const ids = rows.map((cat) => cat._id);
+  const tally = (list) => list.reduce((m, p) => m.set(String(p.category), (m.get(String(p.category)) || 0) + 1), new Map());
+
+  const live = tally(await Product.find({ category: { $in: ids }, status: "ACTIVE" }).select("category").lean());
+  const mine = requester?._id
+    ? tally(await Product.find({ category: { $in: ids }, vendor: requester._id }).select("category").lean())
+    : null;
+
+  return rows.map((cat) => ({
+    ...cat,
+    productCount: live.get(String(cat._id)) || 0,
+    ...(mine ? { myProductCount: mine.get(String(cat._id)) || 0 } : {}),
+  }));
+};
 
 // ─── CREATE CATEGORY ──────────────────────────────────────────────────────
 // @route   POST /api/categories        (admin, or /api/vendor/categories if permitted)
@@ -23,7 +64,7 @@ exports.createCategory = async (req, res) => {
     // Validate parent exists if provided
     let parent = null;
     if (parentId) {
-      if (!mongoose.Types.ObjectId.isValid(parentId)) {
+      if (!orm.Types.ObjectId.isValid(parentId)) {
         return res.status(400).json({ message: "Invalid parentId" });
       }
       parent = await Category.findById(parentId);
@@ -70,26 +111,18 @@ exports.createCategory = async (req, res) => {
 // withCounts adds productCount (active marketplace products) to each category.
 exports.getCategories = async (req, res) => {
   try {
-    let categories = await Category.find({ active: true }).sort({ sortOrder: 1, name: 1 });
-
-    if (req.query.withCounts === "true") {
-      const rows = await Product.aggregate([
-        { $match: { status: "ACTIVE", category: { $in: categories.map((c) => c._id) } } },
-        { $group: { _id: "$category", count: { $sum: 1 } } },
-      ]);
-      const counts = Object.fromEntries(rows.map((r) => [String(r._id), r.count]));
-      categories = categories.map((c) => ({ ...c.toJSON(), productCount: counts[String(c._id)] || 0 }));
-    }
+    const requester = await resolveRequester(req);
+    const categories = await Category.find({ active: true }).sort({ sortOrder: 1, name: 1 });
+    const withCounts = await attachProductCounts(categories, requester);
 
     if (req.query.tree === "true") {
       const byId = {};
-      categories.forEach((cat) => {
-        const plain = typeof cat.toJSON === "function" ? cat.toJSON() : cat;
-        byId[cat._id] = { ...plain, children: [] };
+      withCounts.forEach((cat) => {
+        byId[cat._id] = { ...cat, children: [] };
       });
 
       const tree = [];
-      categories.forEach((cat) => {
+      withCounts.forEach((cat) => {
         if (cat.parentId) {
           byId[cat.parentId]?.children.push(byId[cat._id]);
         } else {
@@ -100,7 +133,7 @@ exports.getCategories = async (req, res) => {
       return res.status(200).json({ categories: tree });
     }
 
-    return res.status(200).json({ categories });
+    return res.status(200).json({ categories: withCounts });
   } catch (error) {
     console.error("Error fetching categories:", error);
     return res.status(500).json({ message: "Internal server error" });
@@ -142,7 +175,7 @@ exports.updateCategory = async (req, res) => {
       if (parentId === id) {
         return res.status(422).json({ message: "A category cannot be its own parent" });
       }
-      if (!mongoose.Types.ObjectId.isValid(parentId)) {
+      if (!orm.Types.ObjectId.isValid(parentId)) {
         return res.status(400).json({ message: "Invalid parentId" });
       }
       const parent = await Category.findById(parentId);
@@ -190,15 +223,23 @@ exports.deleteCategory = async (req, res) => {
       return res.status(404).json({ message: "Category not found" });
     }
 
-    // Block delete if it still has active subcategories
-    const childCount = await Category.countDocuments({ parentId: id, active: true });
-    if (childCount > 0) {
+    // Check for active subcategories
+    const subcatCount = await Category.countDocuments({ parentId: id, active: true });
+    if (subcatCount > 0) {
       return res.status(409).json({
-        message: "Cannot delete a category that still has active subcategories",
+        message: "Cannot delete category: Please remove or reassign its subcategories first.",
       });
     }
 
-    // Soft-delete: keeps history/products referencing it intact
+    // Check for attached products
+    const productCount = await Product.countDocuments({ category: id });
+    if (productCount > 0) {
+      return res.status(409).json({
+        message: "Cannot delete category: Please reassign or delete all products in this category first.",
+      });
+    }
+
+    // Safe deletion / soft delete
     category.active = false;
     await category.save();
 

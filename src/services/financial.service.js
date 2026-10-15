@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const LedgerAccount = require("../models/LedgerAccount");
 const LedgerEntry = require("../models/LedgerEntry");
 const Settlement = require("../models/Settlement");
@@ -7,6 +7,8 @@ const AdminWallet = require("../models/AdminWallet");
 const DeveloperWallet = require("../models/DeveloperWallet");
 const AffiliateWallet = require("../models/AffiliateWallet");
 const User = require("../models/User");
+const Order = require("../models/Order");
+const ConversionAudit = require("../models/ConversionAudit");
 
 async function getOrCreateLedgerAccount({ accountType, ownerId = null, session }) {
   const query = { accountType };
@@ -47,6 +49,7 @@ exports.lockPaymentInEscrow = async ({
   session,
   split = null,
   affiliateUserId = null,
+  orderItemId = null,
 }) => {
   const platformFee = split
     ? Number(split.totalPlatformFee) || Number(split.commissionAmount) || 0
@@ -57,6 +60,7 @@ exports.lockPaymentInEscrow = async ({
   const devShare = split ? split.developerShare : 0;
   const adminShare = split ? split.adminShare : 0;
   const affShare = split ? split.affiliateShare : 0;
+  const vendorAffShare = split ? Number(split.vendorAffiliateShare) || 0 : 0;
   const gwFee = split ? split.gatewayFee : 0;
 
   const escrowAccount = await getOrCreateLedgerAccount({ accountType: "ESCROW_HOLDING", session });
@@ -87,6 +91,7 @@ exports.lockPaymentInEscrow = async ({
       {
         settlementReference: `MVEC-SETTLE-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`,
         order: orderId,
+        orderItemId,
         vendor: vendorId,
         grossAmount,
         commissionAmount: platformFee,
@@ -94,7 +99,10 @@ exports.lockPaymentInEscrow = async ({
         developerShare: devShare,
         adminShare,
         affiliateShare: affShare,
+        vendorAffiliateShare: vendorAffShare,
         gatewayFee: gwFee,
+        commissionRate: split ? Number(split.commissionRate ?? split.commissionRateValue) || null : null,
+        gatewayFeePayer: split?.gatewayFeePayer === "SELLER" ? "SELLER" : "MVEC",
         affiliateUser: affiliateUserId,
         status: "HELD",
       },
@@ -138,14 +146,61 @@ exports.lockPaymentInEscrow = async ({
   return settlement[0];
 };
 
+/**
+ * The single place affiliate commissions become APPROVED.
+ *
+ * Preconditions are read from the order itself: it must be PAID and have been
+ * confirmed DELIVERED/COMPLETED. Anything else (shipped, processing, cancelled,
+ * refunded, unpaid) leaves commissions untouched. The PENDING -> APPROVED flip
+ * is an atomic conditional update, so replays and concurrent events can never
+ * approve (or credit the wallet) twice; reversed commissions are no longer
+ * PENDING and are skipped. Delivery is tracked per order, so all promoted items
+ * of the order are approved together, each for its net (post-refund) amount.
+ */
+exports.approveAffiliateCommissionsForOrder = async ({ orderId, session }) => {
+  const order = await Order.findById(orderId).session(session);
+  if (!order) return [];
+  const delivered = order.isDelivered && ["DELIVERED", "COMPLETED"].includes(order.orderStatus);
+  if (order.paymentStatus !== "PAID" || !delivered) return [];
+
+  const pending = await ConversionAudit.find({ order: order._id, status: "PENDING" }).session(session);
+  const approved = [];
+  for (const audit of pending) {
+    const claimed = await ConversionAudit.findOneAndUpdate(
+      { _id: audit._id, status: "PENDING" },
+      { $set: { status: "APPROVED", approvedAt: new Date() } },
+      { new: true, session }
+    );
+    if (!claimed) continue;
+
+    const net = Math.round((claimed.commissionEarned - claimed.reversedAmount) * 100) / 100;
+    if (net > 0) {
+      const affAccount = await getOrCreateLedgerAccount({ accountType: "AFFILIATE_COMMISSION", session });
+      affAccount.balance += net;
+      await affAccount.save({ session });
+
+      await AffiliateWallet.findOneAndUpdate(
+        { affiliateUser: claimed.affiliateUser },
+        { $inc: { pendingBalance: -net, availableBalance: net } },
+        { session }
+      );
+    }
+    approved.push({ audit: claimed._id, amount: net });
+  }
+  return approved;
+};
+
 exports.releaseEscrowToVendor = async ({ settlementId, session, adminUserId = null }) => {
   const settlement = await Settlement.findById(settlementId).session(session);
   if (!settlement) {
     throw new Error("Settlement not found.");
   }
 
+  // An admin hold blocks every release until the hold is lifted.
   if (settlement.status !== "HELD") {
-    throw new Error(`Settlement is not eligible for release with status: ${settlement.status}`);
+    throw new Error(settlement.status === "ADMIN_HOLD"
+      ? "Settlement is not eligible for release while on admin hold. Lift the hold first."
+      : `Settlement is not eligible for release with status: ${settlement.status}`);
   }
 
   const escrowAccount = await getOrCreateLedgerAccount({ accountType: "ESCROW_HOLDING", session });
@@ -157,9 +212,25 @@ exports.releaseEscrowToVendor = async ({ settlementId, session, adminUserId = nu
   const affShare = settlement.affiliateShare || 0;
   const gwFee = settlement.gatewayFee || 0;
 
+  // gross = seller net + platform fee + seller-paid affiliate commission.
+  const vendorAffShare = Number(settlement.vendorAffiliateShare) || 0;
   escrowAccount.balance -= settlement.grossAmount;
   vendorAccount.balance += settlement.netAmount;
   platformAccount.balance += settlement.commissionAmount;
+  if (vendorAffShare > 0) {
+    const affiliateAccount = await getOrCreateLedgerAccount({ accountType: "AFFILIATE_COMMISSION", session });
+    affiliateAccount.balance += vendorAffShare;
+    await affiliateAccount.save({ session });
+    await LedgerEntry.create([{
+      transactionReference: `MVEC-AFF-${Date.now()}`,
+      debitAccount: escrowAccount._id,
+      creditAccount: affiliateAccount._id,
+      amount: vendorAffShare,
+      entryType: "AFFILIATE_COMMISSION",
+      relatedOrder: settlement.order,
+      description: `Seller-paid affiliate commission for settlement ${settlement.settlementReference}`,
+    }], { session });
+  }
 
   await escrowAccount.save({ session });
   await vendorAccount.save({ session });
@@ -207,27 +278,29 @@ exports.releaseEscrowToVendor = async ({ settlementId, session, adminUserId = nu
     }
   }
 
+  // Affiliate commission is approved by delivery, not by escrow release alone;
+  // this is a no-op unless the order is already delivered.
   if (affShare > 0 && settlement.affiliateUser) {
-    const affAccount = await getOrCreateLedgerAccount({ accountType: "AFFILIATE_COMMISSION", session });
-    affAccount.balance += affShare;
-    await affAccount.save({ session });
-
-    await AffiliateWallet.findOneAndUpdate(
-      { affiliateUser: settlement.affiliateUser },
-      {
-        $inc: {
-          pendingBalance: -affShare,
-          availableBalance: affShare,
-        },
-      },
-      { session }
-    );
+    await exports.approveAffiliateCommissionsForOrder({ orderId: settlement.order, session });
   }
 
   if (gwFee > 0) {
     const gwAccount = await getOrCreateLedgerAccount({ accountType: "GATEWAY_FEES", session });
     gwAccount.balance += gwFee;
     await gwAccount.save({ session });
+    // When the seller bears the provider fee it leaves escrow on its own line
+    // (gross = seller net + commission + seller-paid affiliate share + this fee).
+    if (settlement.gatewayFeePayer === "SELLER") {
+      await LedgerEntry.create([{
+        transactionReference: `MVEC-GWFEE-${Date.now()}`,
+        debitAccount: escrowAccount._id,
+        creditAccount: gwAccount._id,
+        amount: gwFee,
+        entryType: "PLATFORM_COMMISSION_DEDUCTION",
+        relatedOrder: settlement.order,
+        description: `Payment provider fee paid by the seller for settlement ${settlement.settlementReference}`,
+      }], { session });
+    }
   }
 
   settlement.status = "RELEASED";
@@ -255,7 +328,7 @@ exports.releaseEscrowToVendor = async ({ settlementId, session, adminUserId = nu
         description: `Platform commission deducted for settlement ${settlement.settlementReference}`,
       },
     ],
-    { session }
+    { session, ordered: true }
   );
 
   await VendorWallet.findOneAndUpdate(
@@ -271,4 +344,76 @@ exports.releaseEscrowToVendor = async ({ settlementId, session, adminUserId = nu
   );
 
   return settlement;
+};
+/**
+ * Reverse every HELD settlement of an order after the buyer cancels a paid
+ * order. Undoes exactly what lockPaymentInEscrow recorded: the escrow balance,
+ * the pending wallet balances and the settlement itself, and writes a
+ * BUYER_REFUND ledger entry per vendor. Released settlements are never touched.
+ */
+exports.refundHeldEscrowForOrder = async ({ orderId, session }) => {
+  const settlements = await Settlement.find({ order: orderId, status: "HELD" }).session(session);
+  if (!settlements.length) return [];
+
+  const escrowAccount = await getOrCreateLedgerAccount({ accountType: "ESCROW_HOLDING", session });
+  const developerUserId = settlements.some((s) => s.developerShare > 0) ? await findDefaultDeveloper(session) : null;
+  const adminUserId = settlements.some((s) => s.adminShare > 0) ? await findDefaultAdmin(session) : null;
+
+  for (const settlement of settlements) {
+    const vendorAccount = await getOrCreateLedgerAccount({
+      accountType: "VENDOR_PAYABLE",
+      ownerId: settlement.vendor,
+      session,
+    });
+
+    escrowAccount.balance = Math.max(0, (escrowAccount.balance || 0) - settlement.grossAmount);
+
+    await LedgerEntry.create(
+      [
+        {
+          transactionReference: `MVEC-REFUND-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`,
+          debitAccount: vendorAccount._id,
+          creditAccount: escrowAccount._id,
+          amount: settlement.grossAmount,
+          entryType: "BUYER_REFUND",
+          relatedOrder: orderId,
+          description: `Buyer cancellation refund for Order #${orderId}`,
+        },
+      ],
+      { session }
+    );
+
+    await VendorWallet.updateOne(
+      { vendor: settlement.vendor },
+      { $inc: { pendingBalance: -settlement.netAmount } },
+      { session }
+    );
+    if (settlement.developerShare > 0 && developerUserId) {
+      await DeveloperWallet.updateOne(
+        { developerUser: developerUserId },
+        { $inc: { pendingBalance: -settlement.developerShare } },
+        { session }
+      );
+    }
+    if (settlement.adminShare > 0 && adminUserId) {
+      await AdminWallet.updateOne(
+        { adminUser: adminUserId },
+        { $inc: { pendingBalance: -settlement.adminShare } },
+        { session }
+      );
+    }
+    if (settlement.affiliateShare > 0 && settlement.affiliateUser) {
+      await AffiliateWallet.updateOne(
+        { affiliateUser: settlement.affiliateUser },
+        { $inc: { pendingBalance: -settlement.affiliateShare } },
+        { session }
+      );
+    }
+
+    settlement.status = "REFUNDED";
+    await settlement.save({ session });
+  }
+
+  await escrowAccount.save({ session });
+  return settlements;
 };

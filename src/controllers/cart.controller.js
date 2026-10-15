@@ -1,25 +1,49 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Cart = require("../models/Cart");
 const Product = require("../models/Product");
+const { effectivePrice } = require("../utils/pricing.util");
+
+const MAX_QTY_PER_LINE = 100;
+const CART_PRODUCT_FIELDS = "name price discountPrice stockQuantity status media vendor sku";
+const populateCart = (cart) =>
+  cart.populate({
+    path: "items.product",
+    select: CART_PRODUCT_FIELDS,
+    populate: { path: "vendor", select: "Fullname companyName" },
+  });
+const serverError = (res, error) => {
+  console.error(error);
+  return res.status(500).json({ message: "Something went wrong with your cart. Please try again." });
+};
 
 // @desc    Get user's shopping cart
 // @route   GET /api/cart
 // @access  Private
 exports.getCart = async (req, res) => {
   try {
-    let cart = await Cart.findOne({ user: req.user.id }).populate({
-      path: "items.product",
-      select: "name price stockQuantity status media vendor",
-      populate: { path: "vendor", select: "Fullname companyName" },
-    });
+    let cart = await Cart.findOne({ user: req.user.id });
 
     if (!cart) {
       cart = await Cart.create({ user: req.user.id, items: [], totalAmount: 0 });
+    } else {
+      // Drop lines whose product was deleted and refresh prices so the cart
+      // never shows a stale amount.
+      const products = await Product.find({ _id: { $in: cart.items.map((i) => i.product) } })
+        .select("price discountPrice");
+      const byId = new Map(products.map((p) => [p._id.toString(), p]));
+      const before = JSON.stringify(cart.items.map((i) => [String(i.product), i.price]));
+      cart.items = cart.items.filter((i) => byId.has(String(i.product)));
+      cart.items.forEach((i) => { i.price = effectivePrice(byId.get(String(i.product))); });
+      if (JSON.stringify(cart.items.map((i) => [String(i.product), i.price])) !== before) {
+        cart.calculateTotal();
+        await cart.save();
+      }
     }
+    await populateCart(cart);
 
     return res.status(200).json({ cart });
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    return serverError(res, error);
   }
 };
 
@@ -31,13 +55,16 @@ exports.addToCart = async (req, res) => {
     const { productId, quantity = 1 } = req.body;
 
     const requestedQuantity = Number(quantity);
-    if (!Number.isInteger(requestedQuantity) || requestedQuantity < 1) {
-      return res.status(400).json({ message: "Quantity must be a positive whole number" });
+    if (!Number.isInteger(requestedQuantity) || requestedQuantity < 1 || requestedQuantity > MAX_QTY_PER_LINE) {
+      return res.status(400).json({ message: "Quantity must be a whole number between 1 and 100" });
+    }
+    if (!productId || typeof productId !== "string") {
+      return res.status(400).json({ message: "A product is required" });
     }
 
     // Accept old guest carts that stored the public MVEC product code, while
     // keeping Mongo ObjectIds as the canonical cart reference.
-    const product = mongoose.isValidObjectId(productId)
+    const product = orm.isValidObjectId(productId)
       ? await Product.findById(productId)
       : await Product.findOne({ publicId: productId });
     if (!product) {
@@ -55,6 +82,9 @@ exports.addToCart = async (req, res) => {
     // Check 2: Stock availability check
     if (product.status === "OUT_OF_STOCK" || product.stockQuantity < 1) {
       return res.status(400).json({ message: "Product is out of stock" });
+    }
+    if (product.status !== "ACTIVE") {
+      return res.status(400).json({ message: "This product is not available for purchase" });
     }
 
     let cart = await Cart.findOne({ user: req.user.id });
@@ -78,7 +108,7 @@ exports.addToCart = async (req, res) => {
       });
     }
 
-    const activePrice = product.discountPrice || product.price;
+    const activePrice = effectivePrice(product);
 
     if (existingItemIndex > -1) {
       cart.items[existingItemIndex].quantity = targetQuantity;
@@ -93,15 +123,11 @@ exports.addToCart = async (req, res) => {
 
     cart.calculateTotal();
     await cart.save();
-
-    await cart.populate({
-      path: "items.product",
-      select: "name price stockQuantity status media",
-    });
+    await populateCart(cart);
 
     return res.status(200).json({ message: "Item added to cart", cart });
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    return serverError(res, error);
   }
 };
 
@@ -111,13 +137,13 @@ exports.addToCart = async (req, res) => {
 exports.updateCartItemQuantity = async (req, res) => {
   try {
     const { productId } = req.params;
-    const { quantity } = req.body;
+    const quantity = Number(req.body.quantity);
 
-    if (quantity < 1) {
-      return res.status(400).json({ message: "Quantity must be at least 1" });
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > MAX_QTY_PER_LINE) {
+      return res.status(400).json({ message: "Quantity must be a whole number between 1 and 100" });
     }
 
-    if (!mongoose.isValidObjectId(productId)) {
+    if (!orm.isValidObjectId(productId)) {
       return res.status(404).json({ message: "Item not in cart" });
     }
 
@@ -135,25 +161,25 @@ exports.updateCartItemQuantity = async (req, res) => {
     }
 
     const product = await Product.findById(productId);
-    if (!product || quantity > product.stockQuantity) {
+    if (!product || product.status !== "ACTIVE") {
+      return res.status(400).json({ message: "This product is no longer available. Please remove it from your cart." });
+    }
+    if (quantity > product.stockQuantity) {
       return res.status(400).json({
-        message: `Requested quantity exceeds available stock (${product.stockQuantity})`,
+        message: `Only ${product.stockQuantity} left in stock`,
       });
     }
 
-    cart.items[itemIndex].quantity = Number(quantity);
+    cart.items[itemIndex].quantity = quantity;
+    cart.items[itemIndex].price = effectivePrice(product);
     cart.calculateTotal();
     await cart.save();
 
-    await cart.populate({
-      path: "items.product",
-      select: "name price stockQuantity status media vendor",
-      populate: { path: "vendor", select: "Fullname companyName" },
-    });
+    await populateCart(cart);
 
     return res.status(200).json({ message: "Cart updated", cart });
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    return serverError(res, error);
   }
 };
 
@@ -164,7 +190,7 @@ exports.removeFromCart = async (req, res) => {
   try {
     const { productId } = req.params;
 
-    if (!mongoose.isValidObjectId(productId)) {
+    if (!orm.isValidObjectId(productId)) {
       return res.status(404).json({ message: "Item not in cart" });
     }
 
@@ -180,15 +206,11 @@ exports.removeFromCart = async (req, res) => {
     cart.calculateTotal();
     await cart.save();
 
-    await cart.populate({
-      path: "items.product",
-      select: "name price stockQuantity status media vendor",
-      populate: { path: "vendor", select: "Fullname companyName" },
-    });
+    await populateCart(cart);
 
     return res.status(200).json({ message: "Item removed from cart", cart });
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    return serverError(res, error);
   }
 };
 
@@ -205,6 +227,6 @@ exports.clearCart = async (req, res) => {
     }
     return res.status(200).json({ message: "Cart cleared" });
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    return serverError(res, error);
   }
 };

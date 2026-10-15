@@ -40,6 +40,9 @@ export async function runFlows(base, { adminEmail, adminPassword }) {
   // ── Auth ───────────────────────────────────────────────────────────────
   const vendorA = await reg(A, "register vendor A", { Fullname: "Vendor Alpha", email: "alpha@e2e.test", password: "Passw0rd!x", gender: "female", phone: "0788300001", role: "vendor", companyName: "Alpha Co" });
   await reg(B, "register vendor B", { Fullname: "Vendor Beta", email: "beta@e2e.test", password: "Passw0rd!x", gender: "male", phone: "0788300002", role: "vendor", companyName: "Beta Co" });
+  // Sellers must finish onboarding before they can list products.
+  rec("onboard Alpha Co", await A.call("POST", "/vendors/onboard", { businessName: "Alpha Co", description: "Quality goods", phone: "0788300001", email: "alpha@e2e.test", logoUrl: "/uploads/logo.png", category: "General", location: { province: "Kigali City", district: "Gasabo" } }), (d) => ({ ok: !!(d?.vendor || d?.profile) }));
+  rec("onboard Beta Co", await B.call("POST", "/vendors/onboard", { businessName: "Beta Co", description: "Quality goods", phone: "0788300002", email: "beta@e2e.test", logoUrl: "/uploads/logo.png", category: "General", location: { province: "Kigali City", district: "Gasabo" } }), (d) => ({ ok: !!(d?.vendor || d?.profile) }));
   const buyer = await reg(BUY, "register buyer", { Fullname: "Buyer One", email: "buyer1@e2e.test", password: "Passw0rd!x", gender: "other", phone: "0788300009", role: "buyer" });
   await reg(BUY2, "register buyer 2", { Fullname: "Buyer Two", email: "buyer2@e2e.test", password: "Passw0rd!x", gender: "other", phone: "0788300008", role: "buyer" });
   rec("duplicate email -> error", await A.call("POST", "/auth/register", { Fullname: "Dup", email: "alpha@e2e.test", password: "Passw0rd!x", gender: "female", phone: "0788300003", role: "buyer" }), msg);
@@ -105,11 +108,12 @@ export async function runFlows(base, { adminEmail, adminPassword }) {
   rec("get cart", await BUY.call("GET", "/cart"), (d) => ({ n: (d?.cart?.items || d?.items || []).length, total: d?.cart?.totalAmount ?? d?.totalAmount, productName: (d?.cart?.items || d?.items || [])[0]?.product?.name }));
   rec("own product to cart blocked", await A.call("POST", "/cart", { productId: p1?.id, quantity: 1 }), msg);
   const addr = { street: "KG 1", city: "Gasabo", state: "Kigali City", province: "Kigali City", district: "Gasabo", sector: "Remera", country: "Rwanda" };
-  const cartOrder = rec("cart checkout", await BUY.call("POST", "/orders/checkout", { shippingAddress: addr, paymentMethod: "MOMO", shippingMethod: "STANDARD" }),
+  const recipient = { name: "E2E Buyer", phone: "0788123456" };
+  const cartOrder = rec("cart checkout", await BUY.call("POST", "/orders/checkout", { shippingAddress: addr, recipient, paymentMethod: "MOMO", shippingMethod: "STANDARD" }),
     (d) => ({ subtotal: d?.order?.subtotal, fee: d?.order?.shippingFee, total: d?.order?.totalAmount, items: d?.order?.items?.length, hasId: !!d?.order?.id }));
   rec("cart emptied", await BUY.call("GET", "/cart"), (d) => ({ n: (d?.cart?.items || d?.items || []).length }));
-  rec("undeliverable checkout", await BUY.call("POST", "/orders/direct-checkout", { items: [{ productId: p1?.id, qty: 1 }], shippingAddress: { ...addr, province: "Southern Province", district: "Huye", city: "Huye" }, shippingMethod: "STANDARD" }), msg);
-  const direct = rec("direct checkout 2 sellers", await BUY.call("POST", "/orders/direct-checkout", { items: [{ productId: p1?.id, qty: 1 }, { productId: pB?.id, qty: 2 }], shippingAddress: addr, paymentMethod: "MOMO", shippingMethod: "EXPRESS" }),
+  rec("undeliverable checkout", await BUY.call("POST", "/orders/direct-checkout", { items: [{ productId: p1?.id, qty: 1 }], recipient, shippingAddress: { ...addr, province: "Southern Province", district: "Huye", city: "Huye" }, shippingMethod: "STANDARD" }), msg);
+  const direct = rec("direct checkout 2 sellers", await BUY.call("POST", "/orders/direct-checkout", { items: [{ productId: p1?.id, qty: 1 }, { productId: pB?.id, qty: 2 }], shippingAddress: addr, recipient, paymentMethod: "MOMO", shippingMethod: "EXPRESS" }),
     (d) => ({ subtotal: d?.order?.subtotal, fee: d?.order?.shippingFee, total: d?.order?.totalAmount, parcels: d?.order?.shippingBreakdown?.map((p) => [p.storeName, p.fee]).sort() }));
   const order1 = direct.data?.order;
   rec("my orders", await BUY.call("GET", "/orders/my-orders"), (d) => ({ n: d?.orders?.length, totals: d?.orders?.map((o) => o.totalAmount) }));

@@ -1,13 +1,13 @@
 const Product = require("../models/Product");
 const Vendor = require("../models/Vendor");
 const Category = require("../models/Category");
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 
 // Resolve a category that may be an ObjectId, slug or human-readable name
 const resolveCategory = async (value) => {
   if (!value) return null;
-  const matchId = mongoose.Types.ObjectId.isValid(value)
-    ? { _id: new mongoose.Types.ObjectId(value) }
+  const matchId = orm.Types.ObjectId.isValid(value)
+    ? { _id: new orm.Types.ObjectId(value) }
     : null;
   const doc = await Category.findOne({
     $or: matchId
@@ -77,13 +77,14 @@ exports.search = async (req, res) => {
     }
 
     if (vendor) {
-      const matchId = mongoose.Types.ObjectId.isValid(vendor);
+      const matchId = orm.Types.ObjectId.isValid(vendor);
       if (matchId) filter.vendor = vendor;
       else {
         const matchedVendor = await Vendor.findOne({
-          $or: [{ slug: vendor }, { businessName: vendor }, { companyName: vendor }],
-        }).select("_id");
-        if (matchedVendor) filter.vendor = matchedVendor._id;
+          $or: [{ slug: vendor }, { businessName: vendor }],
+        }).select("_id user");
+        // Products point at the seller's user account, not the Vendor profile.
+        if (matchedVendor) filter.vendor = matchedVendor.user;
         else
           return res.status(200).json({
             meta: { total: 0, page: 1, limit: Number(limit), pages: 0 },
@@ -216,8 +217,8 @@ exports.getSuggestions = async (req, res) => {
       Category.find({ $or: [{ name: regex }, { slug: regex }], active: true })
         .select("name slug")
         .limit(5),
-      Vendor.find({ $or: [{ companyName: regex }, { businessName: regex }], status: "ACTIVE" })
-        .select("companyName businessName logoUrl slug")
+      Vendor.find({ businessName: regex, status: "ACTIVE" })
+        .select("businessName logoUrl slug")
         .limit(3),
     ]);
 
@@ -255,9 +256,9 @@ exports.getSuggestions = async (req, res) => {
 exports.getHomeFeed = async (req, res) => {
   try {
     const [categories, featuredProducts, topVendors] = await Promise.all([
-      Category.find({ isFeatured: true }).limit(8),
+      Category.find({ active: true, parentId: null }).sort({ sortOrder: 1, name: 1 }).limit(8),
       Product.find({ status: "ACTIVE" })
-        .sort({ averageRating: -1, createdAt: -1 })
+        .sort({ createdAt: -1 })
         .limit(10)
         .populate("vendor", "companyName logoUrl"),
       Vendor.find({ verificationStatus: "VERIFIED", status: "ACTIVE" })

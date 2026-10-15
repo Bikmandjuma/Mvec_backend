@@ -1,5 +1,6 @@
-const mongoose = require("mongoose");
-const { MongoMemoryServer } = require("mongodb-memory-server");
+require("../helpers/jest-shim"); // Jest-style API on node:test
+const db = require("../helpers/mysql"); // MySQL test database (first, before models)
+const orm = require("../../src/database/orm");
 const request = require("supertest");
 const jwt = require("jsonwebtoken");
 const express = require("express");
@@ -10,7 +11,6 @@ const Store = require("../../src/models/Store");
 jest.setTimeout(60000);
 
 describe("POST /api/vendors/become-seller", () => {
-  let mongo;
   let app;
   let admin;
   let buyer;
@@ -20,8 +20,7 @@ describe("POST /api/vendors/become-seller", () => {
 
   beforeAll(async () => {
     process.env.JWT_SECRET = secret;
-    mongo = await MongoMemoryServer.create({ binary: { version: "7.0.0" } });
-    await mongoose.connect(mongo.getUri());
+    await db.setup();
     app = express();
     app.use(express.json());
     app.use("/api/vendors", require("../../src/routes/vendor.routes"));
@@ -30,12 +29,11 @@ describe("POST /api/vendors/become-seller", () => {
   });
 
   afterAll(async () => {
-    await mongoose.disconnect();
-    if (mongo) await mongo.stop();
+    await db.close();
   });
 
   beforeEach(async () => {
-    await Promise.all([User.deleteMany({}), Vendor.deleteMany({}), Store.deleteMany({})]);
+    await db.reset();
     admin = await User.create({
       Fullname: "Store Admin", email: "admin@example.com", password: "password123",
       phone: "0788000001", gender: "male", role: "super_admin",

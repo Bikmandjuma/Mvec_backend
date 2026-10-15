@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Store = require("../models/Store");
 
 // Maximum number of stores one vendor account may own.
@@ -37,7 +37,7 @@ const listVendorStores = async (vendorId) => {
 // Resolves to null when storeId is given but invalid or not owned.
 const resolveOwnedStore = async (vendorId, storeId) => {
   if (storeId === undefined || storeId === null || storeId === "") return getPrimaryStore(vendorId);
-  if (!mongoose.isValidObjectId(storeId)) return null;
+  if (!orm.isValidObjectId(storeId)) return null;
   return Store.findOne({ _id: storeId, vendor: vendorId });
 };
 

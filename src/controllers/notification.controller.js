@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Notification = require("../models/Notification");
 
 const allowedTypes = [
@@ -22,6 +22,7 @@ function mapNotification(n) {
     title: n.title,
     message: n.message,
     reference: n.reference,
+    link: n.link || "",
     channel: n.channel,
     status: n.isRead ? "Read" : "Unread",
     isRead: n.isRead,
@@ -43,7 +44,7 @@ exports.createNotification = async (req, res) => {
     if (!title || !title.trim()) {
       return res.status(400).json({ message: "Notification title is required" });
     }
-    if (!mongoose.Types.ObjectId.isValid(recipient)) {
+    if (!orm.Types.ObjectId.isValid(recipient)) {
       return res.status(400).json({ message: "Invalid recipient id" });
     }
 

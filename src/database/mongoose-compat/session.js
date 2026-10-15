@@ -7,38 +7,69 @@ const { sequelize } = require("..");
 
 const als = new AsyncLocalStorage();
 
+// A transaction left open (a code path that returns without commit/abort)
+// would hold a pooled connection forever; it is rolled back after this long.
+const ABANDONED_TX_MS = 2 * 60 * 1000;
+
 class CompatSession {
   constructor() {
+    this._active = false;
     this._txPromise = null;
     this._done = false;
     this.id = { id: Date.now() };
   }
 
+  // The MySQL transaction (and its connection) is only opened by the first
+  // query, so a request that bails out early holds no connection.
   startTransaction() {
-    if (this._txPromise && !this._done) return;
+    if (this._active && !this._done) return;
+    this._active = true;
     this._done = false;
-    this._txPromise = sequelize.transaction();
-    this._txPromise.catch(() => {});
+    this._txPromise = null;
     als.enterWith({ session: this });
   }
 
-  inTransaction() { return !!this._txPromise && !this._done; }
+  _tx() {
+    if (!this._active || this._done) return undefined;
+    if (!this._txPromise) {
+      this._txPromise = sequelize.transaction();
+      this._txPromise.catch(() => {});
+      this._txPromise.then((t) => {
+        const timer = setTimeout(() => {
+          if (this._done) return;
+          console.error("[database] Rolling back a transaction that was never committed or aborted.");
+          this._done = true;
+          t.rollback().catch(() => {});
+        }, ABANDONED_TX_MS);
+        timer.unref();
+        t.afterCommit(() => clearTimeout(timer));
+      }).catch(() => {});
+    }
+    return this._txPromise;
+  }
+
+  inTransaction() { return this._active && !this._done; }
 
   async commitTransaction() {
-    if (!this._txPromise || this._done) return;
+    if (!this._active || this._done) return;
     this._done = true;
+    if (!this._txPromise) return;
     const t = await this._txPromise;
     await t.commit();
   }
 
   async abortTransaction() {
-    if (!this._txPromise || this._done) return;
+    if (!this._active || this._done) return;
     this._done = true;
+    if (!this._txPromise) return;
     const t = await this._txPromise;
     await t.rollback();
   }
 
-  endSession() {}
+  // Ending a session that is still in a transaction rolls it back (as MongoDB does).
+  endSession() {
+    if (this._active && !this._done) this.abortTransaction().catch(() => {});
+  }
 
   async withTransaction(fn) {
     this.startTransaction();
@@ -56,7 +87,7 @@ class CompatSession {
 // Transaction for a query: explicit session first, then the active one.
 async function resolveTx(session) {
   const s = session || als.getStore()?.session;
-  if (s && s._txPromise && !s._done) return s._txPromise;
+  if (s && typeof s._tx === "function") return s._tx();
   return undefined;
 }
 

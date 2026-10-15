@@ -1,47 +1,41 @@
-const mongoose = require("mongoose");
-const bcrypt = require("bcryptjs");
+// Creates the MVEC super admin, or updates the existing one, in MySQL.
+//
+//   npm run seed                                  uses ADMIN_EMAIL / ADMIN_PASSWORD from .env
+//   npm run seed -- admin@example.com 'S3cret…'   uses the email and password given here
+//
+// Then sign in at /login with that email and password; admins land on /admin.
 const path = require("path");
-const dotenv = require("dotenv");
+require("dotenv").config({ path: path.resolve(__dirname, ".env"), quiet: true });
+const bcrypt = require("bcryptjs");
 const User = require("./src/models/User");
 
-// Ensure .env is resolved correctly regardless of execution directory
-dotenv.config({ path: path.resolve(__dirname, ".env") });
+const PLACEHOLDER = "your_admin_password_here";
 
-const seedAdmin = async () => {
-  try {
-    await mongoose.connect(process.env.MONGO_URI);
+(async () => {
+  const email = String(process.argv[2] || process.env.ADMIN_EMAIL || "").trim().toLowerCase();
+  const password = String(process.argv[3] || process.env.ADMIN_PASSWORD || "");
+  if (!email || !email.includes("@")) throw new Error("Give the admin email: npm run seed -- you@example.com 'a strong password' (or set ADMIN_EMAIL in .env).");
+  if (!password || password === PLACEHOLDER) throw new Error("Choose a real admin password: npm run seed -- you@example.com 'a strong password' (or set ADMIN_PASSWORD in .env).");
+  if (password.length < 10 || !/[A-Za-z]/.test(password) || !/\d/.test(password)) throw new Error("Use at least 10 characters with letters and numbers for the admin password.");
 
-    // Hash current password from process.env
-    const hashedPassword = await bcrypt.hash(process.env.ADMIN_PASSWORD, 10);
+  const hashed = await bcrypt.hash(password, 10);
+  const taken = await User.findOne({ email });
+  if (taken && taken.role !== "super_admin") throw new Error(`${email} already belongs to a ${taken.role} account. Use another email for the admin.`);
 
-    // Object containing updated details
-    const adminData = {
-      Fullname: "Admin",
-      email: process.env.ADMIN_EMAIL,
-      password: hashedPassword,
-      gender: "male",
-      phone: "0788888880",
-      role: "super_admin",
-    };
-
-    // Find super_admin and update, or create if missing
-    const updatedAdmin = await User.findOneAndUpdate(
-      { role: "super_admin" },
-      adminData,
-      {
-        new: true,
-        upsert: true,
-        runValidators: true,
-      }
-    );
-
-    console.log("Admin user updated/seeded successfully:");
-    console.log(updatedAdmin);
-  } catch (error) {
-    console.error("Error seeding admin user:", error);
-  } finally {
-    await mongoose.disconnect();
+  const existing = taken || (await User.findOne({ role: "super_admin" }).sort({ createdAt: 1 }));
+  if (existing) {
+    existing.email = email;
+    existing.password = hashed;
+    existing.status = "ACTIVE";
+    await existing.save();
+    console.log(`Admin updated: ${email}. Sign in at /login.`);
+  } else {
+    await User.create({ Fullname: "MVEC Admin", email, password: hashed, gender: "other", phone: "0788888880", role: "super_admin", status: "ACTIVE" });
+    console.log(`Admin created: ${email}. Sign in at /login.`);
   }
-};
-
-seedAdmin();
+  await require("./src/database").sequelize.close();
+})().catch(async (error) => {
+  console.error(`Could not set up the admin: ${error.message}`);
+  await require("./src/database").sequelize.close().catch(() => {});
+  process.exit(1);
+});

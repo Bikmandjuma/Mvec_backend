@@ -1,6 +1,4 @@
-// Sequelize instance + models. Only used when the MySQL side is needed
-// (DB_DRIVER=mysql, migrations, seeders, data copy); MongoDB stays the live
-// database until the migration is complete.
+// Sequelize instance + models. MySQL is the application's only database.
 const { Sequelize } = require("sequelize");
 const env = process.env.NODE_ENV === "production" ? "production" : process.env.NODE_ENV === "test" ? "test" : "development";
 const config = require("./config")[env];
@@ -15,6 +13,7 @@ sequelize.addHook("afterConnect", async (connection) => {
 const models = {
   User: require("./models/User")(sequelize),
   UserAddress: require("./models/UserAddress")(sequelize),
+  UserWishlistItem: require("./models/UserWishlistItem")(sequelize),
   Otp: require("./models/Otp")(sequelize),
   Vendor: require("./models/Vendor")(sequelize),
   Store: require("./models/Store")(sequelize),
@@ -35,6 +34,21 @@ for (const spec of specs) {
 
 Object.values(models).forEach((model) => model.associate && model.associate(models));
 
+// MariaDB (e.g. XAMPP) keeps JSON columns as LONGTEXT and returns strings;
+// parse them so every model sees the same objects as on MySQL.
+for (const Model of Object.values(models)) {
+  for (const [name, attr] of Object.entries(Model.rawAttributes)) {
+    if (!(attr.type instanceof Sequelize.JSON)) continue;
+    const own = attr.get;
+    attr.get = function () {
+      const v = own ? own.call(this) : this.getDataValue(name);
+      if (typeof v !== "string") return v;
+      try { return JSON.parse(v); } catch { return v; }
+    };
+  }
+  Model.refreshAttributes();
+}
+
 // Millisecond dates everywhere (columns are DATETIME(3), like MongoDB's Date).
 for (const Model of Object.values(models)) {
   let changed = false;
@@ -47,6 +61,4 @@ for (const Model of Object.values(models)) {
 const tableToModel = Object.fromEntries(Object.entries(models).map(([name, M]) => [M.tableName, name]));
 associate(models, tableToModel);
 
-const DB_DRIVER = (process.env.DB_DRIVER || "mongo").toLowerCase();
-
-module.exports = { sequelize, Sequelize, models, specs, DB_DRIVER, isMysql: DB_DRIVER === "mysql" };
+module.exports = { sequelize, Sequelize, models, specs };

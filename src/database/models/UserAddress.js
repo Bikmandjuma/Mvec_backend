@@ -9,6 +9,7 @@ module.exports = (sequelize) => {
     country: { type: DataTypes.STRING(80), allowNull: false },
     provinceState: { type: DataTypes.STRING(80), allowNull: false },
     cityDistrict: { type: DataTypes.STRING(80), allowNull: false },
+    sector: { type: DataTypes.STRING(120), allowNull: true },
     street: { type: DataTypes.STRING(255), allowNull: false },
     building: { type: DataTypes.STRING(120), allowNull: true },
     apartment: { type: DataTypes.STRING(60), allowNull: true },

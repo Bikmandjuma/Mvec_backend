@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Promotion = require("../models/Promotion");
 const { resolveOwnedStore } = require("../utils/vendorStore.util");
 
@@ -33,7 +33,7 @@ function mapPromotion(p) {
 
 // The list endpoint exposes publicId as `id`, so accept either identifier.
 const findPromotion = (id) =>
-  mongoose.isValidObjectId(id) ? Promotion.findById(id) : Promotion.findOne({ publicId: id });
+  orm.isValidObjectId(id) ? Promotion.findById(id) : Promotion.findOne({ publicId: id });
 
 const allowedStatus = ["DRAFT", "SCHEDULED", "ACTIVE", "PAUSED", "EXPIRED", "CANCELLED"];
 const allowedType = ["PERCENT", "FIXED", "FREE_SHIPPING"];
