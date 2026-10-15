@@ -33,7 +33,8 @@ const attributesFor = (fields) => {
   const attrs = { id: { type: DataTypes.CHAR(24), primaryKey: true, allowNull: false, defaultValue: newId } };
   for (const [name, field] of Object.entries(fields)) {
     const attr = { type: sqlType(field), allowNull: !field.required };
-    if (field.default !== undefined && field.type !== "json") attr.defaultValue = field.default;
+    if (field.default === "now") attr.defaultValue = DataTypes.NOW;
+    else if (field.default !== undefined && field.type !== "json") attr.defaultValue = field.default;
     if (field.unique) attr.unique = true;
     if (field.type === "money" || field.type === "number") {
       const col = columnName(name, field);

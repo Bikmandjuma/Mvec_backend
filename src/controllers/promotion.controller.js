@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Promotion = require("../models/Promotion");
 const Product = require("../models/Product");
 const { resolveOwnedStore } = require("../utils/vendorStore.util");
@@ -39,7 +39,7 @@ function mapPromotion(p, stats) {
 
 // The list endpoint exposes publicId as `id`, so accept either identifier.
 const findPromotion = (id) =>
-  mongoose.isValidObjectId(id) ? Promotion.findById(id) : Promotion.findOne({ publicId: id });
+  orm.isValidObjectId(id) ? Promotion.findById(id) : Promotion.findOne({ publicId: id });
 
 const allowedStatus = ["DRAFT", "SCHEDULED", "ACTIVE", "PAUSED", "EXPIRED", "CANCELLED"];
 const allowedType = ["PERCENT", "FIXED", "FREE_SHIPPING"];
@@ -61,7 +61,7 @@ function invalidPromotion({ type, value, startsAt, endsAt, usageLimit, minOrderA
 exports.validateCoupon = async (req, res) => {
   try {
     const { code, items = [], shippingAddress, shippingMethod } = req.body;
-    const ids = items.map((i) => i.productId).filter((id) => mongoose.isValidObjectId(id));
+    const ids = items.map((i) => i.productId).filter((id) => orm.isValidObjectId(id));
     const products = await Product.find({ _id: { $in: ids } });
     const byId = new Map(products.map((p) => [String(p._id), p]));
     const lines = items
@@ -126,7 +126,7 @@ exports.createPromotion = async (req, res) => {
 
     const isVendor = req.user.role === "vendor";
     if (product) {
-      if (!mongoose.isValidObjectId(product)) return res.status(400).json({ message: "Invalid product" });
+      if (!orm.isValidObjectId(product)) return res.status(400).json({ message: "Invalid product" });
       const owned = await Product.exists(isVendor ? { _id: product, vendor: req.user._id } : { _id: product });
       if (!owned) return res.status(400).json({ message: "Choose one of your own products." });
     }

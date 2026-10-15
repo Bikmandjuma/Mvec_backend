@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Review = require("../models/Review");
 const Product = require("../models/Product");
 const Order = require("../models/Order");
@@ -51,7 +51,7 @@ exports.createReview = async (req, res) => {
     if (rating < 1 || rating > 5) {
       return res.status(400).json({ message: "Rating must be between 1 and 5" });
     }
-    if (!mongoose.Types.ObjectId.isValid(product)) {
+    if (!orm.Types.ObjectId.isValid(product)) {
       return res.status(400).json({ message: "Invalid product id" });
     }
 
@@ -105,7 +105,7 @@ exports.createReview = async (req, res) => {
 exports.listProductReviews = async (req, res) => {
   try {
     const { productId } = req.params;
-    if (!mongoose.Types.ObjectId.isValid(productId)) {
+    if (!orm.Types.ObjectId.isValid(productId)) {
       return res.status(400).json({ message: "Invalid product id" });
     }
 
@@ -121,7 +121,16 @@ exports.listProductReviews = async (req, res) => {
       averageRating: reviews.length
         ? (reviews.reduce((s, r) => s + r.rating, 0) / reviews.length).toFixed(1)
         : 0,
-      reviews: reviews.map((r) => mapReview(r.toObject())),
+      // Public endpoint: never expose reviewers' email addresses.
+      reviews: reviews.map((r) => {
+        const row = mapReview(r.toObject());
+        delete row.email;
+        // "Aline Uwase" -> "Aline U."
+        const parts = String(row.reviewer || "").trim().split(/\s+/).filter(Boolean);
+        row.reviewer = parts.length > 1 ? `${parts[0]} ${parts[parts.length - 1][0]}.` : parts[0] || "Verified buyer";
+        row.user = row.reviewer;
+        return row;
+      }),
     });
   } catch (error) {
     console.error("Error listing product reviews:", error);

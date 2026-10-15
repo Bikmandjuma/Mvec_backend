@@ -51,7 +51,7 @@ exports.adminListUsers = async (req, res) => {
     if (role) query.role = role;
     if (status) query.status = status;
     if (search) {
-      const re = new RegExp(search, "i");
+      const re = new RegExp(String(search).slice(0, 100).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
       query.$or = [{ Fullname: re }, { email: re }, { phone: re }];
     }
 
@@ -111,7 +111,18 @@ exports.adminUpdateUser = async (req, res) => {
       user.status = normalizedStatus;
     }
 
-    if (role !== undefined) user.role = role;
+    if (role !== undefined && role !== user.role) {
+      // Admins can make an account a courier or an admin (or back to buyer).
+      // Sellers, suppliers and affiliates keep their role: it owns their store/wallet.
+      const ASSIGNABLE = ["buyer", "delivery", "super_admin"];
+      if (String(user._id) === String(req.user._id || req.user.id)) {
+        return res.status(400).json({ message: "You cannot change your own role. Ask another admin." });
+      }
+      if (!ASSIGNABLE.includes(role) || !ASSIGNABLE.includes(user.role)) {
+        return res.status(400).json({ message: "Only buyers, couriers and admins can be switched between those roles. Sellers, suppliers and affiliates keep theirs." });
+      }
+      user.role = role;
+    }
     if (Fullname !== undefined) user.Fullname = Fullname;
     if (email !== undefined) user.email = email;
     if (phone !== undefined) user.phone = phone;
@@ -276,9 +287,14 @@ exports.searchUsers = async (req, res) => {
     const query = String(q).trim();
     const re = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
 
+    // A seller only finds their own customers and orders; admins find anyone.
+    const isAdmin = req.user.role === "super_admin";
+    const sellerId = req.vendorId || req.user._id;
+    const customerIds = isAdmin ? null : await Order.distinct("user", { "items.vendor": sellerId });
     const [users, stores, orders] = await Promise.all([
       User.find({
         $or: [{ Fullname: re }, { email: re }, { phone: re }, { companyName: re }],
+        ...(isAdmin ? {} : { _id: { $in: customerIds } }),
       })
         .select(USER_WITHOUT_PASSWORD)
         .limit(10),
@@ -287,7 +303,7 @@ exports.searchUsers = async (req, res) => {
       })
         .select("storeName slug logo businessCategory vendor status")
         .limit(8),
-      Order.find({ orderNumber: re })
+      Order.find({ orderNumber: re, ...(isAdmin ? {} : { "items.vendor": sellerId }) })
         .select("orderNumber user totalAmount createdAt")
         .populate("user", "Fullname email phone companyName role")
         .limit(8),
@@ -322,8 +338,8 @@ exports.searchUsers = async (req, res) => {
         targetUserId: s.vendor,
         label: s.storeName,
         subtitle: `${s.businessCategory || "Store"} · ${owner?.Fullname || ""}`.trim().replace(/^ ·| · $/g, ""),
-        email: owner?.email,
-        phone: owner?.phone,
+        email: isAdmin ? owner?.email : undefined,
+        phone: isAdmin ? owner?.phone : undefined,
         role: "vendor",
         companyName: owner?.companyName || "",
         store: { id: s._id, slug: s.slug, logo: s.logo },

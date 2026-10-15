@@ -1,5 +1,5 @@
 const bcrypt = require("bcryptjs");
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Staff = require("../models/Staff");
 const User = require("../models/User");
 const Store = require("../models/Store");
@@ -215,7 +215,7 @@ exports.getStoreStaff = async (req, res) => {
 
 exports.updateStaffMember = async (req, res) => {
   try {
-    const isObjectId = mongoose.Types.ObjectId.isValid(req.params.id);
+    const isObjectId = orm.Types.ObjectId.isValid(req.params.id);
     if (!isObjectId) return res.status(404).json({ message: "Invalid staff ID." });
 
     const staff = await Staff.findOne({
@@ -270,7 +270,7 @@ exports.updateStaffMember = async (req, res) => {
 
 exports.removeStaffMember = async (req, res) => {
   try {
-    const isObjectId = mongoose.Types.ObjectId.isValid(req.params.id);
+    const isObjectId = orm.Types.ObjectId.isValid(req.params.id);
     if (!isObjectId) return res.status(404).json({ message: "Invalid staff ID." });
 
     const staff = await Staff.findOne({
@@ -298,7 +298,7 @@ exports.removeStaffMember = async (req, res) => {
 // @route   POST /api/staff/:id/password
 exports.resetStaffPassword = async (req, res) => {
   try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ message: "Invalid staff ID." });
+    if (!orm.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ message: "Invalid staff ID." });
     const { password } = req.body;
     if (typeof password !== "string" || password.length < 8) {
       return res.status(400).json({ message: "The new password must be at least 8 characters." });
@@ -323,7 +323,7 @@ exports.getStaffActivity = async (req, res) => {
   try {
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
     const filter = { vendor: req.user.id };
-    if (req.query.staffId && mongoose.Types.ObjectId.isValid(req.query.staffId)) filter.staff = req.query.staffId;
+    if (req.query.staffId && orm.Types.ObjectId.isValid(req.query.staffId)) filter.staff = req.query.staffId;
     const rows = await StaffActivity.find(filter).sort({ createdAt: -1 }).limit(limit).populate("user", "Fullname email");
     return res.status(200).json({
       activity: rows.map((a) => ({

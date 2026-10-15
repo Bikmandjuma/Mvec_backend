@@ -127,12 +127,24 @@ describe("Phone OTP Unit Tests (send-otp / verify-otp)", () => {
 
     it("should not return devCode outside of development", async () => {
       process.env.NODE_ENV = "production";
-      const { req, res } = createMockReqRes({
-        body: { phone: "0788123456", purpose: "login" },
-      });
-      await authController.sendOtp(req, res);
-      assert.equal(res.statusCode, 200);
-      assert.equal(res.jsonData.devCode, undefined);
+      // Production needs a real SMS provider; stub its delivery.
+      const messaging = require("../src/services/messaging.service");
+      const originalSend = messaging.sendSms;
+      messaging.sendSms = async () => {};
+      process.env.SMS_PROVIDER = "pindo";
+      process.env.PINDO_API_TOKEN = "test";
+      try {
+        const { req, res } = createMockReqRes({
+          body: { phone: "0788123456", purpose: "login" },
+        });
+        await authController.sendOtp(req, res);
+        assert.equal(res.statusCode, 200);
+        assert.equal(res.jsonData.devCode, undefined);
+      } finally {
+        messaging.sendSms = originalSend;
+        delete process.env.PINDO_API_TOKEN;
+        process.env.SMS_PROVIDER = "log";
+      }
     });
   });
 

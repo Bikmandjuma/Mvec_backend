@@ -86,7 +86,7 @@ exports.submitEvidence = async (req, res) => {
       data: evidence,
     });
   } catch (error) {
-    return res.status(400).json({ success: false, message: error.message });
+    return res.status(error.statusCode || 400).json({ success: false, message: error.message });
   }
 };
 

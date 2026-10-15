@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const crypto = require("crypto");
 const Order = require("../models/Order");
 const Product = require("../models/Product");
@@ -65,7 +65,7 @@ exports.createManualOrder = async (req, res) => {
     const qtyById = new Map();
     for (const item of items) {
       const qty = Number(item.qty || item.quantity);
-      if (!mongoose.isValidObjectId(item.productId) || !Number.isInteger(qty) || qty < 1) {
+      if (!orm.isValidObjectId(item.productId) || !Number.isInteger(qty) || qty < 1) {
         return res.status(400).json({ message: "Every line needs a product and a whole quantity of at least 1." });
       }
       qtyById.set(String(item.productId), (qtyById.get(String(item.productId)) || 0) + qty);
@@ -180,7 +180,9 @@ exports.createManualOrder = async (req, res) => {
       await Product.updateOne({ _id: productId }, { $inc: { stockQuantity: qty } }).catch(() => {});
       await Product.updateOne({ _id: productId, status: "OUT_OF_STOCK", stockQuantity: { $gt: 0 } }, { $set: { status: "ACTIVE" } }).catch(() => {});
     }
-    return res.status(error.status || 500).json({ message: error.message });
+    if (error.status) return res.status(error.status).json({ message: error.message });
+    console.error("Manual order failed:", error);
+    return res.status(500).json({ message: "Something went wrong on our side while saving this order. Nothing was saved; please try again." });
   }
 };
 

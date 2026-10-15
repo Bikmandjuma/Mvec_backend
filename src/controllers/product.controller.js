@@ -1,7 +1,31 @@
 const Product = require("../models/Product");
 const Category = require("../models/Category");
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const { resolveOwnedStore } = require("../utils/vendorStore.util");
+
+// http(s)://<host>/uploads/<file> — the upload route used to return an absolute
+// URL built from the request host, so the host that happened to serve the
+// upload (localhost, a LAN IP, a tunnel domain) got baked into the database
+// and broke the image as soon as the storefront was opened from elsewhere.
+const UPLOAD_URL = /^https?:\/\/([^/:]+)(?::(\d+))?(\/uploads\/[^?#\s]+)$/i;
+
+// Store image references as host-agnostic root-relative paths (/uploads/x.jpg).
+// The frontend prepends its configured API origin when rendering, so the same
+// record works from localhost, a LAN IP or production.
+const toStoredUploadPath = (value, req) => {
+  if (typeof value !== "string") return value;
+  const match = UPLOAD_URL.exec(value.trim());
+  if (!match) return value;
+  const host = match[1].toLowerCase();
+  const origin = `${host}${match[2] ? `:${match[2]}` : ""}`;
+  const requestHost = String((req && req.get && req.get("host")) || "").toLowerCase();
+  const isSelf =
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host === "0.0.0.0" ||
+    (requestHost && origin === requestHost);
+  return isSelf ? match[3] : value;
+};
 
 // Validates the store a product is listed under. "" / null = primary store.
 // Returns { store } (null for primary) or { error }.
@@ -12,7 +36,7 @@ const checkProductStore = async (vendorId, storeId) => {
   return store ? { store: store._id } : { error: "Select one of your own stores." };
 };
 
-const normalizeProductPayload = (body = {}) => {
+const normalizeProductPayload = (body = {}, req = null) => {
   const normalized = { ...body };
   const category = body.category ?? body.categoryId;
   if (category !== undefined) normalized.category = category;
@@ -24,6 +48,9 @@ const normalizeProductPayload = (body = {}) => {
   const media = { ...(body.media || {}) };
   if (body.mainImage !== undefined) media.mainImage = body.mainImage;
   if (body.gallery !== undefined) media.gallery = body.gallery;
+  if (media.mainImage !== undefined) media.mainImage = toStoredUploadPath(media.mainImage, req);
+  if (Array.isArray(media.gallery)) media.gallery = media.gallery.map((url) => toStoredUploadPath(url, req));
+  if (Array.isArray(media.thumbnails)) media.thumbnails = media.thumbnails.map((url) => toStoredUploadPath(url, req));
   if (Object.keys(media).length) normalized.media = media;
 
   const attributes = { ...(body.attributes || {}) };
@@ -49,9 +76,12 @@ const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$
 exports.getAllProducts = async (req, res) => {
   try {
     const { search } = req.query;
-    const status = (req.query.status || "ACTIVE").toString().toUpperCase();
-
-    const query = { status };
+    // This route is public: only live products are ever listed, whatever
+    // status the caller asks for. Vendors see their drafts via /vendor/me.
+    const query = { status: "ACTIVE" };
+    if (req.query.vendorId && orm.isValidObjectId(String(req.query.vendorId))) {
+      query.vendor = String(req.query.vendorId);
+    }
     if (search && String(search).trim()) {
       const pattern = new RegExp(escapeRegex(String(search).trim()), "i");
       query.$or = [{ name: pattern }, { description: pattern }, { brand: pattern }];
@@ -61,7 +91,7 @@ exports.getAllProducts = async (req, res) => {
     const limit = parseInt(req.query.limit, 10);
 
     let cursor = Product.find(query)
-      .populate("vendor", "Fullname companyName email")
+      .populate("vendor", "Fullname companyName")
       .populate("category", "name slug")
       .sort({ createdAt: -1 });
 
@@ -93,7 +123,7 @@ exports.getVendorProducts = async (req, res) => {
     const vendorId = req.vendorId || req.targetVendorId || req.user.id;
     const query = { $or: [{ vendor: vendorId }, { vendor: req.user.id }] };
     if (req.query.store === "primary") query.store = null;
-    else if (mongoose.isValidObjectId(req.query.store)) query.store = req.query.store;
+    else if (orm.isValidObjectId(req.query.store)) query.store = req.query.store;
     const products = await Product.find(query)
       .populate("category", "name")
       .populate("store", "storeName slug isPrimary");
@@ -110,8 +140,8 @@ exports.getVendorProducts = async (req, res) => {
 exports.createProduct = async (req, res) => {
   try {
     const vendorId = req.vendorId || req.targetVendorId || req.user.id;
-    const payload = normalizeProductPayload(req.body);
-    if (!mongoose.Types.ObjectId.isValid(payload.category)) {
+    const payload = normalizeProductPayload(req.body, req);
+    if (!orm.Types.ObjectId.isValid(payload.category)) {
       return res.status(400).json({ message: "Select a valid category from the category list." });
     }
     if (!(await Category.exists({ _id: payload.category }))) {
@@ -178,9 +208,9 @@ exports.updateProduct = async (req, res) => {
     }
 
     // 2. Prepare payload copy
-    const updates = normalizeProductPayload(req.body);
+    const updates = normalizeProductPayload(req.body, req);
     if (updates.category !== undefined) {
-      if (!mongoose.Types.ObjectId.isValid(updates.category)) {
+      if (!orm.Types.ObjectId.isValid(updates.category)) {
         return res.status(400).json({ message: "Select a valid category from the category list." });
       }
       if (!(await Category.exists({ _id: updates.category }))) {
@@ -264,13 +294,17 @@ exports.deleteProduct = async (req, res) => {
 // @access  Public
 exports.getProductById = async (req, res) => {
   try {
-    // Storefront links use the public id (MVEC-PRD-…); dashboards use the DB id.
+    // Public route: only live products. Storefront links may use the public
+    // id (MVEC-PRD-…); dashboards use the database id.
     const { id } = req.params;
-    const product = await Product.findOne(mongoose.isValidObjectId(id) ? { _id: id } : { publicId: id })
-      .populate("vendor", "Fullname companyName email")
+    const product = await Product.findOne(orm.isValidObjectId(id) ? { _id: id } : { publicId: String(id) })
+      .populate("vendor", "Fullname companyName")
       .populate("category", "name slug");
 
-    if (!product) {
+    // Drafts and hidden products are visible only to their seller and admins.
+    const vendorId = String(product?.vendor?._id || product?.vendor || "");
+    const canSeeHidden = req.user && (req.user.role === "super_admin" || String(req.user.id) === vendorId || String(req.vendorId || "") === vendorId);
+    if (!product || (!["ACTIVE", "OUT_OF_STOCK"].includes(product.status) && !canSeeHidden)) {
       return res.status(404).json({ message: "Product not found" });
     }
 
@@ -288,8 +322,8 @@ exports.getProductById = async (req, res) => {
 // @access  Public
 exports.getProductBySlug = async (req, res) => {
   try {
-    const product = await Product.findOne({ slug: req.params.slug })
-      .populate("vendor", "Fullname companyName email")
+    const product = await Product.findOne({ slug: String(req.params.slug), status: { $in: ["ACTIVE", "OUT_OF_STOCK"] } })
+      .populate("vendor", "Fullname companyName")
       .populate("category", "name slug");
 
     if (!product) {
@@ -299,7 +333,53 @@ exports.getProductBySlug = async (req, res) => {
     return res.status(200).json({ product });
   } catch (error) {
     console.error("Error fetching product by slug:", error);
-    return res.status(500).json({ message: error.message });
+    return res.status(500).json({ message: "Invalid Product ID or server error" });
+  }
+};
+
+// @desc    Get recommended products (sorted by rating and recency)
+// @route   GET /api/products/recommendations
+// @access  Public
+// Personal when signed in: active products from categories the buyer ordered
+// or saved, excluding what they already bought; topped up with popular items.
+exports.getRecommendations = async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 8, 1), 24);
+    const PUBLIC_FIELDS = "-costPrice";
+    const populate = (q) => q.populate("vendor", "companyName logoUrl").populate("category", "name slug");
+
+    let picks = [];
+    let personalized = false;
+    if (req.user?.id) {
+      const Order = require("../models/Order");
+      const User = require("../models/User");
+      const [orders, me] = await Promise.all([
+        Order.find({ user: req.user.id, paymentStatus: { $in: ["PAID", "REFUNDED"] } }).select("items").sort({ createdAt: -1 }).limit(20),
+        User.findById(req.user.id).select("wishlist"),
+      ]);
+      const bought = new Set(orders.flatMap((o) => (o.items || []).map((i) => String(i.product))));
+      const categoryIds = [...new Set(orders.flatMap((o) => (o.items || []).map((i) => i.category && String(i.category)).filter(Boolean)))];
+      const savedIds = (me?.wishlist || []).map((w) => String(w.product));
+      if (savedIds.length) {
+        const saved = await Product.find({ _id: { $in: savedIds } }).select("category");
+        saved.forEach((p) => p.category && categoryIds.push(String(p.category)));
+      }
+      if (categoryIds.length) {
+        const found = await populate(Product.find({ status: "ACTIVE", category: { $in: [...new Set(categoryIds)] } }).select(PUBLIC_FIELDS).sort({ createdAt: -1 }).limit(limit * 2));
+        picks = found.filter((p) => !bought.has(String(p._id)) && !savedIds.includes(String(p._id))).slice(0, limit);
+        personalized = picks.length > 0;
+      }
+    }
+    if (picks.length < limit) {
+      const have = new Set(picks.map((p) => String(p._id)));
+      const popular = await populate(Product.find({ status: "ACTIVE" }).select(PUBLIC_FIELDS).sort({ createdAt: -1 }).limit(limit + have.size));
+      picks = picks.concat(popular.filter((p) => !have.has(String(p._id)))).slice(0, limit);
+    }
+    // `recommendations` kept for older clients.
+    return res.status(200).json({ products: picks, recommendations: picks, personalized });
+  } catch (error) {
+    console.error("Recommendations failed:", error);
+    return res.status(500).json({ message: "We could not load recommendations right now. Please try again." });
   }
 };
 

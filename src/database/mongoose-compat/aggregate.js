@@ -1,7 +1,7 @@
 // Aggregation pipelines: the first $match runs in SQL, remaining stages in JS.
 // Supports the stages/operators the app uses: $match $group $sort $limit $skip
 // $project $count with $sum $avg $min $max $first $last $push $addToSet,
-// $dateToString $size $ifNull $toString.
+// $dateToString $size $ifNull $toString, arithmetic, comparisons and $cond.
 const { matchDoc } = require("./where");
 const { isObjectId } = require("./convert");
 
@@ -39,6 +39,28 @@ function evalExpr(expr, doc) {
       case "$toString": { const v = evalExpr(arg, doc); return isObjectId(v) ? v.toHexString() : v === null || v === undefined ? null : String(v); }
       case "$literal": return arg;
       case "$sum": return (Array.isArray(arg) ? arg : [arg]).reduce((s, a) => s + (Number(evalExpr(a, doc)) || 0), 0);
+      // Arithmetic, comparison and conditionals (dashboards, commission totals).
+      case "$add": return arg.reduce((s, a) => s + (Number(evalExpr(a, doc)) || 0), 0);
+      case "$subtract": return (Number(evalExpr(arg[0], doc)) || 0) - (Number(evalExpr(arg[1], doc)) || 0);
+      case "$multiply": return arg.reduce((s, a) => s * (Number(evalExpr(a, doc)) || 0), 1);
+      case "$divide": { const d = Number(evalExpr(arg[1], doc)) || 0; return d ? (Number(evalExpr(arg[0], doc)) || 0) / d : null; }
+      case "$max": return Math.max(...(Array.isArray(arg) ? arg : [arg]).map((a) => Number(evalExpr(a, doc)) || 0));
+      case "$min": return Math.min(...(Array.isArray(arg) ? arg : [arg]).map((a) => Number(evalExpr(a, doc)) || 0));
+      case "$round": { const [a, places = 0] = Array.isArray(arg) ? arg : [arg]; const f = 10 ** places; return Math.round((Number(evalExpr(a, doc)) || 0) * f) / f; }
+      case "$eq": return cmp(evalExpr(arg[0], doc), evalExpr(arg[1], doc)) === 0;
+      case "$ne": return cmp(evalExpr(arg[0], doc), evalExpr(arg[1], doc)) !== 0;
+      case "$gt": return cmp(evalExpr(arg[0], doc), evalExpr(arg[1], doc)) > 0;
+      case "$gte": return cmp(evalExpr(arg[0], doc), evalExpr(arg[1], doc)) >= 0;
+      case "$lt": return cmp(evalExpr(arg[0], doc), evalExpr(arg[1], doc)) < 0;
+      case "$lte": return cmp(evalExpr(arg[0], doc), evalExpr(arg[1], doc)) <= 0;
+      case "$in": { const v = evalExpr(arg[0], doc); const list = evalExpr(arg[1], doc) || []; return list.some((x) => cmp(x, v) === 0); }
+      case "$and": return arg.every((a) => Boolean(evalExpr(a, doc)));
+      case "$or": return arg.some((a) => Boolean(evalExpr(a, doc)));
+      case "$not": return !evalExpr(Array.isArray(arg) ? arg[0] : arg, doc);
+      case "$cond": {
+        const [c, t, f] = Array.isArray(arg) ? arg : [arg.if, arg.then, arg.else];
+        return evalExpr(c, doc) ? evalExpr(t, doc) : evalExpr(f, doc);
+      }
       default: throw new Error(`Unsupported aggregation expression ${op}`);
     }
   }

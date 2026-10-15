@@ -4,6 +4,7 @@ const fs = require("fs/promises");
 const path = require("path");
 const { protect } = require("../middleware/auth.middleware");
 const { checkStaffPermission } = require("../middleware/staff.middleware");
+const User = require("../models/User");
 
 const router = express.Router();
 const uploadDir = path.resolve(__dirname, "../../uploads");
@@ -16,6 +17,11 @@ const imageTypes = {
   "image/gif": { extension: ".gif", matches: (b) => b.length >= 6 && ["GIF87a", "GIF89a"].includes(b.toString("ascii", 0, 6)) },
   "image/webp": { extension: ".webp", matches: (b) => b.length >= 12 && b.toString("ascii", 0, 4) === "RIFF" && b.toString("ascii", 8, 12) === "WEBP" },
 };
+
+function allowOnboardingOrProductUpload(req, res, next) {
+  if (["vendor", "supplier", "super_admin"].includes(req.user?.role)) return next();
+  return checkStaffPermission("canManageProducts")(req, res, next);
+}
 
 function parseMultipart(body, boundary) {
   const delimiter = Buffer.from(`--${boundary}`);
@@ -58,7 +64,7 @@ async function readRequestBody(req, res) {
   return Buffer.concat(chunks, size);
 }
 
-router.post("/images", protect, checkStaffPermission("canManageProducts"), async (req, res) => {
+router.post("/images", protect, allowOnboardingOrProductUpload, async (req, res) => {
   try {
     const contentType = req.headers["content-type"] || "";
     const boundary = contentType.match(/^multipart\/form-data\s*;\s*boundary=(?:"([^"]+)"|([^;\s]+))/i);
@@ -106,7 +112,6 @@ router.post("/avatar", protect, async (req, res) => {
     const name = `avatar-${crypto.randomUUID()}${type.extension}`;
     await fs.writeFile(path.join(uploadDir, name), file.data, { flag: "wx" });
     const avatarUrl = `${req.protocol}://${req.get("host")}/uploads/${name}`;
-    const User = require("../models/User");
     await User.updateOne({ _id: (req.staffUser || req.user)._id }, { $set: { avatarUrl } });
     return res.status(201).json({ message: "Photo updated.", avatarUrl });
   } catch (error) {

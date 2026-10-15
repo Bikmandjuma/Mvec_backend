@@ -191,8 +191,43 @@ async function cashout({ amount, phone }) {
   }
 }
 
+/**
+ * Send money to a mobile money number (Paypack "cashout"). Used for buyer
+ * refunds and affiliate withdrawals.
+ *
+ * POST ${PAYPACK_BASE_URL}/transactions/cashout  { amount, number }
+ */
+async function sendMoney({ amount, phone }) {
+  if (isSandbox()) {
+    return {
+      success: true,
+      reference: `SANDBOX-OUT-${crypto.randomUUID()}`,
+      status: "SUCCESSFUL",
+      raw: { sandbox: true, message: "Paypack cashout simulated (no credentials configured)" },
+    };
+  }
+  const number = String(phone).replace(/^\+/, "").replace(/^250/, "0");
+  try {
+    const response = await axios.post(
+      `${BASE_URL()}/transactions/cashout`,
+      { amount: Number(amount), number },
+      { headers: await authHeaders() },
+    );
+    return {
+      success: true,
+      reference: response.data.ref,
+      status: normalizeStatus(response.data.status),
+      raw: response.data,
+    };
+  } catch (error) {
+    const detail = error.response ? JSON.stringify(error.response.data) : error.message;
+    throw new Error(`Paypack cashout failed${error.response ? ` (${error.response.status})` : ""}: ${detail}`);
+  }
+}
+
 module.exports = {
   cashout,
+  sendMoney,
   isSandbox,
   normalizeStatus,
   getAccessToken,

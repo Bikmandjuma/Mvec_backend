@@ -1,5 +1,6 @@
-const mongoose = require("mongoose");
-const { MongoMemoryServer } = require("mongodb-memory-server");
+require("../helpers/jest-shim"); // Jest-style API on node:test
+const db = require("../helpers/mysql"); // MySQL test database (first, before models)
+const orm = require("../../src/database/orm");
 const request = require("supertest");
 const jwt = require("jsonwebtoken");
 const express = require("express");
@@ -18,7 +19,6 @@ const Notification = require("../../src/models/Notification");
 
 jest.setTimeout(60000);
 
-let mongoServer;
 let app;
 const JWT_SECRET = "test_operations_secret_key";
 
@@ -46,31 +46,16 @@ describe("Operations: Reviews, Users, Promotions, Shipping, Notifications, Repor
   beforeAll(async () => {
     process.env.NODE_ENV = "test";
     process.env.JWT_SECRET = JWT_SECRET;
-    mongoServer = await MongoMemoryServer.create({
-      binary: { version: "7.0.0" },
-      replSet: { count: 1 },
-    });
-    await mongoose.connect(mongoServer.getUri());
+    await db.setup();
     app = createTestApp();
   });
 
   afterAll(async () => {
-    await mongoose.disconnect();
-    if (mongoServer) await mongoServer.stop();
+    await db.close();
   });
 
   beforeEach(async () => {
-    await Promise.all([
-      User.deleteMany({}),
-      Product.deleteMany({}),
-      Category.deleteMany({}),
-      Order.deleteMany({}),
-      Store.deleteMany({}),
-      Review.deleteMany({}),
-      Promotion.deleteMany({}),
-      ShippingZone.deleteMany({}),
-      Notification.deleteMany({}),
-    ]);
+    await db.reset();
 
     superAdmin = await User.create({
       Fullname: "Super Admin",
@@ -265,7 +250,7 @@ describe("Operations: Reviews, Users, Promotions, Shipping, Notifications, Repor
         .set("Authorization", `Bearer ${superAdminToken}`)
         .send({ status: "NOT_A_STATUS" });
       expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/allowed/i);
+      expect(res.body.message).toMatch(/invalid status/i);
     });
 
     test("Vendor lists customers who ordered their products", async () => {
@@ -373,10 +358,16 @@ describe("Operations: Reviews, Users, Promotions, Shipping, Notifications, Repor
   });
 
   describe("5. Notifications", () => {
-    test("Create and list own notifications", async () => {
-      const created = await request(app)
+    test("Only admins send manual notifications; the recipient lists them", async () => {
+      const denied = await request(app)
         .post("/api/notifications")
         .set("Authorization", `Bearer ${vendorToken}`)
+        .send({ recipient: vendorUser._id, type: "ORDER", title: "New order received", message: "Order ORD-1004", reference: "ORD-1004" });
+      expect(denied.status).toBe(403);
+
+      const created = await request(app)
+        .post("/api/notifications")
+        .set("Authorization", `Bearer ${superAdminToken}`)
         .send({ recipient: vendorUser._id, type: "ORDER", title: "New order received", message: "Order ORD-1004", reference: "ORD-1004" });
       expect(created.status).toBe(201);
 

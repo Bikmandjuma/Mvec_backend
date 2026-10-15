@@ -1,4 +1,6 @@
-const mongoose = require("mongoose");
+require("../helpers/jest-shim"); // Jest-style API on node:test
+const db = require("../helpers/mysql"); // MySQL test database (first, before models)
+const orm = require("../../src/database/orm");
 const request = require("supertest");
 const jwt = require("jsonwebtoken");
 
@@ -20,7 +22,7 @@ describe("Step 5: Authentication & Authorization (RBAC) Suite", () => {
   });
 
   beforeEach(async () => {
-    await User.deleteMany({});
+    await db.reset();
 
     // 1. Seed Users for each Role (Matching User Schema Constraints)
     buyerUser = await User.create({
