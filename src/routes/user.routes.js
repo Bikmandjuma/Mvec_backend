@@ -7,6 +7,7 @@ router.use(protect);
 
 // ─── VENDOR CUSTOMERS ─────────────────────────────────────────────────────────
 router.get("/vendor/customers", authorize("vendor"), user.listVendorCustomers);
+router.get("/vendor/customers/:key", authorize("vendor"), user.getVendorCustomer);
 
 // ─── USER / STORE / ORDER SEARCH (abuse report autocomplete) ──────────────────
 router.get("/search", authorize("vendor", "super_admin"), user.searchUsers);

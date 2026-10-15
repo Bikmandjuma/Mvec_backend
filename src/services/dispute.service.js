@@ -101,6 +101,12 @@ class DisputeService {
 
       const order = await Order.findById(dispute.order).session(session);
       if (!order) throw new Error("Associated order not found.");
+      if (!["REFUND_BUYER", "RELEASE_TO_VENDOR", "SPLIT_SETTLEMENT"].includes(decision)) {
+        throw new Error("decision must be REFUND_BUYER, RELEASE_TO_VENDOR or SPLIT_SETTLEMENT.");
+      }
+      if (decision === "SPLIT_SETTLEMENT" && (Number(buyerRefundAmount) || 0) + (Number(vendorReleaseAmount) || 0) > Number(dispute.disputedAmount)) {
+        throw new Error("Refund and release amounts can't exceed the disputed amount.");
+      }
 
       if (!["REFUND_BUYER", "RELEASE_TO_VENDOR", "SPLIT_SETTLEMENT"].includes(decision)) {
         throw new Error("Choose refund buyer, release to vendor or split.");

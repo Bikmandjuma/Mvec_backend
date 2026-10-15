@@ -113,6 +113,9 @@ module.exports = [
       status: en(["PENDING", "ACTIVE", "PAUSED", "REJECTED", "COMPLETED"], { default: "PENDING", required: true, index: true }),
       impressions: int({ required: true, default: 0 }),
       clicks: int({ required: true, default: 0 }),
+      spent: money({ required: true, default: 0 }),
+      refunded: money({ required: true, default: 0 }),
+      rejectionReason: str({ len: 500, default: "" }),
     },
   },
   subscription("vendor", "MVEC-SUB", "Subscription", "subscriptions", "subscriptions", false),
@@ -503,6 +506,31 @@ module.exports = [
       role: en(["OPERATIONS", "WAREHOUSE", "FULFILMENT", "FINANCE", "VIEWER"], { default: "VIEWER", required: true }),
       status: en(["ACTIVE", "INVITED", "SUSPENDED"], { default: "ACTIVE", required: true }),
       note: str({ len: 500, default: "" }),
+    },
+  },
+  {
+    model: "SellerCharge", table: "seller_charges", collection: "sellercharges",
+    indexes: [{ fields: ["vendorId", "createdAt"] }],
+    fields: {
+      vendor: ref("users", { required: true, onDelete: "CASCADE" }),
+      type: en(["SUBSCRIPTION", "ADVERTISING", "ADJUSTMENT"], { required: true }),
+      amount: money({ required: true }),
+      reference: str({ len: 120, default: "" }),
+      description: str({ len: 300, default: "" }),
+      status: en(["CHARGED", "REFUNDED"], { default: "CHARGED", required: true }),
+    },
+  },
+  {
+    model: "StaffActivity", table: "staff_activities", collection: "staffactivities",
+    indexes: [{ fields: ["vendorId", "createdAt"] }],
+    fields: {
+      vendor: ref("users", { required: true, onDelete: "CASCADE" }), // store owner
+      user: ref("users", { required: true, fk: false }),             // staff member who acted
+      staff: ref("staff", { fk: false }),
+      action: str({ len: 150, required: true }),
+      method: str({ len: 10, required: true }),
+      path: str({ len: 300, required: true }),
+      statusCode: int({ required: true, default: 200 }),
     },
   },
   {

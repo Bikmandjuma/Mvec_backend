@@ -7,6 +7,9 @@ const { protect, authorize, optionalProtect } = require("../middleware/auth.midd
 // routes keep their own super_admin guard; /track/:code stays public.
 const affiliateOnly = [protect, authorize("affiliate")];
 
+// Seller view: affiliate-referred sales of their products.
+router.get("/vendor/summary", protect, authorize("vendor"), require("../controllers/vendorAffiliate.controller").getVendorAffiliateSummary);
+
 // Affiliate dashboard (wallet, links, aggregates, own payouts)
 router.get("/me/dashboard", ...affiliateOnly, affiliateController.getMyDashboard);
 

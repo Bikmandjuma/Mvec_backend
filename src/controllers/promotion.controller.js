@@ -1,8 +1,11 @@
 const orm = require("../database/orm");
 const Promotion = require("../models/Promotion");
+const Product = require("../models/Product");
 const { resolveOwnedStore } = require("../utils/vendorStore.util");
+const promotionService = require("../services/promotion.service");
+const shippingService = require("../services/shipping.service");
 
-function mapPromotion(p) {
+function mapPromotion(p, stats) {
   return {
     id: p.publicId || p._id,
     name: p.name,
@@ -14,9 +17,12 @@ function mapPromotion(p) {
       p.type === "PERCENT"
         ? `${p.value}%`
         : p.type === "FIXED"
-        ? `${p.value} RWF`
+        ? `${Number(p.value).toLocaleString("en-RW")} RWF`
         : "Free shipping",
     status: p.status,
+    // What buyers experience now (dates and usage limit applied).
+    liveStatus: promotionService.effectiveStatus(p),
+    stats: stats || undefined,
     startsAt: p.startsAt,
     endsAt: p.endsAt,
     usageLimit: p.usageLimit,
@@ -37,6 +43,48 @@ const findPromotion = (id) =>
 
 const allowedStatus = ["DRAFT", "SCHEDULED", "ACTIVE", "PAUSED", "EXPIRED", "CANCELLED"];
 const allowedType = ["PERCENT", "FIXED", "FREE_SHIPPING"];
+
+// Shared checks for create and update; returns an error message or null.
+function invalidPromotion({ type, value, startsAt, endsAt, usageLimit, minOrderAmount }) {
+  const v = Number(value);
+  if (type === "PERCENT" && (!(v > 0) || v > 100)) return "A percentage discount must be between 1 and 100.";
+  if (type === "FIXED" && !(v > 0)) return "Enter the amount off in RWF.";
+  if (startsAt && endsAt && new Date(endsAt) < new Date(startsAt)) return "The end date must be on or after the start date.";
+  if (usageLimit != null && usageLimit !== "" && !(Number(usageLimit) >= 1)) return "The usage limit must be at least 1, or empty for unlimited.";
+  if (minOrderAmount != null && Number(minOrderAmount) < 0) return "The minimum order can't be negative.";
+  return null;
+}
+
+// @desc    Check a coupon against a basket (checkout preview)
+// @route   POST /api/promotions/validate  { code, items:[{productId, qty}], shippingAddress?, shippingMethod? }
+// @access  Private
+exports.validateCoupon = async (req, res) => {
+  try {
+    const { code, items = [], shippingAddress, shippingMethod } = req.body;
+    const ids = items.map((i) => i.productId).filter((id) => orm.isValidObjectId(id));
+    const products = await Product.find({ _id: { $in: ids } });
+    const byId = new Map(products.map((p) => [String(p._id), p]));
+    const lines = items
+      .map((i) => ({ product: byId.get(String(i.productId)), quantity: Number(i.qty || i.quantity) || 1 }))
+      .filter((l) => l.product)
+      .map((l) => ({ ...l, price: l.product.discountPrice || l.product.price }));
+    if (!lines.length) return res.status(400).json({ message: "Your basket is empty." });
+
+    let parcels = [];
+    if (shippingAddress) {
+      const quote = await shippingService.quoteShipping({ lines, address: shippingAddress, method: shippingMethod }).catch(() => null);
+      parcels = quote?.groups?.map((g) => ({ vendor: g.vendor, store: g.store, fee: g.fee })) || [];
+    }
+    const q = await promotionService.quote(code, { lines, parcels, userId: req.user.id });
+    return res.status(200).json({
+      code: q.code, name: q.name, type: q.type,
+      itemDiscount: q.itemDiscount, shippingDiscount: q.shippingDiscount, discount: q.discount,
+      message: q.message,
+    });
+  } catch (error) {
+    return res.status(error.status || 500).json({ message: error.status ? error.message : "Could not check this code." });
+  }
+};
 
 // @desc    Create a promotion (vendor for their store, or admin with scope)
 // @route   POST /api/promotions
@@ -68,9 +116,8 @@ exports.createPromotion = async (req, res) => {
     if (!allowedType.includes(promoType)) {
       return res.status(400).json({ message: "Invalid promotion type" });
     }
-    if (promoType === "PERCENT" && (value < 0 || value > 100)) {
-      return res.status(400).json({ message: "Percent value must be between 0 and 100" });
-    }
+    const invalid = invalidPromotion({ type: promoType, value, startsAt, endsAt, usageLimit, minOrderAmount });
+    if (invalid) return res.status(400).json({ message: invalid });
 
     const existing = await Promotion.findOne({ code: String(code).trim().toUpperCase() });
     if (existing) {
@@ -78,6 +125,11 @@ exports.createPromotion = async (req, res) => {
     }
 
     const isVendor = req.user.role === "vendor";
+    if (product) {
+      if (!orm.isValidObjectId(product)) return res.status(400).json({ message: "Invalid product" });
+      const owned = await Product.exists(isVendor ? { _id: product, vendor: req.user._id } : { _id: product });
+      if (!owned) return res.status(400).json({ message: "Choose one of your own products." });
+    }
     let store = null;
     if (isVendor) {
       store = await resolveOwnedStore(req.user._id, req.body.storeId);
@@ -107,7 +159,7 @@ exports.createPromotion = async (req, res) => {
     });
 
     return res.status(201).json({
-      message: "Promotion created",
+      message: promotion.status === "ACTIVE" ? `Promotion created. Buyers can use ${promotion.code} now.` : "Promotion created",
       promotion: mapPromotion(promotion.toObject()),
     });
   } catch (error) {
@@ -129,8 +181,10 @@ exports.listPromotions = async (req, res) => {
     if (status) query.status = status;
 
     const promotions = await Promotion.find(query).sort({ createdAt: -1 });
+    const stats = await promotionService.stats(promotions.map((p) => p._id));
+    const empty = { orders: 0, paidOrders: 0, discountGiven: 0, sales: 0 };
     return res.status(200).json({
-      data: promotions.map((p) => mapPromotion(p.toObject())),
+      data: promotions.map((p) => mapPromotion(p.toObject(), stats.get(String(p._id)) || empty)),
       meta: { total: promotions.length },
     });
   } catch (error) {
@@ -183,6 +237,14 @@ exports.updatePromotion = async (req, res) => {
       }
       promotion.status = status;
     }
+    const invalid = invalidPromotion({
+      type: promotion.type,
+      value: promotion.value,
+      startsAt: startsAt !== undefined ? startsAt : promotion.startsAt,
+      endsAt: endsAt !== undefined ? endsAt : promotion.endsAt,
+      usageLimit, minOrderAmount,
+    });
+    if (invalid) return res.status(400).json({ message: invalid });
     if (startsAt !== undefined) promotion.startsAt = startsAt;
     if (endsAt !== undefined) promotion.endsAt = endsAt;
     if (usageLimit !== undefined) promotion.usageLimit = usageLimit;

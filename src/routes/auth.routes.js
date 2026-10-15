@@ -29,6 +29,9 @@ router.get("/me", async (req, res) => {
     return res.status(500).json({ message: "Could not load the current account." });
   }
 });
+router.patch("/profile", auth.updateAccount);
+router.delete("/avatar", auth.removeAvatar);
+router.post("/logout-all", auth.logoutAll);
 
 router.patch("/me", auth.updateProfile);
 router.route("/wishlist").get(auth.getWishlist).post(auth.addToWishlist);

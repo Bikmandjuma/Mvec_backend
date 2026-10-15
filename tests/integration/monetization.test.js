@@ -13,6 +13,9 @@ const Subscription = require("../../src/models/Subscription");
 const BuyerSubscription = require("../../src/models/BuyerSubscription");
 const Advertisement = require("../../src/models/Advertisement");
 const Translation = require("../../src/models/Translation");
+const VendorWallet = require("../../src/models/VendorWallet");
+const Product = require("../../src/models/Product");
+const Category = require("../../src/models/Category");
 
 jest.setTimeout(60000);
 
@@ -103,6 +106,8 @@ describe("Monetization: Subscriptions, Advertisements & Localization", () => {
       email: "vendor@kigali.rw",
       verificationStatus: "VERIFIED",
     });
+    // Premium and ad budgets are paid from the seller's available balance.
+    await VendorWallet.create({ vendor: vendorUser._id, availableBalance: 1000000 });
   });
 
   describe("1. Vendor Subscription endpoints", () => {
@@ -136,7 +141,7 @@ describe("Monetization: Subscriptions, Advertisements & Localization", () => {
       expect(saved.price).toBe(15000);
     });
 
-    test("POST /api/vendor/subscription downgrades back to Free", async () => {
+    test("POST /api/vendor/subscription with free stops auto-renew (Premium runs to the end of the paid month)", async () => {
       await Subscription.create({ vendor: vendorUser._id, plan: "PREMIUM", status: "ACTIVE", price: 15000, billingCycle: "MONTHLY" });
 
       const res = await request(app)
@@ -145,11 +150,10 @@ describe("Monetization: Subscriptions, Advertisements & Localization", () => {
         .send({ plan: "free" });
 
       expect(res.status).toBe(200);
-      expect(res.body.subscription.planKey).toBe("FREE");
-      expect(res.body.subscription.price).toBe(0);
 
       const saved = await Subscription.findOne({ vendor: vendorUser._id });
-      expect(saved.plan).toBe("FREE");
+      expect(saved.plan).toBe("PREMIUM");
+      expect(saved.autoRenew).toBe(false);
     });
 
     test("Rejects buyer access to vendor subscription endpoints", async () => {
@@ -168,18 +172,24 @@ describe("Monetization: Subscriptions, Advertisements & Localization", () => {
 
   describe("2. Vendor Advertisement endpoints", () => {
     test("POST /api/vendor/advertisements submits a pending campaign", async () => {
+      const category = await Category.create({ name: "Phones", slug: "phones" });
+      const product = await Product.create({
+        name: "Samsung Galaxy S25", vendor: vendorUser._id, category: category._id, description: "d",
+        media: { mainImage: "/uploads/x.jpg" }, status: "ACTIVE", stockQuantity: 5, price: 900000,
+      });
       const res = await request(app)
         .post("/api/vendor/advertisements")
         .set("Authorization", `Bearer ${vendorToken}`)
         .send({
           product: "Samsung Galaxy S25",
+          productId: String(product._id),
           placement: "Homepage hero",
           budget: 150000,
         });
 
       expect(res.status).toBe(201);
       expect(res.body.advertisement.id).toBeDefined();
-      expect(res.body.advertisement.status).toBe("Scheduled");
+      expect(res.body.advertisement.status).toBe("In review");
       expect(res.body.advertisement.placement).toBe("Homepage hero");
 
       const saved = await Advertisement.findOne({ vendor: vendorProfile._id });

@@ -1,683 +1,337 @@
 const bcrypt = require("bcryptjs");
 const orm = require("../database/orm");
-
 const Staff = require("../models/Staff");
-const Store = require("../models/Store");
 const User = require("../models/User");
+const Store = require("../models/Store");
 const { getPrimaryStore } = require("../utils/vendorStore.util");
 
-const authController = require("./auth.controller");
-const vendorStaffInvitation = require("../services/vendorStaffInvitation.service");
+const StaffActivity = require("../models/StaffActivity");
+const staffAccess = require("../services/staffAccess.service");
 
-const escapeHtml = (value) =>
-  String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-
-const STAFF_ROLES = new Set([
-  "STORE_MANAGER",
-  "ORDER_MANAGER",
-  "CATALOG_MANAGER",
-]);
-
-const PERMISSIONS = {
-  VIEWDASHBOARD: "canViewDashboard",
-  MANAGEPRODUCTS: "canManageProducts",
-  MANAGEORDERS: "canManageOrders",
-  MANAGEPAYOUTS: "canManagePayouts",
-  MANAGESTAFF: "canManageStaff",
-  VIEWANALYTICS: "canViewAnalytics",
-  MANAGESETTINGS: "canManageSettings",
-};
+const STAFF_ROLES = new Set(Object.keys(staffAccess.ROLE_PRESETS));
+// Legacy slugs (VIEW_DASHBOARD, MANAGE_ORDERS...) map onto the permission keys.
+const SLUG_TO_KEY = Object.fromEntries(staffAccess.KEYS.map((k) => [k.replace(/^can/, "").toUpperCase(), k]));
 
 function normalizeRole(role) {
-  const value = String(role || "staff")
-    .trim()
-    .toUpperCase();
-
+  const value = String(role || "staff").trim().toUpperCase();
   if (value === "MANAGER") return "STORE_MANAGER";
   if (value === "STAFF") return "ORDER_MANAGER";
-
   return value;
 }
 
+// Role preset, with optional overrides: an array of slugs/keys to turn on, or
+// an object { key: boolean } (as sent by the Team page's permission editor).
 function permissionsFor(role, requested) {
-  const defaults = {
-    canViewDashboard: true,
-    canManageProducts: role === "STORE_MANAGER" || role === "CATALOG_MANAGER",
-    canManageOrders: role === "STORE_MANAGER" || role === "ORDER_MANAGER",
-    canManagePayouts: false,
-    canManageStaff: false,
-    canViewAnalytics: role === "STORE_MANAGER",
-    canManageSettings: false,
-  };
-
+  const perms = staffAccess.presetFor(role);
+  const keyOf = (slug) => (staffAccess.KEYS.includes(slug) ? slug : SLUG_TO_KEY[String(slug).replace(/[^a-zA-Z]/g, "").toUpperCase()]);
   if (Array.isArray(requested)) {
-    for (const slug of requested) {
-      const key = PERMISSIONS[String(slug).replaceAll("_", "").toUpperCase()];
-
-      if (key) {
-        defaults[key] = true;
-      }
-    }
-  } else if (
-    requested &&
-    typeof requested === "object" &&
-    !Array.isArray(requested)
-  ) {
+    staffAccess.KEYS.forEach((k) => { perms[k] = false; });
+    requested.forEach((slug) => { const k = keyOf(slug); if (k) perms[k] = true; });
+  } else if (requested && typeof requested === "object") {
     for (const [slug, value] of Object.entries(requested)) {
-      const key =
-        PERMISSIONS[String(slug).replaceAll("_", "").toUpperCase()] || slug;
-
-      if (Object.hasOwn(defaults, key) && typeof value === "boolean") {
-        defaults[key] = value;
-      }
+      const k = keyOf(slug);
+      if (k && typeof value === "boolean") perms[k] = value;
     }
   }
+  perms.canViewDashboard = true;
+  return perms;
+}
 
-  return defaults;
+const plainPerms = (staff) => staff.permissions?.toObject?.() || staff.permissions || {};
+
+// A staff member with team access can't edit themselves or hand out access
+// they don't have themselves.
+function staffActorProblem(req, target, nextPerms) {
+  const actor = req.staffMember;
+  if (!actor) return null;
+  if (target && String(target._id) === String(actor._id)) return "You can't change your own access. Ask the store owner.";
+  if (nextPerms) {
+    const mine = plainPerms(actor);
+    const extra = staffAccess.KEYS.find((k) => nextPerms[k] && !mine[k]);
+    if (extra) return "You can only give access you have yourself.";
+  }
+  return null;
 }
 
 function staffDto(staff) {
   const user = staff.user || {};
-
-  const permissions =
-    staff.permissions?.toObject?.() || staff.permissions || {};
-
+  const permissions = staff.permissions?.toObject?.() || staff.permissions || {};
   return {
     _id: staff._id,
     id: staff._id,
     name: user.Fullname || "Team member",
-    email: user.email || staff.email || "",
+    email: user.email || "",
     phone: user.phone || null,
-
     role: staff.role,
     permission_role: staff.role,
-
     status: staff.status,
     active: staff.status === "ACTIVE",
-
     store_id: staff.store,
-    vendor_id: staff.vendorOwner,
+    vendor_id: staff.store,
     user_id: user._id || staff.user,
-
-    permissions: Object.entries(PERMISSIONS)
-      .filter(([, key]) => permissions[key])
-      .map(([slug]) => slug),
-
-    permissionsMap: permissions,
-
+    permissions: staffAccess.KEYS.filter((k) => permissions[k]),
+    permissionsMap: Object.fromEntries(staffAccess.KEYS.map((k) => [k, Boolean(permissions[k])])),
+    customized: staffAccess.KEYS.some((k) => Boolean(permissions[k]) !== staffAccess.presetFor(staff.role)[k]),
+    lastActiveAt: staff.lastActiveAt || null,
     createdAt: staff.createdAt,
   };
 }
 
 async function storeForOwner(ownerId) {
-  // Multi-store vendors: staff belong to the primary store by default.
   let store = await getPrimaryStore(ownerId);
-
   if (!store) {
     const Vendor = require("../models/Vendor");
-
-    const vendor = await Vendor.findOne({
-      user: ownerId,
-    });
-
-    if (vendor) {
+    const v = await Vendor.findOne({ user: ownerId });
+    if (v) {
       const createSlug = (text) =>
-        String(text)
+        text
+          .toString()
           .toLowerCase()
           .trim()
           .replace(/\s+/g, "-")
-          .replace(/[^\w-]+/g, "")
-          .replace(/--+/g, "-");
-
-      let slug = createSlug(vendor.businessName);
-
-      const existingStore = await Store.findOne({
-        slug,
-      });
-
-      if (existingStore) {
-        slug = `${slug}-${Date.now().toString(36)}`;
-      }
-
+          .replace(/[^\w\-]+/g, "")
+          .replace(/\-\-+/g, "-");
+      let slug = createSlug(v.businessName);
+      const exists = await Store.findOne({ slug });
+      if (exists) slug = `${slug}-${Date.now().toString(36)}`;
       store = await Store.create({
         vendor: ownerId,
         isPrimary: true,
-        storeName: vendor.businessName,
+        storeName: v.businessName,
         slug,
-        contactEmail: vendor.email,
-        contactPhone: vendor.phone,
+        contactEmail: v.email,
+        contactPhone: v.phone,
         status: "ACTIVE",
       });
     }
   }
-
   return store;
 }
 
-// @desc    Add / Invite a staff member to vendor account
-// @route   POST /api/staff
-// @access  Private (Vendor Owner Only)
 exports.addStaffMember = async (req, res) => {
-  let createdUser = null;
-  let createdStaff = null;
-
+  let createdUser;
   try {
-    // The team is always managed on behalf of the store owner (set by
-    // checkStaffPermission), never on behalf of the staff member calling us.
-    const ownerId = req.ownerId || req.vendorId || req.user.id;
     const name = String(req.body.name || req.body.Fullname || "").trim();
-
-    const normalizedEmail =
-      typeof req.body.email === "string"
-        ? req.body.email.trim().toLowerCase()
-        : "";
-
+    const email = String(req.body.email || "").trim().toLowerCase();
     const password = req.body.password;
     const phone = req.body.phone || req.body.phoneNumber || null;
-
     const role = normalizeRole(req.body.role || req.body.permission_role);
-
-    if (!normalizedEmail) {
+    if (!name || !email || !email.includes("@") || typeof password !== "string" || password.length < 8) {
       return res.status(400).json({
-        message: "A staff member email is required.",
+        message: "Full name, valid email, and a password of at least 8 characters are required.",
       });
     }
-
-    if (!normalizedEmail.includes("@")) {
-      return res.status(400).json({
-        message: "Please provide a valid email.",
-      });
-    }
-
     if (!STAFF_ROLES.has(role)) {
-      return res.status(400).json({
-        message: "Choose a valid staff role.",
-      });
+      return res.status(400).json({ message: "Choose a valid staff role." });
     }
 
-    if (
-      req.body.permissions != null &&
-      typeof req.body.permissions !== "object"
-    ) {
-      return res.status(400).json({
-        message: "Permissions must be an object or array.",
-      });
+    const store = await storeForOwner(req.user.id);
+    if (!store) {
+      return res.status(404).json({ message: "You must create a store before adding staff." });
     }
-
-    if (req.user.email && req.user.email.toLowerCase() === normalizedEmail) {
-      return res.status(400).json({
-        message: "You cannot add yourself as a staff member.",
-      });
-    }
-
-    const userToInvite = await User.findOne({
-      email: normalizedEmail,
-    });
-
-    if (
-      userToInvite &&
-      userToInvite._id.toString() === req.user.id.toString()
-    ) {
-      return res.status(400).json({
-        message: "You cannot add yourself as a staff member.",
-      });
-    }
-
-    const existingStaff = await Staff.findOne({
-      vendorOwner: ownerId,
-      ...(userToInvite
-        ? {
-            $or: [
-              {
-                email: normalizedEmail,
-              },
-              {
-                user: userToInvite._id,
-              },
-            ],
-          }
-        : {
-            email: normalizedEmail,
-          }),
-    });
-
-    if (existingStaff) {
-      return res.status(400).json({
-        message: "User is already a member of your team.",
-      });
-    }
-
-    // Staff join the primary store when there is one; a seller can also
-    // build the team before creating a store.
-    const store = await storeForOwner(ownerId);
-
     const permissions = permissionsFor(role, req.body.permissions);
+    const problem = staffActorProblem(req, null, permissions);
+    if (problem) return res.status(403).json({ message: problem });
 
-    /*
-     * --------------------------------------------------
-     * MODE 1: Direct account creation
-     *
-     * This preserves the Mvec backend behavior.
-     * If the request contains a password, create
-     * the staff account immediately.
-     * --------------------------------------------------
-     */
-    if (typeof password === "string") {
-      if (!name) {
-        return res.status(400).json({
-          message: "Full name is required when creating a staff account.",
-        });
-      }
-
-      if (password.length < 8) {
-        return res.status(400).json({
-          message: "Password must be at least 8 characters.",
-        });
-      }
-
-      if (userToInvite) {
-        return res.status(409).json({
-          message: "An account with this email already exists.",
-        });
-      }
-
-      const hashedPassword = await bcrypt.hash(password, 10);
-
-      createdUser = await User.create({
-        Fullname: name,
-        email: normalizedEmail,
-        password: hashedPassword,
-        role: "vendor",
-        companyName: store?.storeName || req.user.companyName || name,
-        isVendorStaff: true,
-        status: "ACTIVE",
-        ...(phone ? { phone } : {}),
-      });
-
-      createdStaff = await Staff.create({
-        vendorOwner: ownerId,
-        user: createdUser._id,
-        email: normalizedEmail,
-        role,
-        permissions,
-        status: "ACTIVE",
-        ...(store ? { store: store._id } : {}),
-      });
-
-      await createdStaff.populate("user", "Fullname email phone");
-
-      return res.status(201).json({
-        message: "Staff account created successfully.",
-        staff: staffDto(createdStaff),
-      });
+    const existing = await User.findOne({ email }).select("+isVendorStaff");
+    if (existing) {
+      // Someone removed from this team earlier can be added back.
+      const leftThisTeam = existing.isVendorStaff && !(await Staff.exists({ user: existing._id }));
+      if (!leftThisTeam) return res.status(409).json({ message: "An account with this email already exists." });
+      existing.Fullname = name;
+      existing.password = await bcrypt.hash(password, 10);
+      existing.status = "ACTIVE";
+      existing.companyName = store.storeName;
+      if (phone) existing.phone = phone;
+      await existing.save();
+      const staff = await Staff.create({ store: store._id, vendorOwner: req.user.id, user: existing._id, role, permissions, status: "ACTIVE" });
+      await staff.populate("user", "Fullname email phone");
+      return res.status(201).json({ message: "Team member added back with a new password.", staff: staffDto(staff) });
     }
 
-    /*
-     * --------------------------------------------------
-     * MODE 2: Invitation
-     *
-     * This preserves the Ikiguzi invitation system.
-     * No account is created until the invite is accepted.
-     * --------------------------------------------------
-     */
+    const userData = {
+      Fullname: name,
+      email,
+      password: await bcrypt.hash(password, 10),
+      role: "vendor",
+      companyName: store.storeName,
+      isVendorStaff: true,
+      status: "ACTIVE",
+    };
+    if (phone) userData.phone = phone;
 
-    const { token, tokenHash, expiresAt } =
-      vendorStaffInvitation.createInvitationToken();
-
-    createdStaff = await Staff.create({
-      vendorOwner: ownerId,
-
-      ...(userToInvite
-        ? {
-            user: userToInvite._id,
-          }
-        : {}),
-
-      email: normalizedEmail,
+    createdUser = await User.create(userData);
+    const staff = await Staff.create({
+      store: store._id,
+      vendorOwner: req.user.id,
+      user: createdUser._id,
       role,
       permissions,
-
-      status: "INVITED",
-
-      invitationTokenHash: tokenHash,
-      invitationExpiresAt: expiresAt,
-
-      ...(store ? { store: store._id } : {}),
+      status: "ACTIVE",
     });
-
-    try {
-      const frontendUrl = (
-        process.env.FRONTEND_URL || "http://localhost:3000"
-      ).replace(/\/+$/, "");
-
-      const inviteQuery =
-        `staffInviteToken=${encodeURIComponent(token)}` +
-        `&email=${encodeURIComponent(normalizedEmail)}`;
-
-      const signupUrl = `${frontendUrl}/signup?${inviteQuery}`;
-
-      const loginUrl = `${frontendUrl}/login?${inviteQuery}`;
-
-      const inviterName = req.user.Fullname || "Your vendor account owner";
-
-      const roleLabel = String(role).toLowerCase().replaceAll("_", " ");
-
-      const transporter = authController.getTransporter();
-
-      await transporter.sendMail({
-        from: `"MVEC" <${process.env.EMAIL_FROM || process.env.EMAIL_USER}>`,
-        to: normalizedEmail,
-
-        subject: "You have been invited to a vendor team on MVEC",
-
-        text: [
-          `Hello${userToInvite?.Fullname ? ` ${userToInvite.Fullname}` : ""},`,
-          "",
-          `${inviterName} invited you to join their vendor team as ${roleLabel}.`,
-          `Create an account or accept the invitation by ${expiresAt.toLocaleString()}:`,
-          signupUrl,
-          "",
-          `If you already have an account, sign in to accept: ${loginUrl}`,
-          "",
-          "If you were not expecting this invitation, you can ignore this email.",
-        ].join("\n"),
-
-        html: `
-          <p>
-            Hello${
-              userToInvite?.Fullname
-                ? ` ${escapeHtml(userToInvite.Fullname)}`
-                : ""
-            },
-          </p>
-
-          <p>
-            <strong>
-              ${escapeHtml(inviterName)}
-            </strong>
-            invited you to join their vendor team as
-            <strong>
-              ${escapeHtml(roleLabel)}
-            </strong>.
-          </p>
-
-          <p>
-            This invitation expires
-            ${escapeHtml(expiresAt.toLocaleString())}.
-          </p>
-
-          <p>
-            <a href="${escapeHtml(signupUrl)}">
-              Create an account and join the team
-            </a>
-          </p>
-
-          <p>
-            Already have an account?
-            <a href="${escapeHtml(loginUrl)}">
-              Sign in to accept the invitation
-            </a>
-          </p>
-
-          <p>
-            If you were not expecting this invitation,
-            you can ignore this email.
-          </p>
-        `,
-      });
-    } catch (emailError) {
-      try {
-        await createdStaff.deleteOne();
-      } catch (cleanupError) {
-        console.error(
-          "Failed to remove vendor team member after invite email failure:",
-          cleanupError,
-        );
-      }
-
-      console.error("Vendor team invitation email failed:", emailError);
-
-      return res.status(500).json({
-        message: "Could not send the invitation email. Please try again later.",
-      });
-    }
-
+    await staff.populate("user", "Fullname email phone");
     return res.status(201).json({
-      message: "Invitation email sent successfully.",
-
-      staff: {
-        _id: createdStaff._id,
-        email: createdStaff.email,
-        role: createdStaff.role,
-        permissions: createdStaff.permissions,
-        status: createdStaff.status,
-        store: createdStaff.store,
-        createdAt: createdStaff.createdAt,
-      },
+      message: "Staff account created successfully.",
+      staff: staffDto(staff),
     });
   } catch (error) {
-    if (createdStaff) {
-      await Staff.deleteOne({
-        _id: createdStaff._id,
-      }).catch(() => {});
-    }
-
-    if (createdUser) {
-      await User.deleteOne({
-        _id: createdUser._id,
-      }).catch(() => {});
-    }
-
+    if (createdUser) await User.deleteOne({ _id: createdUser._id });
     if (error.code === 11000) {
-      return res.status(409).json({
-        message: "An account or staff record with this email already exists.",
-      });
+      return res.status(409).json({ message: "An account with this email already exists." });
     }
-
-    return res.status(500).json({
-      message: error.message,
-    });
+    return res.status(500).json({ message: error.message });
   }
 };
 
-// @desc    Get all staff members for logged-in vendor
-// @route   GET /api/staff
-// @access  Private (Vendor Owner Only)
 exports.getStoreStaff = async (req, res) => {
   try {
-    const ownerId = req.ownerId || req.vendorId || req.user.id;
-    const store = await storeForOwner(ownerId);
+    const store = await storeForOwner(req.user.id);
+    if (!store) return res.status(404).json({ message: "Store not found." });
 
     const [staffList, owner] = await Promise.all([
-      Staff.find({
-        vendorOwner: ownerId,
-      })
-        .populate("user", "Fullname email phone")
-        .sort({ createdAt: 1 }),
-
-      User.findById(ownerId).select("Fullname email phone createdAt"),
+      Staff.find({ store: store._id }).populate("user", "Fullname email phone").sort({ createdAt: 1 }),
+      User.findById(req.user.id).select("Fullname email phone"),
     ]);
-
     const ownerRow = {
       _id: owner._id,
-      id: owner._id,
       name: owner.Fullname,
       email: owner.email || "",
       phone: owner.phone || null,
       role: "OWNER",
-      permission_role: "OWNER",
-      status: "ACTIVE",
       active: true,
-      store_id: store?._id || null,
-      vendor_id: ownerId,
-      user_id: owner._id,
-      permissions: Object.keys(PERMISSIONS),
+      permissions: staffAccess.KEYS,
       createdAt: owner.createdAt,
     };
-
     return res.status(200).json({
       staff: [ownerRow, ...staffList.map(staffDto)],
+      roles: Object.entries(staffAccess.ROLE_PRESETS).map(([key, perms]) => ({ key, permissions: perms })),
+      permissions: staffAccess.PERMISSIONS.map(([key, label]) => ({ key, label })),
+      viewer: req.staffMember ? { staffId: req.staffMember._id, permissionsMap: plainPerms(req.staffMember) } : { owner: true },
     });
   } catch (error) {
-    return res.status(500).json({
-      message: error.message,
-    });
+    return res.status(500).json({ message: error.message });
   }
 };
 
-// @desc    Update a staff member
-// @route   PUT /api/staff/:id
-// @access  Private (Vendor Owner Only)
 exports.updateStaffMember = async (req, res) => {
   try {
-    const ownerId = req.ownerId || req.vendorId || req.user.id;
     const isObjectId = orm.Types.ObjectId.isValid(req.params.id);
-
-    if (!isObjectId) {
-      return res.status(404).json({
-        message: "Invalid staff ID.",
-      });
-    }
+    if (!isObjectId) return res.status(404).json({ message: "Invalid staff ID." });
 
     const staff = await Staff.findOne({
-      $or: [
-        {
-          _id: req.params.id,
-        },
-        {
-          user: req.params.id,
-        },
-      ],
-      vendorOwner: ownerId,
+      $or: [{ _id: req.params.id }, { user: req.params.id }],
+      vendorOwner: req.user.id,
     }).populate("user", "Fullname email phone");
+    if (!staff) return res.status(404).json({ message: "Staff record not found." });
+    const selfProblem = staffActorProblem(req, staff);
+    if (selfProblem) return res.status(403).json({ message: selfProblem });
 
-    if (!staff) {
-      return res.status(404).json({
-        message: "Staff record not found.",
-      });
+    if (req.body.name !== undefined || req.body.phone !== undefined) {
+      const name = String(req.body.name ?? staff.user?.Fullname ?? "").trim();
+      if (!name) return res.status(400).json({ message: "Name can't be empty." });
+      const set = { Fullname: name };
+      if (req.body.phone !== undefined) set.phone = req.body.phone || null;
+      await User.updateOne({ _id: staff.user._id, isVendorStaff: true }, { $set: set });
+      staff.user.Fullname = name;
+      if (req.body.phone !== undefined) staff.user.phone = set.phone;
     }
 
     if (req.body.role !== undefined || req.body.permission_role !== undefined) {
       const role = normalizeRole(req.body.role || req.body.permission_role);
-
-      if (!STAFF_ROLES.has(role)) {
-        return res.status(400).json({
-          message: "Choose a valid staff role.",
-        });
-      }
-
+      if (!STAFF_ROLES.has(role)) return res.status(400).json({ message: "Choose a valid staff role." });
       staff.role = role;
+      // A new role starts from its preset unless permissions are sent too.
+      if (req.body.permissions === undefined) staff.permissions = permissionsFor(role);
     }
-
     if (req.body.permissions !== undefined) {
       staff.permissions = permissionsFor(staff.role, req.body.permissions);
     }
-
+    const permProblem = staffActorProblem(req, null, plainPerms(staff));
+    if (permProblem) return res.status(403).json({ message: permProblem });
     if (req.body.status !== undefined || req.body.active !== undefined) {
-      const active =
-        req.body.active === undefined
-          ? req.body.status === "ACTIVE"
-          : req.body.active === true;
-
-      /*
-       * An invitation must be accepted before
-       * the staff account becomes active.
-       */
-      if (staff.status === "INVITED" && active) {
-        return res.status(400).json({
-          message:
-            "The invitee must accept the email invitation before access is activated.",
-        });
-      }
-
+      const active = req.body.active === undefined
+        ? req.body.status === "ACTIVE"
+        : req.body.active === true;
       staff.status = active ? "ACTIVE" : "SUSPENDED";
-
       if (staff.user?._id) {
         await User.updateOne(
-          {
-            _id: staff.user._id,
-            isVendorStaff: true,
-          },
-          {
-            $set: {
-              status: active ? "ACTIVE" : "SUSPEND",
-            },
-          },
+          { _id: staff.user._id, isVendorStaff: true },
+          { $set: { status: active ? "ACTIVE" : "SUSPEND" } },
         );
       }
     }
 
     await staff.save();
-
-    return res.status(200).json({
-      message: "Staff member updated.",
-      staff: staffDto(staff),
-    });
+    return res.status(200).json({ message: "Staff member updated.", staff: staffDto(staff) });
   } catch (error) {
-    return res.status(500).json({
-      message: error.message,
-    });
+    return res.status(500).json({ message: error.message });
   }
 };
 
 exports.removeStaffMember = async (req, res) => {
   try {
-    const ownerId = req.ownerId || req.vendorId || req.user.id;
     const isObjectId = orm.Types.ObjectId.isValid(req.params.id);
-
-    if (!isObjectId) {
-      return res.status(404).json({
-        message: "Invalid staff ID.",
-      });
-    }
+    if (!isObjectId) return res.status(404).json({ message: "Invalid staff ID." });
 
     const staff = await Staff.findOne({
-      $or: [
-        {
-          _id: req.params.id,
-        },
-        {
-          user: req.params.id,
-        },
-      ],
-      vendorOwner: ownerId,
+      $or: [{ _id: req.params.id }, { user: req.params.id }],
+      vendorOwner: req.user.id,
     });
+    if (!staff) return res.status(404).json({ message: "Staff record not found." });
+    const problem = staffActorProblem(req, staff);
+    if (problem) return res.status(403).json({ message: problem });
 
-    if (!staff) {
-      return res.status(404).json({
-        message: "Staff record not found.",
-      });
-    }
-
-    await Staff.deleteOne({
-      _id: staff._id,
-    });
-
+    await Staff.deleteOne({ _id: staff._id });
     if (staff.user) {
       await User.updateOne(
-        {
-          _id: staff.user,
-          isVendorStaff: true,
-        },
-        {
-          $set: {
-            status: "SUSPEND",
-          },
-        },
+        { _id: staff.user, isVendorStaff: true },
+        { $set: { status: "SUSPEND" } },
       );
     }
+    return res.status(200).json({ message: "Staff access removed successfully." });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
 
+// @desc    Owner sets a new temporary password for a team member
+// @route   POST /api/staff/:id/password
+exports.resetStaffPassword = async (req, res) => {
+  try {
+    if (!orm.Types.ObjectId.isValid(req.params.id)) return res.status(404).json({ message: "Invalid staff ID." });
+    const { password } = req.body;
+    if (typeof password !== "string" || password.length < 8) {
+      return res.status(400).json({ message: "The new password must be at least 8 characters." });
+    }
+    const staff = await Staff.findOne({ $or: [{ _id: req.params.id }, { user: req.params.id }], vendorOwner: req.user.id });
+    if (!staff) return res.status(404).json({ message: "Staff record not found." });
+    const problem = staffActorProblem(req, staff);
+    if (problem) return res.status(403).json({ message: problem });
+    await User.updateOne(
+      { _id: staff.user, isVendorStaff: true },
+      { $set: { password: await bcrypt.hash(password, 10), lastPasswordChangeAt: new Date() } },
+    );
+    return res.status(200).json({ message: "Password reset. Share the new password with your team member securely." });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    What team members changed recently
+// @route   GET /api/staff/activity?staffId=&limit=
+exports.getStaffActivity = async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+    const filter = { vendor: req.user.id };
+    if (req.query.staffId && orm.Types.ObjectId.isValid(req.query.staffId)) filter.staff = req.query.staffId;
+    const rows = await StaffActivity.find(filter).sort({ createdAt: -1 }).limit(limit).populate("user", "Fullname email");
     return res.status(200).json({
-      message: "Staff access removed successfully.",
+      activity: rows.map((a) => ({
+        id: a._id, staffId: a.staff, name: a.user?.Fullname || "Team member", email: a.user?.email || "",
+        action: a.action, method: a.method, path: a.path, at: a.createdAt,
+      })),
     });
   } catch (error) {
-    return res.status(500).json({
-      message: error.message,
-    });
+    return res.status(500).json({ message: error.message });
   }
 };

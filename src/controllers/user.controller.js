@@ -149,52 +149,127 @@ exports.adminUpdateUser = async (req, res) => {
   }
 };
 
+// ---------------------------------------------------------------------------
+// Vendor customers: buyers (accounts) and guest customers from manual orders,
+// with spend counted on this seller's items only.
+// ---------------------------------------------------------------------------
+const NOT_COUNTED = ["CANCELLED", "REFUNDED", "FAILED", "RETURNED"];
+const customerKey = (o) => (o.user ? `user:${o.user._id || o.user}` : o.customer?.phone ? `guest:${String(o.customer.phone).replace(/\D/g, "")}` : null);
+
+async function vendorOrdersFor(req) {
+  const ids = [String(req.user._id)];
+  if (req.vendorId && String(req.vendorId) !== ids[0]) ids.push(String(req.vendorId));
+  const orders = await Order.find({ "items.vendor": { $in: ids } }).sort({ createdAt: -1 });
+  return orders.map((o) => {
+    const items = (o.items || []).filter((i) => i.vendor && ids.includes(String(i.vendor)));
+    const parcels = (o.shippingBreakdown || []).filter((p) => p.vendor && ids.includes(String(p.vendor)));
+    return {
+      order: o,
+      items,
+      subtotal: items.reduce((t, i) => t + Number(i.price) * Number(i.quantity), 0),
+      delivery: parcels.reduce((t, p) => t + Number(p.fee || 0), 0),
+    };
+  });
+}
+
+function summarize(rows) {
+  const byKey = new Map();
+  for (const row of rows) {
+    const key = customerKey(row.order);
+    if (!key) continue;
+    const c = byKey.get(key) || {
+      key, userId: row.order.user || null, guest: !row.order.user,
+      name: row.order.customer?.name || null, email: row.order.customer?.email || null, phone: row.order.customer?.phone || null,
+      city: row.order.shippingAddress?.district || row.order.shippingAddress?.city || null,
+      orders: 0, cancelled: 0, totalSpent: 0, firstPurchase: row.order.createdAt, lastPurchase: row.order.createdAt,
+      sources: new Set(),
+    };
+    c.sources.add(row.order.source || "ONLINE");
+    if (NOT_COUNTED.includes(row.order.orderStatus)) c.cancelled += 1;
+    else { c.orders += 1; c.totalSpent += row.subtotal; }
+    if (row.order.createdAt < c.firstPurchase) c.firstPurchase = row.order.createdAt;
+    if (row.order.createdAt > c.lastPurchase) { c.lastPurchase = row.order.createdAt; c.city = row.order.shippingAddress?.district || row.order.shippingAddress?.city || c.city; }
+    byKey.set(key, c);
+  }
+  return [...byKey.values()];
+}
+
 // @desc    Vendor list of customers (buyers who ordered this vendor's products)
 // @route   GET /api/users/vendor/customers
 // @access  Private (vendor)
 exports.listVendorCustomers = async (req, res) => {
   try {
-    const vendorId = req.user._id;
-    const productIds = await Product.find({ vendor: vendorId }).distinct("_id");
-
-    const orders = await Order.find({ "items.product": { $in: productIds } })
-      .select("user totalAmount orderStatus paymentStatus createdAt")
-      .sort({ createdAt: -1 });
-
-    // Aggregate per buyer: order count, total spent, last purchase date.
-    const byUser = {};
-    for (const o of orders) {
-      const id = String(o.user);
-      if (!byUser[id]) {
-        byUser[id] = { userId: o.user, orders: 0, total: 0, lastPurchase: o.createdAt };
-      }
-      byUser[id].orders += 1;
-      byUser[id].total += Number(o.totalAmount || 0);
-      if (o.createdAt > byUser[id].lastPurchase) byUser[id].lastPurchase = o.createdAt;
-    }
-
-    const ids = Object.values(byUser).map((c) => c.userId);
-    const users = await User.find({ _id: { $in: ids } }).select(USER_WITHOUT_PASSWORD);
-
-    const customers = users.map((u) => {
-      const agg = byUser[String(u._id)];
+    const customers = summarize(await vendorOrdersFor(req));
+    const accounts = await User.find({ _id: { $in: customers.filter((c) => c.userId).map((c) => c.userId) } }).select(USER_WITHOUT_PASSWORD);
+    const byId = new Map(accounts.map((u) => [String(u._id), u]));
+    const data = customers.map((c) => {
+      const u = c.userId ? byId.get(String(c.userId)) : null;
       return {
-        id: u._id,
-        name: u.Fullname,
-        email: u.email,
-        phone: u.phone,
-        orders: agg.orders,
-        totalSpent: agg.total,
-        lastPurchase: agg.lastPurchase,
+        id: c.userId ? String(c.userId) : c.key,
+        key: c.key,
+        guest: c.guest,
+        name: u?.Fullname || c.name || "Customer",
+        email: u?.email || c.email || null,
+        phone: u?.phone || c.phone || null,
+        city: c.city,
+        orders: c.orders,
+        cancelledOrders: c.cancelled,
+        totalSpent: c.totalSpent,
+        averageOrder: c.orders ? Math.round(c.totalSpent / c.orders) : 0,
+        firstPurchase: c.firstPurchase,
+        lastPurchase: c.lastPurchase,
+        sources: [...c.sources],
       };
-    });
+    }).sort((a, b) => b.totalSpent - a.totalSpent);
 
-    return res.status(200).json({
-      data: customers,
-      meta: { total: customers.length },
-    });
+    return res.status(200).json({ data, meta: { total: data.length, repeat: data.filter((c) => c.orders > 1).length } });
   } catch (error) {
     console.error("Error listing vendor customers:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+// @desc    One customer's history with this vendor
+// @route   GET /api/users/vendor/customers/:key   (user id, or "guest:<phone digits>")
+// @access  Private (vendor)
+exports.getVendorCustomer = async (req, res) => {
+  try {
+    const raw = String(req.params.key);
+    const key = /^[a-f0-9]{24}$/i.test(raw) ? `user:${raw}` : raw;
+    const rows = (await vendorOrdersFor(req)).filter((r) => customerKey(r.order) === key);
+    if (!rows.length) return res.status(404).json({ message: "Customer not found." });
+    const [summary] = summarize(rows);
+    const user = summary.userId ? await User.findById(summary.userId).select(USER_WITHOUT_PASSWORD) : null;
+    return res.status(200).json({
+      customer: {
+        id: summary.userId ? String(summary.userId) : summary.key,
+        key: summary.key,
+        guest: summary.guest,
+        name: user?.Fullname || summary.name || "Customer",
+        email: user?.email || summary.email || null,
+        phone: user?.phone || summary.phone || null,
+        city: summary.city,
+        orders: summary.orders,
+        cancelledOrders: summary.cancelled,
+        totalSpent: summary.totalSpent,
+        averageOrder: summary.orders ? Math.round(summary.totalSpent / summary.orders) : 0,
+        firstPurchase: summary.firstPurchase,
+        lastPurchase: summary.lastPurchase,
+      },
+      orders: rows.map((r) => ({
+        _id: r.order._id,
+        orderNumber: r.order.orderNumber,
+        createdAt: r.order.createdAt,
+        orderStatus: r.order.orderStatus,
+        paymentStatus: r.order.paymentStatus,
+        source: r.order.source || "ONLINE",
+        items: r.items.map((i) => ({ name: i.name, quantity: i.quantity, price: i.price })),
+        subtotal: r.subtotal,
+        delivery: r.delivery,
+      })),
+    });
+  } catch (error) {
+    console.error("Error loading vendor customer:", error);
     return res.status(500).json({ message: "Internal server error" });
   }
 };

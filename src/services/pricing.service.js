@@ -11,7 +11,8 @@ const commission = require("./commission.service");
 exports.createItemPricingSnapshot = async ({ orderId, item, session, hasAffiliate = false, gatewayFee = 0, vendorAffiliatePercent = 0 }) => {
   const { product, vendor, category, price, quantity } = item;
   const unitPrice = price;
-  const grossTotal = unitPrice * quantity;
+  // Coupon discounts are paid by the seller, so escrow uses the discounted line.
+  const grossTotal = Math.max(0, unitPrice * quantity - (Number(item.discount) || 0));
 
   const split = await commission.splitFor({
     vendorId: vendor._id || vendor,
