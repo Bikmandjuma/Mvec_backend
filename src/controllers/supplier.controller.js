@@ -1,11 +1,16 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Supplier = require("../models/Supplier");
+const SupplierTeamMember = require("../models/SupplierTeamMember");
 const Product = require("../models/Product");
 const WholesaleProduct = require("../models/WholesaleProduct");
 
 // Resolve the signed-in supplier's profile document (used by wholesale CRUD).
 async function resolveMySupplier(userId) {
-  const supplier = await Supplier.findOne({ user: userId });
+  let supplier = await Supplier.findOne({ user: userId });
+  if (!supplier) {
+    const membership = await SupplierTeamMember.findOne({ user: userId, status: "ACTIVE" });
+    if (membership) supplier = await Supplier.findById(membership.supplier);
+  }
   if (!supplier) {
     const error = new Error("Supplier profile not found. Please complete onboarding.");
     error.status = 404;
@@ -27,6 +32,8 @@ function sanitizeWholesalePayload(body = {}, defaults = {}) {
     stockQuantity: Math.max(0, Number(body.stockQuantity ?? defaults.stockQuantity ?? 0) || 0),
     bulkDiscount: Math.min(100, Math.max(0, Number(body.bulkDiscount ?? defaults.bulkDiscount ?? 0) || 0)),
     media: body.media !== undefined ? body.media : defaults.media || { mainImage: "", gallery: [] },
+    // Suppliers choose Active or Archived; Out of stock is set from the stock count.
+    ...(["ACTIVE", "ARCHIVED"].includes(body.status) ? { status: body.status } : {}),
   };
 }
 
@@ -40,27 +47,20 @@ exports.onboardSupplier = async (req, res) => {
     }
 
     const existing = await Supplier.findOne({ user: req.user.id });
-    if (existing) {
-      return res.status(409).json({ message: "Supplier profile already exists" });
+    const created = !existing;
+    const { businessName, description, phone, email, logoUrl, category, location } = req.body;
+
+    if (!businessName || !phone || !email || !description || !logoUrl || !category || !location) {
+      return res.status(400).json({ message: "Business name, phone, email, description, logo, category, and location are required." });
     }
 
-    const { businessName, description, phone, email, logoUrl, location } = req.body;
+    const supplier = existing || new Supplier({ user: req.user.id });
+    Object.assign(supplier, { businessName, description, phone, email, logoUrl, category, location, verificationStatus: "PENDING", verificationNote: "" });
+    await supplier.save();
+    require("../services/notification.service").profileSubmitted({ kind: "supplier", name: businessName, resubmitted: !created }).catch(() => {});
+    await require("../models/User").findByIdAndUpdate(req.user.id, { companyName: businessName, businessName, description, logoUrl, category, location, isOnboarded: true, verificationStatus: "PENDING" });
 
-    if (!businessName || !phone || !email) {
-      return res.status(400).json({ message: "businessName, phone, and email are required" });
-    }
-
-    const supplier = await Supplier.create({
-      user: req.user.id,
-      businessName,
-      description,
-      phone,
-      email,
-      logoUrl,
-      location: location || null,
-    });
-
-    return res.status(201).json({ message: "Supplier profile created", supplier });
+    return res.status(created ? 201 : 200).json({ message: created ? "Supplier profile created" : "Supplier profile updated", supplier });
   } catch (error) {
     if (error.code === 11000) {
       return res.status(409).json({ message: "A supplier with this business name already exists" });
@@ -94,7 +94,7 @@ exports.updateMyProfile = async (req, res) => {
       return res.status(404).json({ message: "Supplier profile not found. Please complete onboarding." });
     }
 
-    const { businessName, description, phone, email, logoUrl, location } = req.body;
+    const { businessName, description, phone, email, logoUrl, location, category } = req.body;
 
     // Fields the supplier is allowed to self-edit — NOT verificationStatus, ratingAvg, or status
     if (businessName !== undefined) supplier.businessName = businessName;
@@ -103,9 +103,20 @@ exports.updateMyProfile = async (req, res) => {
     if (email !== undefined) supplier.email = email;
     if (logoUrl !== undefined) supplier.logoUrl = logoUrl;
     if (location !== undefined) supplier.location = location;
+    if (category !== undefined) supplier.category = category;
 
+    // A rejected profile that has been fixed goes straight back to MVEC for review.
+    const resubmitted = supplier.verificationStatus === "REJECTED";
+    if (resubmitted) {
+      supplier.verificationStatus = "PENDING";
+      supplier.verificationNote = "";
+    }
     await supplier.save();
-    return res.status(200).json({ message: "Supplier profile updated", supplier });
+    if (resubmitted) {
+      await require("../models/User").findByIdAndUpdate(supplier.user, { verificationStatus: "PENDING" });
+      require("../services/notification.service").profileSubmitted({ kind: "supplier", name: supplier.businessName, resubmitted: true }).catch(() => {});
+    }
+    return res.status(200).json({ message: resubmitted ? "Profile saved and sent to MVEC for review again." : "Supplier profile updated", supplier });
   } catch (error) {
     if (error.code === 11000) {
       return res.status(409).json({ message: "A supplier with this business name already exists" });
@@ -187,7 +198,7 @@ exports.getSupplierProducts = async (req, res) => {
   try {
     const { id } = req.params;
 
-    if (!mongoose.isValidObjectId(id)) {
+    if (!orm.isValidObjectId(id)) {
       return res.status(404).json({ message: "Supplier not found" });
     }
 
@@ -247,10 +258,15 @@ exports.adminGetSuppliers = async (req, res) => {
 exports.adminVerifySupplier = async (req, res) => {
   try {
     const { decision } = req.body; // "VERIFIED" | "REJECTED"
+    const reason = String(req.body.reason || "").trim().slice(0, 500);
 
     if (!["VERIFIED", "REJECTED"].includes(decision)) {
-      return res.status(400).json({ message: "decision must be VERIFIED or REJECTED" });
+      return res.status(400).json({ message: "Choose to verify or reject the supplier." });
     }
+    if (decision === "REJECTED" && reason.length < 5) {
+      return res.status(400).json({ message: "Tell the supplier what to fix: write a short reason for the rejection." });
+    }
+    if (!orm.isValidObjectId(req.params.id)) return res.status(400).json({ message: "A valid supplier ID is required." });
 
     const supplier = await Supplier.findById(req.params.id);
     if (!supplier) {
@@ -258,9 +274,10 @@ exports.adminVerifySupplier = async (req, res) => {
     }
 
     supplier.verificationStatus = decision;
+    supplier.verificationNote = decision === "REJECTED" ? reason : "";
     await supplier.save();
-
-    // TODO: trigger notification to supplier (doc: "Order accepted / Payment received" style events)
+    await require("../models/User").findByIdAndUpdate(supplier.user, { verificationStatus: decision });
+    await require("../services/notification.service").verificationDecision(supplier.user, { kind: "supplier", name: supplier.businessName, decision, reason });
 
     return res.status(200).json({ message: `Supplier ${decision.toLowerCase()}`, supplier });
   } catch (error) {

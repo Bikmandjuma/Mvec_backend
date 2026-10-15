@@ -1,8 +1,10 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
+const User = require("../models/User");
 const Subscription = require("../models/Subscription");
 const BuyerSubscription = require("../models/BuyerSubscription");
 const Advertisement = require("../models/Advertisement");
 const Vendor = require("../models/Vendor");
+const Product = require("../models/Product");
 
 // ─── DISPLAY / DICTIONARY HELPERS ────────────────────────────────────────────
 // All mapping constants keep the backend "friendly" values in sync with the
@@ -138,6 +140,9 @@ const buildBuyerTierRows = (subscription) => {
 
 const mapAdvertisement = (ad) => ({
   id: ad.publicId,
+  // Database id: what the status endpoints expect in the URL.
+  _id: String(ad._id),
+  placementKey: ad.placement,
   product: ad.product,
   productId: ad.productId,
   placement: AD_PLACEMENTS[ad.placement] || ad.placement,
@@ -262,6 +267,13 @@ exports.upgradeBuyerSubscription = async (req, res) => {
     const plan = normalizePlan(req.body.plan);
     let subscription = await BuyerSubscription.findOne({ buyer: req.user.id });
 
+    // Premium is switched on only by a payment (POST /api/buyer/subscription/checkout).
+    if (plan === "PREMIUM" && !(subscription?.plan === "PREMIUM" && subscription?.status === "ACTIVE")) {
+      return res.status(402).json({
+        message: "Premium needs a payment. Choose mobile money or card to subscribe; you have not been charged.",
+      });
+    }
+
     if (plan === "PREMIUM") {
       const tier = BuyerSubscriptionTier.PREMIUM;
       if (!subscription) {
@@ -298,6 +310,58 @@ exports.upgradeBuyerSubscription = async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Pay for Premium (5,000 RWF / 30 days) by mobile money or card.
+//          Premium switches on when the payment succeeds.
+// @route   POST /api/buyer/subscription/checkout   { method: "momo" | "card", phoneNumber? }
+// @access  Private (buyer)
+exports.buyerPremiumCheckout = async (req, res) => {
+  const payments = require("./payment.controller");
+  const flutterwave = require("../services/flutterwave.service");
+  const paymentService = require("../services/payment.service");
+  const Payment = require("../models/Payment");
+  const { PREMIUM } = require("../services/buyerSubscription.service");
+  try {
+    const method = String(req.body.method || "momo").toLowerCase();
+    const userId = req.user.id;
+
+    if (method === "momo") {
+      const result = await payments.initiateStandalonePayment({
+        amount: PREMIUM.price, phoneNumber: req.body.phoneNumber, userId,
+        gatewayService: payments.paypackGateway, purpose: "BUYER_PREMIUM",
+      });
+      return res.status(200).json(result);
+    }
+    if (method !== "card") return res.status(400).json({ message: "Choose mobile money or card." });
+
+    if (flutterwave.isSandbox() && process.env.NODE_ENV === "production") {
+      return res.status(503).json({ message: "Card payments are temporarily unavailable. Please pay with mobile money." });
+    }
+    const txRef = `PREM-${userId}-${Date.now()}`;
+    const payment = await Payment.create({
+      user: userId, transactionReference: txRef, method: "CARD", gateway: "FLUTTERWAVE", provider: "CARD",
+      amount: PREMIUM.price, currency: "RWF", status: "PENDING", purpose: "BUYER_PREMIUM",
+    });
+    if (flutterwave.isSandbox()) {
+      const result = await flutterwave.verifyByReference(txRef);
+      await paymentService.settleGatewayPayment({ payment, provider: "FLUTTERWAVE", status: result.status, amount: PREMIUM.price, payload: result.raw, externalTransactionId: result.id });
+      return res.status(200).json({ message: "Card payment confirmed (test mode).", paymentId: payment._id, status: "SUCCESS", checkoutUrl: null });
+    }
+    const buyer = await User.findById(userId).select("Fullname email phone");
+    const frontend = (process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
+    const checkout = await flutterwave.createCheckout({
+      txRef, amount: PREMIUM.price,
+      customer: { email: buyer?.email, phone: buyer?.phone, name: buyer?.Fullname },
+      redirectUrl: `${frontend}/buyer/subscription?paymentId=${payment._id}`,
+      description: "MVEC Premium (30 days)",
+    });
+    return res.status(200).json({ message: "Opening the secure card page…", paymentId: payment._id, status: "PENDING", checkoutUrl: checkout.link });
+  } catch (error) {
+    if (error.statusCode && error.statusCode < 500) return res.status(error.statusCode).json({ message: error.message });
+    console.error("Premium checkout failed:", error);
+    return res.status(502).json({ message: "We could not start the payment right now. You have not been charged; please try again." });
   }
 };
 
@@ -390,18 +454,38 @@ exports.createAdvertisement = async (req, res) => {
     if (!product) {
       return res.status(400).json({ message: "product is required" });
     }
-    if (budget === undefined || budget === null || Number(budget) < 0) {
-      return res.status(400).json({ message: "budget is required and must be positive" });
+    if (budget === undefined || budget === null || !Number.isFinite(Number(budget)) || Number(budget) <= 0) {
+      return res.status(400).json({ message: "Enter a budget greater than zero." });
+    }
+    const start = startDate ? new Date(startDate) : new Date();
+    const end = endDate ? new Date(endDate) : null;
+    if (Number.isNaN(start.getTime()) || (end && Number.isNaN(end.getTime()))) {
+      return res.status(400).json({ message: "Enter valid campaign dates." });
+    }
+    if (end && end < start) {
+      return res.status(400).json({ message: "The end date must be after the start date." });
+    }
+
+    // An ad can only promote one of the vendor's own products.
+    let ownProductId = null;
+    if (productId) {
+      const owned = orm.isValidObjectId(productId)
+        ? await Product.exists({ _id: productId, vendor: vendor.user })
+        : null;
+      if (!owned) {
+        return res.status(400).json({ message: "Choose one of your own products to advertise." });
+      }
+      ownProductId = productId;
     }
 
     const ad = await Advertisement.create({
       vendor: vendor._id,
       product: String(product).trim(),
-      productId: productId || null,
+      productId: ownProductId,
       placement: normalizePlacement(placement),
       budget: Number(budget),
-      startDate: startDate || new Date(),
-      endDate: endDate || null,
+      startDate: start,
+      endDate: end,
       status: "PENDING", // awaits MVEC admin approval
     });
 
@@ -434,11 +518,16 @@ exports.updateMyAdvertisementStatus = async (req, res) => {
     // The list endpoint exposes publicId as `id`, so accept either identifier.
     const adId = req.params.id;
     const ad = await Advertisement.findOne({
-      ...(mongoose.isValidObjectId(adId) ? { _id: adId } : { publicId: adId }),
+      ...(orm.isValidObjectId(adId) ? { _id: adId } : { publicId: adId }),
       vendor: vendor._id,
     });
     if (!ad) {
       return res.status(404).json({ message: "Advertisement campaign not found" });
+    }
+    // Vendors can pause and resume approved campaigns only. A pending or
+    // rejected campaign goes live only after MVEC admin approval.
+    if (!["ACTIVE", "PAUSED"].includes(ad.status)) {
+      return res.status(403).json({ message: "This campaign is waiting for MVEC approval." });
     }
 
     ad.status = status;
@@ -573,7 +662,9 @@ exports.adminUpdateAdvertisementStatus = async (req, res) => {
       return res.status(400).json({ message: "Invalid advertisement status" });
     }
 
-    const ad = await Advertisement.findById(req.params.id);
+    // Lists expose publicId as `id`; accept either identifier.
+    const adId = String(req.params.id);
+    const ad = await Advertisement.findOne(orm.isValidObjectId(adId) ? { _id: adId } : { publicId: adId });
     if (!ad) {
       return res.status(404).json({ message: "Advertisement campaign not found" });
     }
@@ -587,5 +678,59 @@ exports.adminUpdateAdvertisementStatus = async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Live, approved ads for one placement (e.g. the home page hero)
+// @route   GET /api/advertisements?placement=HOMEPAGE_HERO
+// @access  Public
+// Only ACTIVE (admin-approved) campaigns inside their date range, linked to a
+// live product that belongs to the advertising vendor, are returned.
+exports.listLiveAdvertisements = async (req, res) => {
+  try {
+    const placement = String(req.query.placement || "HOMEPAGE_HERO");
+    if (!AD_PLACEMENTS[placement]) {
+      return res.status(400).json({ message: "Unknown placement" });
+    }
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 6, 1), 12);
+    const now = new Date();
+
+    const ads = await Advertisement.find({
+      placement,
+      status: "ACTIVE",
+      productId: { $ne: null },
+      startDate: { $lte: now },
+      $or: [{ endDate: null }, { endDate: { $gte: now } }],
+    })
+      .sort({ budget: -1, createdAt: -1 })
+      .limit(limit * 3)
+      .populate("vendor", "user businessName")
+      .populate({
+        path: "productId",
+        match: { status: "ACTIVE" },
+        select: "name price discountPrice media stockQuantity status vendor category averageRating reviewCount publicId",
+        populate: [
+          { path: "vendor", select: "Fullname companyName" },
+          { path: "category", select: "name slug" },
+        ],
+      });
+
+    const seen = new Set();
+    const data = [];
+    for (const ad of ads) {
+      const product = ad.productId;
+      if (!product || !ad.vendor) continue;
+      const productVendor = String(product.vendor?._id || product.vendor);
+      if (productVendor !== String(ad.vendor.user)) continue;
+      if (seen.has(String(product._id))) continue;
+      seen.add(String(product._id));
+      data.push({ id: ad.publicId, placement, product });
+      if (data.length >= limit) break;
+    }
+
+    return res.status(200).json({ data });
+  } catch (error) {
+    console.error("Error listing advertisements:", error);
+    return res.status(500).json({ message: "Could not load promotions." });
   }
 };

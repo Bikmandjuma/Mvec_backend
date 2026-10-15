@@ -1,43 +1,30 @@
 const express = require("express");
 const router = express.Router();
-const wholesaleController = require("../controllers/wholesale.controller");
-const { protect, authorize } = require("../middleware/auth.middleware"); // Adjust import path if needed
+const c = require("../controllers/wholesale.controller");
+const { protect, authorize, requireOnboarded } = require("../middleware/auth.middleware");
+const { checkStaffPermission } = require("../middleware/staff.middleware");
+const { checkSupplierPermission } = require("../middleware/supplierTeam.middleware");
 
-// Vendor creates supply order (MOQ check enforced)
-router.get(
-  "/orders/mine",
-  protect,
-  authorize("vendor", "supplier"),
-  wholesaleController.listMyWholesaleOrders
-);
-router.post(
-  "/orders",
-  protect,
-  authorize("vendor", "super_admin"),
-  wholesaleController.createWholesaleOrder
-);
+// Seller staff need the orders permission; supplier team members need "supply".
+const vendorSide = [protect, authorize("vendor", "super_admin"), checkStaffPermission("canManageOrders")];
+const supplierSide = [protect, authorize("supplier"), requireOnboarded, checkSupplierPermission("supply")];
 
-// Suppliers mark an escrow-funded order as shipped.
-router.post(
-  "/orders/:orderId/ship",
-  protect,
-  authorize("supplier"),
-  wholesaleController.markShipped
-);
+// Both sides: my wholesale orders (vendor: purchases, supplier: sales).
+router.get("/orders/mine", protect, authorize("vendor", "supplier", "super_admin"), (req, res, next) => (req.user.role === "supplier" ? next() : checkStaffPermission("canManageOrders")(req, res, next)), c.listMyWholesaleOrders);
 
-// Escrow hold status transition on payment completion
-router.post(
-  "/orders/:orderId/hold-escrow",
-  protect,
-  wholesaleController.holdEscrow
-);
+// Vendor: order from a supplier's catalog, pay, confirm receipt, report a problem, cancel before shipping.
+router.post("/orders", ...vendorSide, requireOnboarded, c.createWholesaleOrder);
+router.post("/orders/:orderId/pay", ...vendorSide, c.payWholesaleOrder);
+router.post("/orders/:orderId/confirm-receipt", ...vendorSide, c.confirmReceipt);
+router.post("/orders/:orderId/report-problem", ...vendorSide, c.reportProblem);
+router.post("/orders/:orderId/cancel", protect, authorize("vendor", "supplier", "super_admin"), (req, res, next) => (req.user.role === "supplier" ? checkSupplierPermission("supply")(req, res, next) : checkStaffPermission("canManageOrders")(req, res, next)), c.cancelOrder);
 
-// Vendor/Supplier confirms delivery receipt & releases escrow funds
-router.post(
-  "/orders/:orderId/confirm-receipt",
-  protect,
-  authorize("vendor"),
-  wholesaleController.confirmReceipt
-);
+// Supplier: ship a paid order.
+router.post("/orders/:orderId/ship", ...supplierSide, c.markShipped);
+
+// Admin: oversight, disputes, and orders paid outside MVEC (all audited).
+router.get("/admin/orders", protect, authorize("super_admin"), c.adminList);
+router.post("/admin/orders/:orderId/resolve", protect, authorize("super_admin"), c.adminResolve);
+router.post("/orders/:orderId/hold-escrow", protect, authorize("super_admin"), c.holdEscrow);
 
 module.exports = router;

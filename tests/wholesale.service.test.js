@@ -9,6 +9,7 @@ const service = require("../src/services/wholesale.service");
 const originals = {
   supplierFindOne: Supplier.findOne,
   productFindOne: WholesaleProduct.findOne,
+  productReserve: WholesaleProduct.findOneAndUpdate,
   orderCreate: WholesaleOrder.create,
   orderFindOne: WholesaleOrder.findOne,
 };
@@ -16,6 +17,7 @@ const originals = {
 afterEach(() => {
   Supplier.findOne = originals.supplierFindOne;
   WholesaleProduct.findOne = originals.productFindOne;
+  WholesaleProduct.findOneAndUpdate = originals.productReserve;
   WholesaleOrder.create = originals.orderCreate;
   WholesaleOrder.findOne = originals.orderFindOne;
 });
@@ -24,7 +26,10 @@ test("wholesale orders use supplier catalog price and enforce MOQ/stock", async 
   const supplierId = "65a1b2c3d4e5f67890123456";
   const vendorId = "65b1b2c3d4e5f67890123456";
   const productId = "65c1b2c3d4e5f67890123456";
-  Supplier.findOne = async () => ({ _id: supplierId, user: vendorId });
+  const supplierUserId = "65d1b2c3d4e5f67890123456";
+  Supplier.findOne = async () => ({ _id: supplierId, user: supplierUserId });
+  let reserved = 0;
+  WholesaleProduct.findOneAndUpdate = async (_filter, update) => { reserved += -update.$inc.stockQuantity; return { _id: productId }; };
   WholesaleProduct.findOne = async () => ({
     _id: productId,
     name: "Coffee",
@@ -53,6 +58,8 @@ test("wholesale orders use supplier catalog price and enforce MOQ/stock", async 
   assert.equal(order.items[0].unitPrice, 90);
   assert.equal(order.items[0].moq, 5);
   assert.equal(order.totalAmount, 450);
+  assert.equal(reserved, 5); // stock is reserved for the unpaid order
+  assert.equal(order.stockReserved, true);
 });
 
 test("supplier shipment updates are owner-scoped and only allow escrowed orders", async () => {

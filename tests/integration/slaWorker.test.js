@@ -1,66 +1,48 @@
-const mongoose = require("mongoose");
-const { MongoMemoryServer } = require("mongodb-memory-server");
+require("../helpers/jest-shim"); // Jest-style API on node:test
+const db = require("../helpers/mysql"); // MySQL test database (first, before models)
+const orm = require("../../src/database/orm");
 const Order = require("../../src/models/Order");
 const Product = require("../../src/models/Product");
 const Payment = require("../../src/models/Payment");
+const User = require("../../src/models/User");
+const Category = require("../../src/models/Category");
 const { cancelExpiredUnpaidOrders } = require("../../src/workers/slaWorker");
 
-let mongoServer;
 
 describe("30-Minute Unpaid Order Cancellation Worker", () => {
   let mockProduct, mockOrder, mockPayment;
 
   beforeAll(async () => {
-    // 1. Initialize In-Memory MongoDB Server with Replica Set for Transactions support
-    mongoServer = await MongoMemoryServer.create({
-      instance: { dbName: "mvec_worker_test" },
-      binary: { version: "6.0.5" },
-    });
-    const uri = mongoServer.getUri();
-    await mongoose.connect(uri);
+    await db.setup();
   });
 
   afterAll(async () => {
-    await mongoose.disconnect();
-    await mongoServer.stop();
+    await db.close();
   });
 
   beforeEach(async () => {
-    // Enable fake timers without blocking database event loops
-    jest.useFakeTimers({ doNotFake: ["nextTick", "setImmediate"] });
+    // Fake Date/timers so "30 minutes later" happens instantly.
+    jest.useFakeTimers();
+    await db.reset();
 
-    // Clean DB collections before each test run
-    await Order.deleteMany({});
-    await Product.deleteMany({});
-    await Payment.deleteMany({});
+    const vendor = await User.create({ Fullname: "Coffee Co", password: "x", phone: "0788000101", role: "vendor", companyName: "Coffee Co" });
+    const buyer = await User.create({ Fullname: "Buyer", password: "x", phone: "0788000102", role: "buyer" });
+    const category = await Category.create({ name: "Food", slug: "food" });
 
-    // Seed test Product with 10 items in stock
+    // 10 in stock, 2 reserved by the unpaid order below.
     mockProduct = await Product.create({
-      name: "Rwandan Coffee Beans 1kg",
-      price: 15000,
-      stockQuantity: 10,
+      name: "Rwandan Coffee Beans 1kg", price: 15000, stockQuantity: 8, status: "ACTIVE",
+      vendor: vendor._id, category: category._id, description: "Coffee", media: { mainImage: "/c.jpg" },
     });
-
-    // Seed test Order in UNPAID / PENDING_PAYMENT state
     mockOrder = await Order.create({
-      customer: new mongoose.Types.ObjectId(),
-      vendor: new mongoose.Types.ObjectId(),
-      items: [
-        {
-          product: mockProduct._id,
-          quantity: 2, // 2 items reserved
-          price: 15000,
-        },
-      ],
+      user: buyer._id,
+      orderNumber: `ORD-SLA-${Date.now()}`,
+      items: [{ product: mockProduct._id, vendor: vendor._id, name: mockProduct.name, quantity: 2, price: 15000 }],
+      shippingAddress: { street: "KG 1", city: "Gasabo", district: "Gasabo", province: "Kigali City", country: "Rwanda" },
       totalAmount: 30000,
-      paymentStatus: "UNPAID",
-      orderStatus: "PENDING_PAYMENT",
+      paymentStatus: "PENDING",
+      orderStatus: "PENDING",
     });
-
-    // Deduct stock to simulate checkout reservation (10 - 2 = 8 remaining)
-    await Product.findByIdAndUpdate(mockProduct._id, { $inc: { stockQuantity: -2 } });
-
-    // Seed corresponding Payment record in PENDING state
     mockPayment = await Payment.create({
       parentOrder: mockOrder._id,
       transactionReference: `ORD-${mockOrder._id}-TEST`,
@@ -82,10 +64,10 @@ describe("30-Minute Unpaid Order Cancellation Worker", () => {
     // Run cancellation worker sweep
     await cancelExpiredUnpaidOrders();
 
-    // Verify Order remains UNPAID and PENDING_PAYMENT
+    // Verify the order is still waiting for payment
     const updatedOrder = await Order.findById(mockOrder._id);
-    expect(updatedOrder.orderStatus).toBe("PENDING_PAYMENT");
-    expect(updatedOrder.paymentStatus).toBe("UNPAID");
+    expect(updatedOrder.orderStatus).toBe("PENDING");
+    expect(updatedOrder.paymentStatus).toBe("PENDING");
 
     // Verify stock remains untouched (8 remaining)
     const product = await Product.findById(mockProduct._id);

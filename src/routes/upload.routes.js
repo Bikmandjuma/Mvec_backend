@@ -4,6 +4,7 @@ const fs = require("fs/promises");
 const path = require("path");
 const { protect } = require("../middleware/auth.middleware");
 const { checkStaffPermission } = require("../middleware/staff.middleware");
+const User = require("../models/User");
 
 const router = express.Router();
 const uploadDir = path.resolve(__dirname, "../../uploads");
@@ -16,6 +17,11 @@ const imageTypes = {
   "image/gif": { extension: ".gif", matches: (b) => b.length >= 6 && ["GIF87a", "GIF89a"].includes(b.toString("ascii", 0, 6)) },
   "image/webp": { extension: ".webp", matches: (b) => b.length >= 12 && b.toString("ascii", 0, 4) === "RIFF" && b.toString("ascii", 8, 12) === "WEBP" },
 };
+
+function allowOnboardingOrProductUpload(req, res, next) {
+  if (["vendor", "supplier", "super_admin"].includes(req.user?.role)) return next();
+  return checkStaffPermission("canManageProducts")(req, res, next);
+}
 
 function parseMultipart(body, boundary) {
   const delimiter = Buffer.from(`--${boundary}`);
@@ -58,7 +64,7 @@ async function readRequestBody(req, res) {
   return Buffer.concat(chunks, size);
 }
 
-router.post("/images", protect, checkStaffPermission("canManageProducts"), async (req, res) => {
+router.post("/images", protect, allowOnboardingOrProductUpload, async (req, res) => {
   try {
     const contentType = req.headers["content-type"] || "";
     const boundary = contentType.match(/^multipart\/form-data\s*;\s*boundary=(?:"([^"]+)"|([^;\s]+))/i);
@@ -84,6 +90,37 @@ router.post("/images", protect, checkStaffPermission("canManageProducts"), async
   } catch (error) {
     const status = error.message === "Malformed multipart form data." ? 400 : 500;
     return res.status(status).json({ message: status === 400 ? error.message : "Image upload failed." });
+  }
+});
+
+// Profile photo for any signed-in account (buyers included). One image, 2 MB,
+// stored on the user so it follows them across devices.
+const MAX_AVATAR_SIZE = 2 * 1024 * 1024;
+router.post("/avatar", protect, async (req, res) => {
+  try {
+    const contentType = req.headers["content-type"] || "";
+    const boundary = contentType.match(/^multipart\/form-data\s*;\s*boundary=(?:"([^"]+)"|([^;\s]+))/i);
+    if (!boundary) return res.status(400).json({ message: "Expected multipart form data." });
+    const body = await readRequestBody(req, res);
+    if (!body) return;
+
+    const files = parseMultipart(body, boundary[1] || boundary[2]).filter((part) => part.field === "avatar");
+    if (files.length !== 1) return res.status(400).json({ message: "Select one image for your profile photo." });
+    const [file] = files;
+    if (file.data.length > MAX_AVATAR_SIZE) return res.status(400).json({ message: "Your profile photo must be 2 MB or smaller." });
+    const type = imageTypes[file.contentType];
+    if (!type || !type.matches(file.data)) return res.status(400).json({ message: "Only JPEG, PNG, WEBP and GIF images are allowed." });
+
+    await fs.mkdir(uploadDir, { recursive: true });
+    const name = `${crypto.randomUUID()}${type.extension}`;
+    await fs.writeFile(path.join(uploadDir, name), file.data, { flag: "wx" });
+
+    const avatarUrl = `/uploads/${name}`;
+    await User.updateOne({ _id: req.user.id }, { $set: { avatarUrl } });
+    return res.status(201).json({ avatarUrl });
+  } catch (error) {
+    const status = error.message === "Malformed multipart form data." ? 400 : 500;
+    return res.status(status).json({ message: status === 400 ? error.message : "Photo upload failed." });
   }
 });
 

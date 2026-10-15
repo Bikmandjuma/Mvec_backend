@@ -39,6 +39,8 @@ export async function runMoreFlows(base, { adminEmail, adminPassword }) {
   await reg(SUP, "register supplier", { Fullname: "Supplier Delta", email: "delta@e2e.test", password: "Passw0rd!x", gender: "male", phone: "0788400002", role: "supplier", companyName: "Delta Supply" });
   const buyer = await reg(BUY, "register buyer", { Fullname: "Buyer Three", email: "buyer3@e2e.test", password: "Passw0rd!x", gender: "other", phone: "0788400009", role: "buyer" });
   await reg(AFF, "register affiliate", { Fullname: "Affiliate Echo", email: "echo@e2e.test", password: "Passw0rd!x", gender: "other", phone: "0788400003", role: "affiliate" });
+  // Sellers must finish onboarding before they can list products.
+  rec("onboard Gamma Co", await V.call("POST", "/vendors/onboard", { businessName: "Gamma Co", description: "Quality goods", phone: "0788400001", email: "gamma@e2e.test", logoUrl: "/uploads/logo.png", category: "General", location: { province: "Kigali City", district: "Gasabo" } }), (d) => ({ ok: !!(d?.vendor || d?.profile) }));
 
   // ── Vendor profile, store, catalog ───────────────────────────────────────
   const st = rec("create store", await V.call("POST", "/stores", { storeName: "Gamma Store", contactEmail: "g@e2e.test", contactPhone: "0788400001" }), (d) => ({ isPrimary: d?.store?.isPrimary }));
@@ -71,7 +73,8 @@ export async function runMoreFlows(base, { adminEmail, adminPassword }) {
 
   // ── Orders: pay, cancel, deliver with OTP, dispute ───────────────────────
   const addr = { street: "KN 5", city: "Nyarugenge", state: "Kigali City", province: "Kigali City", district: "Nyarugenge", country: "Rwanda" };
-  const order = async (step, items) => rec(step, await BUY.call("POST", "/orders/direct-checkout", { items, shippingAddress: addr, paymentMethod: "MOMO" }), (d) => ({ total: d?.order?.totalAmount, fee: d?.order?.shippingFee })).data?.order;
+  const recipient = { name: "E2E Buyer", phone: "0788123456" };
+  const order = async (step, items) => rec(step, await BUY.call("POST", "/orders/direct-checkout", { items, shippingAddress: addr, recipient, paymentMethod: "MOMO" }), (d) => ({ total: d?.order?.totalAmount, fee: d?.order?.shippingFee })).data?.order;
   const pay = async (step, o, tx) => rec(step, await BUY.call("POST", "/webhooks/momo", { status: "SUCCESSFUL", externalId: o?.id, financialTransactionId: tx, amount: o?.totalAmount, fee: 100 }), (d) => ({ status: d?.result?.status }));
   const o1 = await order("order to cancel", [{ productId: lamp?.id, qty: 1 }]);
   await pay("pay order to cancel", o1, "E2E2-TX-1");
@@ -94,7 +97,7 @@ export async function runMoreFlows(base, { adminEmail, adminPassword }) {
   rec("admin ledger", await ADM.call("GET", "/admin/ledger"), (d) => ({ n: (d?.entries || d?.data || d?.ledger || []).length }));
 
   // ── Wholesale ────────────────────────────────────────────────────────────
-  const sup = rec("supplier onboard", await SUP.call("POST", "/suppliers/onboard", { businessName: "Delta Supply", phone: "0788400002", email: "delta@e2e.test" }), (d) => ({ status: (d?.supplier || d?.data)?.verificationStatus }));
+  const sup = rec("supplier onboard", await SUP.call("POST", "/suppliers/onboard", { businessName: "Delta Supply", phone: "0788400002", email: "delta@e2e.test", description: "Bulk lighting", logoUrl: "/uploads/delta.png", category: "Electronics", location: { province: "Kigali City", district: "Gasabo" } }), (d) => ({ status: (d?.supplier || d?.data)?.verificationStatus }));
   const supplierId = (sup.data?.supplier || sup.data?.data)?._id;
   rec("admin verifies supplier", await ADM.call("PATCH", `/admin/suppliers/${supplierId}/verify`, { decision: "VERIFIED" }), (d) => ({ status: d?.supplier?.verificationStatus }));
   const wp = rec("wholesale product", await SUP.call("POST", "/suppliers/me/products", { name: "Bulk Bulbs", wholesalePrice: 1000, moq: 5, stockQuantity: 50 }), (d) => ({ status: d?.product?.status, moq: d?.product?.moq }));
@@ -111,7 +114,14 @@ export async function runMoreFlows(base, { adminEmail, adminPassword }) {
   // ── Affiliates ───────────────────────────────────────────────────────────
   rec("affiliate profile", await AFF.call("GET", "/affiliates/profile"), (d) => ({ ok: !!d }));
   rec("affiliate profile update", await AFF.call("PATCH", "/affiliates/profile", { displayName: "Echo Deals", bio: "Best lamps" }), (d) => ({ ok: !!d }));
+  // Products are promotable only after their seller opts into the affiliate program.
+  const blocked = rec("affiliate link before seller opts in", await AFF.call("POST", "/affiliates/links", { productId: lamp?.id }), (d) => ({ msg: d?.message }));
+  expect("affiliate link before seller opts in", blocked.status === 400, `status ${blocked.status}`);
+  const optIn = rec("seller opts into affiliate program", await V.call("PUT", "/vendors/me/affiliate-program", { enabled: true, ratePercent: 5 }), (d) => ({ on: d?.program?.enabled, total: d?.program?.totalPercent }));
+  expect("seller opts into affiliate program", optIn.status === 200, JSON.stringify(optIn.data));
+  rec("promotable products", await AFF.call("GET", "/affiliates/promotable"), (d) => ({ n: d?.products?.length, pct: d?.products?.[0]?.commissionPercent }));
   const link = rec("affiliate link", await AFF.call("POST", "/affiliates/links", { productId: lamp?.id, label: "Lamp promo" }), (d) => ({ ok: !!(d?.link || d?.data) }));
+  expect("affiliate link", link.status === 201, JSON.stringify(link.data));
   const code = (link.data?.link || link.data?.data)?.affiliateCode || (link.data?.link || link.data?.data)?.code;
   if (code) {
     rec("track click 1", await BUY.call("GET", `/affiliates/track/${code}`), (d) => ({ ok: true }));
@@ -125,7 +135,8 @@ export async function runMoreFlows(base, { adminEmail, adminPassword }) {
   rec("admin affiliates", await ADM.call("GET", "/affiliates"), (d) => ({ n: (d?.affiliates || d?.data || []).length }));
 
   // ── Abuse reports, commissions, monetization ─────────────────────────────
-  const ar = rec("abuse report", await BUY.call("POST", "/abuse-reports", { targetUserId: vendor?.id || vendor?._id, reasonCategory: "FRAUDULENT_ACTIVITY", description: "Suspicious" }), (d) => ({ status: (d?.report || d?.data)?.status }));
+  // Sellers report abusive buyers (buyers use "Report a problem" on an order).
+  const ar = rec("abuse report", await V.call("POST", "/abuse-reports", { targetUserId: buyer?.id || buyer?._id, reasonCategory: "FRAUDULENT_ACTIVITY", description: "Suspicious" }), (d) => ({ status: (d?.report || d?.data)?.status }));
   const reportId = (ar.data?.report || ar.data?.data)?._id || (ar.data?.report || ar.data?.data)?.id;
   rec("admin abuse list", await ADM.call("GET", "/abuse-reports"), (d) => ({ n: (d?.reports || d?.data || []).length }));
   rec("admin abuse resolve", await ADM.call("PATCH", `/abuse-reports/${reportId}`, { status: "RESOLVED", adminNotes: "ok" }), (d) => ({ status: (d?.report || d?.data)?.status }));

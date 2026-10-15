@@ -105,14 +105,11 @@ exports.onboardVendor = async (req, res) => {
     }
 
     const existing = await Vendor.findOne({ user: req.user.id });
-    if (existing) {
-      return res.status(409).json({ message: "Vendor profile already exists" });
-    }
+    const created = !existing;
+    const { businessName, description, phone, email, logoUrl, category, bannerUrl, location, address } = req.body;
 
-    const { businessName, description, phone, email, logoUrl, bannerUrl, location, address } = req.body;
-
-    if (!businessName || !phone || !email) {
-      return res.status(400).json({ message: "businessName, phone, and email are required" });
+    if (!businessName || !phone || !email || !description || !logoUrl || !category || !(location || address)) {
+      return res.status(400).json({ message: "Business name, phone, email, description, logo, category, and location are required." });
     }
 
     let locationVal = location !== undefined ? location : null;
@@ -120,16 +117,11 @@ exports.onboardVendor = async (req, res) => {
       locationVal = typeof address === "object" ? (address.city || address.street) : address;
     }
 
-    const vendor = await Vendor.create({
-      user: req.user.id,
-      businessName,
-      description,
-      phone,
-      email,
-      logoUrl,
-      bannerUrl,
-      location: locationVal,
-    });
+    const vendor = existing || new Vendor({ user: req.user.id });
+    Object.assign(vendor, { businessName, description, phone, email, logoUrl, category, bannerUrl, location: locationVal, verificationStatus: "PENDING", verificationNote: "" });
+    await vendor.save();
+    require("../services/notification.service").profileSubmitted({ kind: "seller", name: businessName, resubmitted: !created }).catch(() => {});
+    await User.findByIdAndUpdate(req.user.id, { companyName: businessName, businessName, description, logoUrl, category, location: locationVal, isOnboarded: true, verificationStatus: "PENDING" });
 
     // Auto-sync Store record so all store/staff/settings endpoints function seamlessly
     try {
@@ -179,7 +171,7 @@ exports.onboardVendor = async (req, res) => {
       console.error("Auto-sync Store error on vendor onboarding:", storeErr.message);
     }
 
-    return res.status(201).json({ message: "Vendor profile created", vendor });
+    return res.status(created ? 201 : 200).json({ message: created ? "Vendor profile created" : "Vendor profile updated", vendor });
   } catch (error) {
     if (error.code === 11000) {
       return res.status(409).json({ message: "A vendor with this business name already exists" });
@@ -213,10 +205,11 @@ exports.updateMyProfile = async (req, res) => {
       return res.status(404).json({ message: "Vendor profile not found. Please complete onboarding." });
     }
 
-    const { businessName, description, phone, email, logoUrl, bannerUrl, location, address } = req.body;
+    const { businessName, description, phone, email, logoUrl, bannerUrl, location, address, category } = req.body;
 
     // Editable fields — excludes verificationStatus, ratingAvg, status, commissionRate
     if (businessName !== undefined) vendor.businessName = businessName;
+    if (category !== undefined) vendor.category = String(category || "").slice(0, 120);
     if (description !== undefined) vendor.description = description;
     if (phone !== undefined) vendor.phone = phone;
     if (email !== undefined) vendor.email = email;
@@ -228,7 +221,17 @@ exports.updateMyProfile = async (req, res) => {
       vendor.location = typeof address === "object" ? (address.city || address.street) : address;
     }
 
+    // A rejected profile that has been fixed goes straight back to MVEC for review.
+    const resubmitted = vendor.verificationStatus === "REJECTED";
+    if (resubmitted) {
+      vendor.verificationStatus = "PENDING";
+      vendor.verificationNote = "";
+    }
     await vendor.save();
+    if (resubmitted) {
+      await User.findByIdAndUpdate(req.user.id, { verificationStatus: "PENDING" });
+      require("../services/notification.service").profileSubmitted({ kind: "seller", name: vendor.businessName, resubmitted: true }).catch(() => {});
+    }
 
     // Sync Store record
     try {
@@ -258,7 +261,7 @@ exports.updateMyProfile = async (req, res) => {
       console.error("Auto-sync Store error on vendor profile update:", storeErr.message);
     }
 
-    return res.status(200).json({ message: "Vendor profile updated", vendor });
+    return res.status(200).json({ message: resubmitted ? "Profile saved and sent to MVEC for review again." : "Vendor profile updated", vendor });
   } catch (error) {
     if (error.code === 11000) {
       return res.status(409).json({ message: "A vendor with this business name already exists" });
@@ -270,37 +273,66 @@ exports.updateMyProfile = async (req, res) => {
 // ─── 4. PUBLIC VENDOR DIRECTORY ─────────────────────────────────────────────
 // @route   GET /api/vendors?q=&location=&page=&pageSize=
 // @access  Public
+// Shape returned by the public storefront endpoints. Internal fields such as
+// the commission rate stay private; `id`/`userId` are what clients link with.
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const toPublicVendor = (v) => ({
+  id: v._id.toString(),
+  _id: v._id.toString(),
+  userId: v.user ? v.user.toString() : null,
+  publicId: v.publicId,
+  businessName: v.businessName,
+  slug: v.slug,
+  logoUrl: v.logoUrl,
+  bannerUrl: v.bannerUrl,
+  description: v.description,
+  category: v.category,
+  location: v.location,
+  phone: v.phone,
+  email: v.email,
+  ratingAvg: v.ratingAvg,
+  verificationStatus: v.verificationStatus,
+  status: v.status,
+});
+
+// Active sellers that are verified or already selling something, verified
+// sellers first. The shop shows products of every active seller, so the
+// vendor directory lists the same sellers (with a Verified badge when earned).
 exports.getVendors = async (req, res) => {
   try {
-    const { q, location, page = 1, pageSize = 20 } = req.query;
+    const { q, location, page = 1, pageSize = 20, verified } = req.query;
+    const Product = require("../models/Product");
 
+    const selling = await Product.distinct("vendor", { status: "ACTIVE" });
     const filter = {
       status: "ACTIVE",
-      verificationStatus: "VERIFIED",
+      $or: [{ verificationStatus: "VERIFIED" }, { user: { $in: selling } }],
     };
-
-    if (q) {
-      filter.businessName = { $regex: q, $options: "i" };
+    if (verified === "true") {
+      delete filter.$or;
+      filter.verificationStatus = "VERIFIED";
     }
-    if (location) {
+    if (q) {
+      filter.businessName = { $regex: escapeRegex(String(q).slice(0, 100)), $options: "i" };
+    }
+    if (location && typeof location === "string") {
       filter.location = location;
     }
 
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const limit = Math.min(parseInt(pageSize, 10) || 20, 100);
-    const skip = (pageNum - 1) * limit;
 
-    const [vendors, total] = await Promise.all([
-      Vendor.find(filter).sort({ ratingAvg: -1 }).skip(skip).limit(limit),
-      Vendor.countDocuments(filter),
-    ]);
+    const all = await Vendor.find(filter);
+    all.sort((a, b) => (b.verificationStatus === "VERIFIED") - (a.verificationStatus === "VERIFIED") || (Number(b.ratingAvg) || 0) - (Number(a.ratingAvg) || 0));
+    const vendors = all.slice((pageNum - 1) * limit, pageNum * limit);
 
     return res.status(200).json({
-      data: vendors,
-      meta: { page: pageNum, pageSize: limit, total },
+      data: vendors.map(toPublicVendor),
+      meta: { page: pageNum, pageSize: limit, total: all.length },
     });
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    console.error("Vendor list failed:", error);
+    return res.status(500).json({ message: "We could not load the stores right now. Please try again." });
   }
 };
 
@@ -309,22 +341,21 @@ exports.getVendors = async (req, res) => {
 // @access  Public
 exports.getVendorByIdOrSlug = async (req, res) => {
   try {
-    const { idOrSlug } = req.params;
+    const idOrSlug = String(req.params.idOrSlug);
     const isObjectId = idOrSlug.match(/^[0-9a-fA-F]{24}$/);
 
     const query = isObjectId ? { _id: idOrSlug } : { slug: idOrSlug };
 
-    const vendor = await Vendor.findOne({
-      ...query,
-      status: "ACTIVE",
-      verificationStatus: "VERIFIED",
-    });
+    // Same rule as the directory: active and verified, or already selling.
+    const vendor = await Vendor.findOne({ ...query, status: "ACTIVE" });
+    const Product = require("../models/Product");
+    const visible = vendor && (vendor.verificationStatus === "VERIFIED" || (await Product.exists({ vendor: vendor.user, status: "ACTIVE" })));
 
-    if (!vendor) {
+    if (!visible) {
       return res.status(404).json({ message: "Vendor store not found" });
     }
 
-    return res.status(200).json({ vendor });
+    return res.status(200).json({ vendor: toPublicVendor(vendor) });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }
@@ -377,7 +408,7 @@ exports.adminGetVendors = async (req, res) => {
         ...v.toObject(),
         productCount: Number(stats.productCount) || 0,
         productCategories: categories,
-        category: categories[0] || "",
+        category: v.category || categories[0] || "",
       };
     });
 
@@ -396,9 +427,13 @@ exports.adminGetVendors = async (req, res) => {
 exports.adminVerifyVendor = async (req, res) => {
   try {
     const { decision } = req.body; // "VERIFIED" | "REJECTED"
+    const reason = String(req.body.reason || "").trim().slice(0, 500);
 
     if (!["VERIFIED", "REJECTED"].includes(decision)) {
-      return res.status(400).json({ message: "decision must be VERIFIED or REJECTED" });
+      return res.status(400).json({ message: "Choose to verify or reject the seller." });
+    }
+    if (decision === "REJECTED" && reason.length < 5) {
+      return res.status(400).json({ message: "Tell the seller what to fix: write a short reason for the rejection." });
     }
 
     const vendor = await Vendor.findById(req.params.id);
@@ -407,7 +442,10 @@ exports.adminVerifyVendor = async (req, res) => {
     }
 
     vendor.verificationStatus = decision;
+    vendor.verificationNote = decision === "REJECTED" ? reason : "";
     await vendor.save();
+    await User.findByIdAndUpdate(vendor.user, { verificationStatus: decision });
+    await require("../services/notification.service").verificationDecision(vendor.user, { kind: "seller", name: vendor.businessName, decision, reason });
 
     return res.status(200).json({ message: `Vendor ${decision.toLowerCase()}`, vendor });
   } catch (error) {
@@ -437,5 +475,40 @@ exports.adminUpdateVendorStatus = async (req, res) => {
     return res.status(200).json({ message: `Vendor status set to ${status}`, vendor });
   } catch (error) {
     return res.status(500).json({ message: error.message });
+  }
+};
+
+// ─── SELLER'S AFFILIATE PROGRAM ─────────────────────────────────────────────
+// @route   GET /api/vendors/me/affiliate-program
+// @access  Private (vendor, staff with canManageProducts)
+exports.getAffiliateProgram = async (req, res) => {
+  const program = require("../services/affiliateProgram.service");
+  try {
+    const ownerId = req.vendorId || req.user.id;
+    const [settings, stats] = await Promise.all([program.getVendorProgram(ownerId), program.vendorProgramStats(ownerId)]);
+    return res.status(200).json({ program: settings, stats, maxRatePercent: program.MAX_VENDOR_RATE });
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
+    console.error("Affiliate program load failed:", error);
+    return res.status(500).json({ message: "We could not load your affiliate program right now. Please try again." });
+  }
+};
+
+// @route   PUT /api/vendors/me/affiliate-program   { enabled, ratePercent, scope: ALL|SELECTED, productIds? }
+// @access  Private (vendor, staff with canManageSettings)
+exports.updateAffiliateProgram = async (req, res) => {
+  const program = require("../services/affiliateProgram.service");
+  try {
+    const ownerId = req.vendorId || req.user.id;
+    const { enabled, ratePercent, scope, productIds } = req.body || {};
+    const settings = await program.updateVendorProgram(ownerId, { enabled, ratePercent, scope, productIds });
+    const message = settings.enabled
+      ? `Affiliate program is on: affiliates earn ${settings.totalPercent}% on ${settings.scope === "ALL" ? "all your products" : "the products you chose"} (${settings.ratePercent}% paid by you).`
+      : "Affiliate program is off. Affiliates can no longer promote your products; orders already placed keep their commission.";
+    return res.status(200).json({ message, program: settings });
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
+    console.error("Affiliate program update failed:", error);
+    return res.status(500).json({ message: "We could not save your affiliate program right now. Please try again." });
   }
 };

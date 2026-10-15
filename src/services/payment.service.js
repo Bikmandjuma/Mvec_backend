@@ -1,9 +1,11 @@
-const mongoose = require("mongoose");
+const orm = require("../database/orm");
 const Order = require("../models/Order");
 const Payment = require("../models/Payment");
 const PaymentWebhookLog = require("../models/PaymentWebhookLog");
 const financialService = require("./financial.service");
 const pricingService = require("./pricing.service");
+const socketService = require("./socket.service");
+const affiliateAttribution = require("./affiliateAttribution.service");
 
 /**
  * Record a webhook callback that was intentionally ignored (e.g. non-successful
@@ -33,14 +35,14 @@ exports.recordIgnoredWebhook = async ({ provider, externalTransactionId, amount 
 /**
  * Process payment callback idempotently
  */
-exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderId, paymentId = null, amount, payload, gatewayFee = 0 }) => {
+exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderId, paymentId = null, amount, payload, gatewayFee = 0, paymentMethod = null }) => {
   // 1. Idempotency Check: Prevent duplicate processing if already handled
   const existingLog = await PaymentWebhookLog.findOne({ externalTransactionId });
   if (existingLog && existingLog.status === "PROCESSED") {
     return { status: "ALREADY_PROCESSED", log: existingLog };
   }
 
-  const session = await mongoose.startSession();
+  const session = await orm.startSession();
   session.startTransaction();
 
   try {
@@ -56,6 +58,13 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
       return { status: "ALREADY_PAID", order };
     }
 
+    // A late payment on a cancelled/expired order must not revive it: its
+    // stock has already been returned. The failure is logged below so an
+    // admin can refund the buyer.
+    if (order.orderStatus === "CANCELLED") {
+      throw new Error(`Order #${orderId} was cancelled before this payment arrived. Refund required.`);
+    }
+
     // 3. Verify Amount
     if (order.totalAmount !== amount) {
       throw new Error(`Mismatched payment amount. Expected: ${order.totalAmount}, Received: ${amount}`);
@@ -64,7 +73,11 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
     // 4. Update Order Status & Legacy Status Field
     order.paymentStatus = "PAID";
     order.orderStatus = "PROCESSING";
-    order.status = "PAID"; // Reconcile top-level order status
+    if (paymentMethod) order.paymentMethod = paymentMethod;
+    order.paidAt = new Date();
+    if (!order.deliveryOtp) {
+      order.deliveryOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    }
     await order.save({ session });
 
     // 4b. Update Payment Record Status
@@ -81,19 +94,33 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
     );
 
     // 5. Generate Pricing Snapshots & Lock Escrow Funds per Vendor Item
-    const hasAffiliate = !!(order.affiliateUser && order.affiliateCode);
-    const affiliateUserId = hasAffiliate ? order.affiliateUser : null;
+    // The provider fee is charged once per payment: share it across the lines
+    // by value so it is never counted more than once.
+    const linesTotal = order.items.reduce((sum, it) => sum + (Number(it.price) || 0) * (Number(it.quantity) || 0), 0);
+    let feeLeft = Math.round((Number(gatewayFee) || 0) * 100) / 100;
+    const feeShares = order.items.map((it, i) => {
+      const share = i === order.items.length - 1 ? feeLeft
+        : Math.round(((Number(gatewayFee) || 0) * ((Number(it.price) || 0) * (Number(it.quantity) || 0)) / (linesTotal || 1)) * 100) / 100;
+      feeLeft = Math.round((feeLeft - share) * 100) / 100;
+      return share;
+    });
+    for (const [lineIndex, item] of order.items.entries()) {
+      // Attribution is per order item: only promoted items earn a commission.
+      const aff = affiliateAttribution.itemAffiliate(order, item);
+      const hasAffiliate = !!aff;
+      const affiliateUserId = hasAffiliate ? aff.user : null;
 
-    for (const item of order.items) {
       const snapshot = await pricingService.createItemPricingSnapshot({
         orderId: order._id,
         item,
         session,
         hasAffiliate,
-        gatewayFee,
+        gatewayFee: feeShares[lineIndex] || 0,
+        // Seller's own affiliate rate, frozen on the item at checkout.
+        vendorAffiliatePercent: hasAffiliate ? Number(item.affiliateVendorRate) || 0 : 0,
       });
 
-      await financialService.lockPaymentInEscrow({
+      const settlement = await financialService.lockPaymentInEscrow({
         orderId: order._id,
         vendorId: item.vendor,
         grossAmount: snapshot.grossTotal,
@@ -101,7 +128,10 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
         session,
         split: snapshot,
         affiliateUserId,
+        orderItemId: item._id,
       });
+
+      await affiliateAttribution.recordConversion({ order, item, settlement, session });
     }
 
     // 5b. Delivery fees are held for the seller of each parcel, commission-free.
@@ -134,6 +164,11 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
     await session.commitTransaction();
     session.endSession();
 
+    // Tell the buyer's open payment page (and dashboards) straight away.
+    socketService.emitOrderStatusUpdate(order);
+    socketService.emitToRoom(`user:${order.user}`, "payment_confirmed", { orderId: order._id.toString() });
+    await require("./notification.service").paymentConfirmed(order).catch((err) => console.error("Payment notification failed:", err.message));
+
     return { status: "SUCCESS", order, webhookLog };
   } catch (error) {
     await session.abortTransaction();
@@ -164,12 +199,15 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
  * Payments linked to an order go through processPaymentWebhook (escrow and
  * commission); standalone payments only change their own status.
  */
-exports.settlePaypackPayment = async ({ payment, status, amount, fee = 0, payload = {} }) => {
+// Applies a gateway result (SUCCESSFUL / FAILED / PENDING) to a payment: order
+// payments go through escrow, standalone payments are marked directly.
+exports.settleGatewayPayment = async ({ payment, provider, status, amount, fee = 0, payload = {}, externalTransactionId = null }) => {
   if (status === "SUCCESSFUL") {
     if (payment.parentOrder) {
       return exports.processPaymentWebhook({
-        provider: "PAYPACK",
-        externalTransactionId: payment.gatewayReference,
+        provider,
+        paymentMethod: payment.method === "CARD" ? "CARD" : null,
+        externalTransactionId: externalTransactionId || payment.gatewayReference,
         orderId: payment.parentOrder,
         paymentId: payment._id,
         amount,
@@ -185,9 +223,10 @@ exports.settlePaypackPayment = async ({ payment, status, amount, fee = 0, payloa
     // Only a PENDING payment can transition, which makes repeated callbacks no-ops.
     const updated = await Payment.findOneAndUpdate(
       { _id: payment._id, status: "PENDING" },
-      { status: "SUCCESS", paidAt: new Date(), gatewayFee: fee, gatewayResponse: payload },
+      { status: "SUCCESS", paidAt: new Date(), gatewayFee: fee, gatewayResponse: payload, ...(externalTransactionId ? { gatewayReference: externalTransactionId } : {}) },
       { returnDocument: "after" }
     );
+    if (updated) await exports.fulfilStandalonePayment(updated);
     return { status: updated ? "SUCCESS" : "ALREADY_PROCESSED", payment: updated };
   }
 
@@ -202,3 +241,17 @@ exports.settlePaypackPayment = async ({ payment, status, amount, fee = 0, payloa
 
   return { status: "PENDING" };
 };
+
+// Deliver what a successful standalone payment paid for.
+exports.fulfilStandalonePayment = async (payment) => {
+  if (payment.purpose === "BUYER_PREMIUM" && payment.user) {
+    await require("./buyerSubscription.service").activatePremium({ userId: payment.user, paymentId: payment._id });
+  }
+  // A vendor paid a wholesale order (reference WHS-<orderId>-…): lock it in escrow.
+  if (payment.purpose === "WHOLESALE") {
+    const orderId = String(payment.transactionReference || "").split("-")[1];
+    await require("./wholesale.service").markWholesalePaid(orderId, payment);
+  }
+};
+
+exports.settlePaypackPayment = (args) => exports.settleGatewayPayment({ ...args, provider: "PAYPACK" });

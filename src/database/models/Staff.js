@@ -5,9 +5,13 @@ const PERMISSIONS = ["canViewDashboard", "canManageProducts", "canManageOrders",
 module.exports = (sequelize) => {
   const Staff = sequelize.define("Staff", {
     id: primaryKey(),
-    storeId: foreignKey(false),
+    // A member invited by email has no account (and maybe no store) yet.
+    storeId: foreignKey(true),
     vendorOwnerId: foreignKey(false),
-    userId: foreignKey(false),
+    userId: foreignKey(true),
+    email: { type: DataTypes.STRING(190), allowNull: true, defaultValue: "", set(v) { this.setDataValue("email", v ? String(v).trim().toLowerCase() : ""); } },
+    invitationTokenHash: { type: DataTypes.STRING(128), allowNull: true },
+    invitationExpiresAt: { type: DataTypes.DATE, allowNull: true },
     role: { type: DataTypes.ENUM("STORE_MANAGER", "ORDER_MANAGER", "CATALOG_MANAGER"), allowNull: false, defaultValue: "ORDER_MANAGER" },
     // `permissions` sub-document as boolean columns.
     canViewDashboard: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
@@ -18,7 +22,7 @@ module.exports = (sequelize) => {
     canViewAnalytics: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     canManageSettings: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     status: { type: DataTypes.ENUM("INVITED", "ACTIVE", "SUSPENDED"), allowNull: false, defaultValue: "ACTIVE" },
-  }, { tableName: "staff", timestamps: true });
+  }, { tableName: "staff", timestamps: true, defaultScope: { attributes: { exclude: ["invitationTokenHash", "invitationExpiresAt"] } } });
 
   Staff.associate = (m) => {
     Staff.belongsTo(m.Store, { as: "store", foreignKey: "storeId" });
