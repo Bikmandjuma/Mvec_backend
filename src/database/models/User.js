@@ -31,6 +31,8 @@ module.exports = (sequelize) => {
     resetPasswordCodeExpires: { type: DataTypes.DATE, allowNull: true },
     resetPasswordAttempts: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
     isSupplierStaff: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    preferences: { type: DataTypes.JSON, allowNull: true },
+    tokensValidAfter: { type: DataTypes.DATE(3), allowNull: true },
   }, {
     tableName: "users",
     timestamps: true,

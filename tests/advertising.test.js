@@ -13,6 +13,7 @@ const User = require("../src/models/User");
 const Vendor = require("../src/models/Vendor");
 const Product = require("../src/models/Product");
 const Category = require("../src/models/Category");
+const VendorWallet = require("../src/models/VendorWallet");
 
 let app;
 let vendorToken, otherVendorToken, adminToken;
@@ -43,6 +44,9 @@ beforeEach(async () => {
   [vendorToken, otherVendorToken, adminToken] = [vendorUser, otherUser, admin].map(tokenFor);
   await Vendor.create({ user: vendorUser._id, businessName: "A Store", phone: "0788100001", email: "a@x.rw", status: "ACTIVE", verificationStatus: "VERIFIED" });
   await Vendor.create({ user: otherUser._id, businessName: "B Store", phone: "0788100002", email: "b@x.rw", status: "ACTIVE", verificationStatus: "VERIFIED" });
+  // Ad budgets are paid up front from the seller's available balance.
+  await VendorWallet.create({ vendor: vendorUser._id, availableBalance: 1000000 });
+  await VendorWallet.create({ vendor: otherUser._id, availableBalance: 1000000 });
   const category = await Category.create({ name: "Electronics", slug: "electronics" });
   const base = { category: category._id, description: "d", media: { mainImage: "/uploads/x.jpg" }, status: "ACTIVE", stockQuantity: 5, price: 1000 };
   ownProduct = await Product.create({ ...base, name: "Own product", vendor: vendorUser._id });

@@ -6,6 +6,7 @@ const { effectivePrice } = require("../utils/pricing.util");
 const affiliateAttribution = require("./affiliateAttribution.service");
 const { PROVINCES, RWANDA_LOCATIONS, provinceOfDistrict } = require("../config/rwandaLocations");
 const shippingService = require("./shipping.service");
+const promotionService = require("./promotion.service");
 
 // Buyers pick a delivery speed; sellers price it with their shipping zones.
 const DELIVERY_METHODS = { standard: "STANDARD", express: "EXPRESS", pickup: "PICKUP" };
@@ -130,7 +131,7 @@ async function reserveStock(lines) {
  * Create a PENDING order for a buyer from product lines. Prices, shipping and
  * totals are computed here, never trusted from the client.
  */
-async function createOrder({ userId, lines: rawLines, delivery, paymentMethod, visitorId }) {
+async function createOrder({ userId, lines: rawLines, delivery, paymentMethod, visitorId, couponCode }) {
   const parsed = parseDelivery(delivery);
   const lines = normaliseLines(rawLines);
 
@@ -172,11 +173,31 @@ async function createOrder({ userId, lines: rawLines, delivery, paymentMethod, v
   if (!quote.deliverable) {
     throw httpError(400, `${quote.groups.filter((g) => !g.deliverable).map((g) => g.message).join(" ")} Remove those items or choose another address.`);
   }
-  const shippingFee = quote.shippingFee;
-  const shippingBreakdown = quote.groups.map((g) => ({
+  let shippingFee = quote.shippingFee;
+  let shippingBreakdown = quote.groups.map((g) => ({
     vendor: g.vendor, store: g.store, storeName: g.storeName, zone: g.zone, zoneName: g.zoneName,
     method: g.method, fee: g.fee, eta: g.eta,
   }));
+
+  // Seller coupon, validated here (never trusted from the client). Item
+  // discounts are stored per line and borne by that seller in the settlement;
+  // a free-delivery coupon zeroes that seller's parcel fee.
+  let couponFields = {};
+  let itemDiscount = 0;
+  let promotionId = null;
+  if (couponCode) {
+    const couponQuote = await promotionService.quote(couponCode, {
+      lines: orderItems.map((i) => ({ product: byId.get(String(i.product)), quantity: i.quantity, price: i.price })),
+      parcels: shippingBreakdown,
+      userId,
+    });
+    const shipping = { shippingBreakdown, shippingFee };
+    const applied = promotionService.applyToOrder(couponQuote, orderItems, shipping);
+    ({ shippingBreakdown, shippingFee } = shipping);
+    couponFields = { coupon: applied.coupon, discountAmount: applied.discountAmount };
+    itemDiscount = applied.itemDiscount;
+    promotionId = couponQuote.promotion._id;
+  }
 
   // Last-click affiliate attribution, resolved from server-side click records
   // (never from client-supplied affiliate data).
@@ -189,6 +210,9 @@ async function createOrder({ userId, lines: rawLines, delivery, paymentMethod, v
 
   const stockLines = orderItems.map((i) => ({ product: i.product, quantity: i.quantity, name: i.name }));
   await reserveStock(stockLines);
+  if (promotionId) {
+    try { await promotionService.redeem(promotionId); } catch (error) { await restoreStock(stockLines); throw error; }
+  }
 
   try {
     return await Order.create({
@@ -202,7 +226,8 @@ async function createOrder({ userId, lines: rawLines, delivery, paymentMethod, v
       shippingBreakdown,
       subtotal,
       shippingFee,
-      totalAmount: subtotal + shippingFee,
+      totalAmount: subtotal - itemDiscount + shippingFee,
+      ...couponFields,
       paymentMethod: PAYMENT_METHODS.includes(paymentMethod) ? paymentMethod : "MOMO",
       paymentStatus: "PENDING",
       orderStatus: "PENDING",
@@ -210,6 +235,7 @@ async function createOrder({ userId, lines: rawLines, delivery, paymentMethod, v
     });
   } catch (error) {
     await restoreStock(stockLines);
+    if (promotionId) await promotionService.release({ coupon: { promotion: promotionId } });
     throw error;
   }
 }

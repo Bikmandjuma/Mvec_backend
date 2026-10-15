@@ -1,4 +1,5 @@
 const cron = require("node-cron");
+const promotionService = require("../services/promotion.service");
 const orm = require("../database/orm");
 const Order = require("../models/Order");
 const Product = require("../models/Product");
@@ -73,6 +74,8 @@ const cancelExpiredUnpaidOrders = async () => {
           reason: "It was not paid within 30 minutes, so the items were released. You were not charged.",
         }).catch(() => {});
         console.log(`[Expiry Worker] Auto-cancelled unpaid Order #${freshOrder._id}`);
+        // Give back any coupon use held by this order.
+        await promotionService.release(freshOrder).catch(() => {});
       } catch (err) {
         if (session.inTransaction()) await session.abortTransaction();
         console.error(`[Expiry Worker] Failed to cancel order #${order._id}:`, err.message);
@@ -118,6 +121,28 @@ const enforceFulfillmentSLA = async () => {
 /**
  * Initialize Background Jobs
  */
+// 3. Vendor Premium renewals / expiry (hourly).
+const renewSubscriptions = async () => {
+  try {
+    const { renewDueSubscriptions } = require("../services/subscriptionBilling.service");
+    const r = await renewDueSubscriptions();
+    if (r.renewed || r.ended) console.log(`[Subscription Worker] renewed ${r.renewed}, ended ${r.ended}`);
+  } catch (error) {
+    console.error("[Subscription Worker] Error:", error.message);
+  }
+};
+exports.renewSubscriptions = renewSubscriptions;
+
+// 4. End ad campaigns past their end date and return unspent budget (hourly).
+const endExpiredCampaigns = async () => {
+  try {
+    const r = await require("../services/advertising.service").sweep();
+    if (r.ended) console.log(`[Ads Worker] ended ${r.ended} campaign(s)`);
+  } catch (error) {
+    console.error("[Ads Worker] Error:", error.message);
+  }
+};
+exports.endExpiredCampaigns = endExpiredCampaigns;
 /**
  * Payment reminder: one in-app + SMS nudge 20 minutes after an order was
  * placed, if it is still unpaid (it expires at 30 minutes).
@@ -149,6 +174,8 @@ exports.cancelExpiredUnpaidOrders = cancelExpiredUnpaidOrders;
 exports.sendPaymentReminders = sendPaymentReminders;
 
 exports.initBackgroundWorkers = () => {
+  cron.schedule("7 * * * *", renewSubscriptions);
+  cron.schedule("17 * * * *", endExpiredCampaigns);
   // Run 30-min expiration check every minute: "* * * * *"
   cron.schedule("* * * * *", () => {
     cancelExpiredUnpaidOrders();

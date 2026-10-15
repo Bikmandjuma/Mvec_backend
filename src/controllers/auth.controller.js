@@ -49,6 +49,7 @@ const getStaffDetailsForUser = async (userId) => {
       staffRole: staffMember.role,
       permissions: permissionsList,
       permissionsMap: permissions,
+      storeName: staffMember.store?.storeName || null,
     };
   } catch (err) {
     return null;
@@ -100,8 +101,152 @@ const buildUserResponse = (u, staffDetails = null) => ({
   staff_role: staffDetails ? staffDetails.staffRole : null,
   permissions: staffDetails ? staffDetails.permissions : [],
   permissionsMap: staffDetails ? staffDetails.permissionsMap : {},
+  staffStoreName: staffDetails ? staffDetails.storeName : null,
+  // Profile & account settings
+  avatarUrl: u.avatarUrl || "",
+  preferences: normalizePreferences(u.preferences),
+  email_verified: Boolean(u.email_verified),
+  hasPassword: Boolean(u.password),
+  googleLinked: Boolean(u.googleId),
+  createdAt: u.createdAt,
 });
 
+const DEFAULT_PREFERENCES = {
+  notifications: { orders: true, payouts: true, messages: true, marketing: false, email: true, sms: true },
+  language: "en",
+  theme: "system",
+};
+function normalizePreferences(p) {
+  const src = p && typeof p === "object" ? p : {};
+  const n = src.notifications && typeof src.notifications === "object" ? src.notifications : {};
+  return {
+    notifications: Object.fromEntries(Object.entries(DEFAULT_PREFERENCES.notifications).map(([k, d]) => [k, typeof n[k] === "boolean" ? n[k] : d])),
+    language: typeof src.language === "string" && /^[a-z]{2}(-[A-Z]{2})?$/.test(src.language) ? src.language : DEFAULT_PREFERENCES.language,
+    theme: ["light", "dark", "system"].includes(src.theme) ? src.theme : DEFAULT_PREFERENCES.theme,
+  };
+}
+exports.buildUserResponse = buildUserResponse;
+exports.getStaffDetailsForUser = getStaffDetailsForUser;
+
+// The signed-in account (the staff member's own account for staff logins).
+const selfOf = (req) => req.staffUser || req.user;
+
+// ─── ME / PROFILE ────────────────────────────────────────────────────────────
+exports.getMe = async (req, res) => {
+  try {
+    const me = await User.findById(selfOf(req)._id);
+    if (!me) return res.status(404).json({ message: "Account not found." });
+    const staffDetails = await getStaffDetailsForUser(me._id);
+    return res.status(200).json({ user: buildUserResponse(me, staffDetails) });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// @route PATCH /api/auth/profile (portal account settings; PATCH /me is the buyer profile)  { Fullname, gender, phone, email, companyName, preferences, currentPassword }
+// Changing the email or phone (both sign-in identifiers) needs the current password.
+exports.updateAccount = async (req, res) => {
+  try {
+    const me = await User.findById(selfOf(req)._id);
+    if (!me) return res.status(404).json({ message: "Account not found." });
+    const body = req.body || {};
+
+    if (body.Fullname !== undefined || body.fullName !== undefined) {
+      const name = String(body.Fullname ?? body.fullName ?? "").trim();
+      if (name.length < 2) return res.status(400).json({ message: "Enter your full name." });
+      if (name.length > 150) return res.status(400).json({ message: "That name is too long." });
+      me.Fullname = name;
+    }
+    if (body.gender !== undefined) {
+      if (!["male", "female", "other"].includes(body.gender)) return res.status(400).json({ message: "Choose a gender option." });
+      me.gender = body.gender;
+    }
+    if (body.companyName !== undefined && me.role === "vendor" && !req.staffMember) {
+      const company = String(body.companyName || "").trim();
+      if (!company) return res.status(400).json({ message: "Business name can't be empty." });
+      me.companyName = company;
+    }
+
+    const identityChanges = [];
+    if (body.email !== undefined) {
+      const email = String(body.email || "").trim().toLowerCase();
+      if (email !== (me.email || "")) {
+        if (!email && !me.phone) return res.status(400).json({ message: "Keep an email or a phone number to sign in with." });
+        if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ message: "Enter a valid email address." });
+        if (email && (await User.exists({ email, _id: { $ne: me._id } }))) return res.status(409).json({ message: "Another account already uses this email." });
+        identityChanges.push("email");
+        me.email = email || undefined;
+        me.email_verified = false;
+      }
+    }
+    if (body.phone !== undefined) {
+      const raw = String(body.phone || "").trim();
+      const phone = raw ? normalizePhone(raw) : null;
+      if (raw && !phone) return res.status(400).json({ message: describePhoneIssue(raw) || "Enter a valid Rwandan phone number." });
+      const current = me.phone ? normalizePhone(me.phone) : null;
+      if (phone !== current) {
+        if (!phone && !me.email) return res.status(400).json({ message: "Keep an email or a phone number to sign in with." });
+        if (!phone && !me.googleId && !me.isVendorStaff) return res.status(400).json({ message: "A phone number is required for your account." });
+        if (phone && (await User.exists({ phone: { $in: phoneVariants(phone) }, _id: { $ne: me._id } }))) return res.status(409).json({ message: "Another account already uses this phone number." });
+        identityChanges.push("phone");
+        me.phone = phone ? `0${phone.slice(4)}` : undefined;
+      }
+    }
+    if (identityChanges.length && me.password) {
+      if (typeof body.currentPassword !== "string" || !(await bcrypt.compare(body.currentPassword, me.password))) {
+        return res.status(400).json({ message: `Enter your current password to change your ${identityChanges.join(" and ")}.`, code: "PASSWORD_REQUIRED" });
+      }
+    }
+
+    if (body.preferences !== undefined) {
+      const current = normalizePreferences(me.preferences);
+      const next = body.preferences || {};
+      // Invalid values are ignored rather than resetting the saved choice.
+      const checked = normalizePreferences(next);
+      me.preferences = normalizePreferences({
+        ...current,
+        ...(next.language !== undefined && checked.language === next.language ? { language: next.language } : {}),
+        ...(next.theme !== undefined && checked.theme === next.theme ? { theme: next.theme } : {}),
+        notifications: { ...current.notifications, ...Object.fromEntries(Object.entries(next.notifications || {}).filter(([, v]) => typeof v === "boolean")) },
+      });
+      me.markModified?.("preferences");
+    }
+
+    await me.save();
+    const staffDetails = await getStaffDetailsForUser(me._id);
+    return res.status(200).json({
+      message: identityChanges.length ? `Profile saved. Use your new ${identityChanges.join(" or ")} next time you sign in.` : "Profile saved.",
+      user: buildUserResponse(me, staffDetails),
+    });
+  } catch (error) {
+    if (error.code === 11000) return res.status(409).json({ message: "That email or phone is already in use." });
+    if (error.name === "ValidationError") return res.status(400).json({ message: Object.values(error.errors || {})[0]?.message || error.message });
+    return res.status(500).json({ message: "Unable to save your profile." });
+  }
+};
+
+// @route DELETE /api/auth/avatar
+exports.removeAvatar = async (req, res) => {
+  try {
+    await User.updateOne({ _id: selfOf(req)._id }, { $set: { avatarUrl: "" } });
+    return res.status(200).json({ message: "Photo removed.", avatarUrl: "" });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+// @route POST /api/auth/logout-all — signs out every device; returns a fresh token for this one.
+exports.logoutAll = async (req, res) => {
+  try {
+    const me = selfOf(req);
+    const validAfter = new Date(Math.floor(Date.now() / 1000) * 1000);
+    await User.updateOne({ _id: me._id }, { $set: { tokensValidAfter: validAfter } });
+    const staffDetails = await getStaffDetailsForUser(me._id);
+    return res.status(200).json({ message: "Signed out on all other devices.", token: signToken(me._id, staffDetails) });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
 const buildAuthenticatedUserResponse = async (user, staffDetails = null) => {
   const details = staffDetails || await getStaffDetailsForUser(user._id);
   const response = buildUserResponse(user, details);
@@ -499,25 +644,30 @@ exports.updateProfile = async (req, res) => {
 exports.changePassword = async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
-    if (typeof currentPassword !== "string" || typeof newPassword !== "string" || newPassword.length < 8) {
-      return res.status(400).json({ message: "Enter your current password and a new password of at least 8 characters." });
-    }
-
-    const user = await User.findById(req.user.id);
+    const user = await User.findById(selfOf(req)._id);
     if (!user) return res.status(404).json({ message: "Account not found." });
-    if (!user.password || !(await bcrypt.compare(currentPassword, user.password))) {
+    // Google-only accounts have no password yet and may set one.
+    const settingFirst = !user.password;
+    if (typeof newPassword !== "string" || newPassword.length < 8 || (!settingFirst && typeof currentPassword !== "string")) {
+      return res.status(400).json({ message: settingFirst ? "Choose a password of at least 8 characters." : "Enter your current password and a new password of at least 8 characters." });
+    }
+    if (!settingFirst && !(await bcrypt.compare(currentPassword, user.password))) {
       return res.status(400).json({ message: "Current password is incorrect." });
+    }
+    if (!settingFirst && (await bcrypt.compare(newPassword, user.password))) {
+      return res.status(400).json({ message: "Choose a password different from your current one." });
     }
 
     user.password = await bcrypt.hash(newPassword, 10);
     user.lastPasswordChangeAt = new Date();
+    // Other devices are signed out; this one gets a fresh token.
+    user.tokensValidAfter = new Date(Math.floor(Date.now() / 1000) * 1000);
     await user.save();
-    // Other sessions are now signed out; give this one a fresh token.
-    const token = signToken(user._id, await getStaffDetailsForUser(user._id));
+    const staffDetails = await getStaffDetailsForUser(user._id);
     return res.status(200).json({
-      message: "Password updated. You have been signed out on other devices.",
+      message: settingFirst ? "Password set. You can now also sign in with your email or phone." : "Password updated. Other devices were signed out.",
       lastPasswordChangeAt: user.lastPasswordChangeAt,
-      token,
+      token: signToken(user._id, staffDetails),
     });
   } catch (error) {
     return res.status(500).json({ message: "Unable to update password.", error: error.message });

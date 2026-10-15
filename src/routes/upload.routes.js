@@ -93,9 +93,8 @@ router.post("/images", protect, allowOnboardingOrProductUpload, async (req, res)
   }
 });
 
-// Profile photo for any signed-in account (buyers included). One image, 2 MB,
-// stored on the user so it follows them across devices.
-const MAX_AVATAR_SIZE = 2 * 1024 * 1024;
+// Profile photo for any signed-in account (staff upload to their own account).
+const MAX_AVATAR_SIZE = 3 * 1024 * 1024;
 router.post("/avatar", protect, async (req, res) => {
   try {
     const contentType = req.headers["content-type"] || "";
@@ -103,21 +102,18 @@ router.post("/avatar", protect, async (req, res) => {
     if (!boundary) return res.status(400).json({ message: "Expected multipart form data." });
     const body = await readRequestBody(req, res);
     if (!body) return;
-
-    const files = parseMultipart(body, boundary[1] || boundary[2]).filter((part) => part.field === "avatar");
-    if (files.length !== 1) return res.status(400).json({ message: "Select one image for your profile photo." });
-    const [file] = files;
-    if (file.data.length > MAX_AVATAR_SIZE) return res.status(400).json({ message: "Your profile photo must be 2 MB or smaller." });
+    const file = parseMultipart(body, boundary[1] || boundary[2]).find((part) => part.field === "avatar" || part.field === "images");
+    if (!file) return res.status(400).json({ message: "Choose a photo to upload." });
+    if (file.data.length > MAX_AVATAR_SIZE) return res.status(400).json({ message: "Your photo must be 3 MB or smaller." });
     const type = imageTypes[file.contentType];
-    if (!type || !type.matches(file.data)) return res.status(400).json({ message: "Only JPEG, PNG, WEBP and GIF images are allowed." });
+    if (!type || !type.matches(file.data) || file.contentType === "image/gif") return res.status(400).json({ message: "Use a JPEG, PNG or WEBP photo." });
 
     await fs.mkdir(uploadDir, { recursive: true });
-    const name = `${crypto.randomUUID()}${type.extension}`;
+    const name = `avatar-${crypto.randomUUID()}${type.extension}`;
     await fs.writeFile(path.join(uploadDir, name), file.data, { flag: "wx" });
-
-    const avatarUrl = `/uploads/${name}`;
-    await User.updateOne({ _id: req.user.id }, { $set: { avatarUrl } });
-    return res.status(201).json({ avatarUrl });
+    const avatarUrl = `${req.protocol}://${req.get("host")}/uploads/${name}`;
+    await User.updateOne({ _id: (req.staffUser || req.user)._id }, { $set: { avatarUrl } });
+    return res.status(201).json({ message: "Photo updated.", avatarUrl });
   } catch (error) {
     const status = error.message === "Malformed multipart form data." ? 400 : 500;
     return res.status(status).json({ message: status === 400 ? error.message : "Photo upload failed." });

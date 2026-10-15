@@ -4,6 +4,7 @@ const { Payout, VendorBalance } = require("../models/Payout");
 const VendorWallet = require("../models/VendorWallet");
 const Settlement = require("../models/Settlement");
 const disbursementService = require("../services/disbursement.service");
+const sellerFinance = require("../services/sellerFinance.service");
 const Order = require("../models/Order");
 const { formatRwandanPhone } = require("../utils/momo.util");
 
@@ -68,6 +69,12 @@ exports.requestPayout = async (req, res) => {
     if (!phoneInfo) {
       return res.status(400).json({ message: "Enter a Rwandan mobile money number: 078/079 (MTN) or 072/073 (Airtel)." });
     }
+    const details = {
+      accountName: String(payoutDetails.accountName).trim(),
+      accountNumber: phoneInfo.formattedNumber,
+      bankName: phoneInfo.provider === "MTN" ? "MTN MoMo" : "Airtel Money",
+    };
+    const method = payoutMethod || (phoneInfo.provider === "MTN" ? "MOMO" : "AIRTEL");
 
     // Reserve the money first; this fails if the balance is too low, even
     // when two withdrawals are sent at the same time.
@@ -124,6 +131,44 @@ exports.requestPayout = async (req, res) => {
     }
     console.error("Vendor payout failed:", error);
     return res.status(500).json({ message: "Something went wrong on our side while starting your withdrawal. No money left your balance; please try again." });
+  }
+};
+
+// @desc    Cancel a payout request that hasn't been processed yet
+// @route   POST /api/payouts/:id/cancel
+// @access  Private (Vendor)
+exports.cancelPayout = async (req, res) => {
+  try {
+    const userId = req.user.id || req.user._id;
+    const payout = await Payout.findOneAndUpdate(
+      { _id: req.params.id, vendor: userId, status: "PENDING" },
+      { $set: { status: "CANCELLED", rejectionReason: "Cancelled by the seller", processedAt: new Date() } },
+      { new: true },
+    );
+    if (!payout) return res.status(400).json({ message: "Only pending payout requests can be cancelled." });
+    await VendorWallet.updateOne({ vendor: userId }, { $inc: { availableBalance: Number(payout.amount) } });
+    return res.status(200).json({ message: "Payout request cancelled. The amount is back in your available balance.", payout });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Seller statement: sales, payouts, charges and dispute releases
+// @route   GET /api/payouts/statement?from=YYYY-MM-DD&to=YYYY-MM-DD
+// @access  Private (Vendor)
+exports.getStatement = async (req, res) => {
+  try {
+    const userId = req.user.id || req.user._id;
+    const entries = await sellerFinance.statement(userId, { from: req.query.from, to: req.query.to });
+    const totals = {
+      released: entries.filter((e) => e.type === "SALE" && e.state === "RELEASED").reduce((t, e) => t + e.net, 0),
+      commission: entries.filter((e) => e.type === "SALE" && ["RELEASED", "ARBITRATED"].includes(e.state)).reduce((t, e) => t + e.commission, 0),
+      paidOut: entries.filter((e) => e.type === "PAYOUT" && e.state === "PAID").reduce((t, e) => t - e.net, 0),
+      charges: entries.filter((e) => !["SALE", "PAYOUT", "DISPUTE_RELEASE"].includes(e.type) && e.state === "CHARGED").reduce((t, e) => t - e.net, 0),
+    };
+    return res.status(200).json({ entries, totals });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
   }
 };
 

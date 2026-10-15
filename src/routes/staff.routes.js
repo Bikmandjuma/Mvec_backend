@@ -5,6 +5,8 @@ const {
   getStoreStaff,
   updateStaffMember,
   removeStaffMember,
+  resetStaffPassword,
+  getStaffActivity,
 } = require("../controllers/staff.controller");
 
 const { protect, authorize } = require("../middleware/auth.middleware");
@@ -19,6 +21,9 @@ router.use(checkStaffPermission("canManageStaff"));
 router.route("/")
   .post(addStaffMember)
   .get(getStoreStaff);
+
+router.get("/activity", getStaffActivity);
+router.post("/:id/password", resetStaffPassword);
 
 router.route("/:id")
   .put(updateStaffMember)

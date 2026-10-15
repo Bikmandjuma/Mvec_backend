@@ -9,6 +9,7 @@ const VendorWallet = require("../models/VendorWallet");
 const payoutController = require("./payout.controller");
 const socketService = require("../services/socket.service");
 const affiliateAttribution = require("../services/affiliateAttribution.service");
+const promotionService = require("../services/promotion.service");
 
 // A cancelled/refunded/returned/failed order can never pay out affiliate
 // commission: reverse whatever is still standing (idempotent per order).
@@ -66,6 +67,7 @@ exports.createCheckoutOrder = async (req, res) => {
       delivery: deliveryFromBody(req.body),
       paymentMethod: req.body.paymentMethod,
       visitorId: req.body.visitorId,
+      couponCode: req.body.couponCode,
     });
 
     cart.items = [];
@@ -91,6 +93,7 @@ exports.directCheckout = async (req, res) => {
       delivery: deliveryFromBody(req.body),
       paymentMethod: req.body.paymentMethod,
       visitorId: req.body.visitorId,
+      couponCode: req.body.couponCode,
     });
 
     socketService.emitOrderCreated(order);
@@ -233,9 +236,12 @@ exports.getVendorOrders = async (req, res) => {
         deliveredVendors: order.deliveredVendors || [],
         shippingBreakdown: (order.shippingBreakdown || []).filter((s) => s.vendor && vendorIds.includes(s.vendor.toString())),
         vendorSubtotal: vendorItems.reduce(
-          (sum, item) => sum + item.price * item.quantity,
+          (sum, item) => sum + item.price * item.quantity - (item.discount || 0),
           0,
         ),
+        vendorDiscount: vendorItems.reduce((sum, item) => sum + (item.discount || 0), 0),
+        coupon: order.coupon?.code && String(order.coupon.vendor) === String(req.user.id) ? order.coupon : undefined,
+        affiliateCode: order.affiliateCode || undefined,
         // Delivery fees for this seller's parcels (paid to the seller, no commission).
         vendorShippingFee: (order.shippingBreakdown || [])
           .filter((s) => s.vendor && vendorIds.includes(s.vendor.toString()))
@@ -249,6 +255,86 @@ exports.getVendorOrders = async (req, res) => {
     return sendError(res, error, "We could not load your orders right now. Please refresh in a moment.");
   }
 };
+
+// ---------------------------------------------------------------------------
+// Seller order flow (enforced server-side; super_admin keeps full control).
+// DELIVERED on MVEC-paid orders is confirmed only with the buyer's delivery OTP
+// (PATCH /orders/:id/deliver), because it releases escrow. Sellers may close
+// orders whose payment they collect themselves (manual cash / offline orders).
+// ---------------------------------------------------------------------------
+const SELLER_FLOW = {
+  PENDING: ["CONFIRMED", "CANCELLED"],
+  CONFIRMED: ["PROCESSING", "CANCELLED"],
+  PROCESSING: ["READY_FOR_SHIPMENT", "CANCELLED"],
+  READY_FOR_SHIPMENT: ["SHIPPED", "CANCELLED"],
+  SHIPPED: ["OUT_FOR_DELIVERY"],
+  OUT_FOR_DELIVERY: [],
+};
+const sellerCollectsPayment = (order) =>
+  order.source === "MANUAL" && (order.paidOffline || order.paymentMethod === "CASH_ON_DELIVERY");
+
+function sellerNextStatuses(order) {
+  const next = [...(SELLER_FLOW[order.orderStatus] || [])];
+  if (sellerCollectsPayment(order)) {
+    const deliverFrom = order.shippingMethod === "PICKUP"
+      ? ["CONFIRMED", "PROCESSING", "READY_FOR_SHIPMENT"]
+      : ["READY_FOR_SHIPMENT", "SHIPPED", "OUT_FOR_DELIVERY"];
+    if (deliverFrom.includes(order.orderStatus)) next.push("DELIVERED");
+  }
+  return [...new Set(next)];
+}
+exports.sellerNextStatuses = sellerNextStatuses;
+
+// Seller cancellation: restock their items and, for orders paid through MVEC,
+// refund the buyer by unwinding the held escrow.
+async function cancelBySeller(order, vendorIds, reason) {
+  const session = await orm.startSession();
+  session.startTransaction();
+  try {
+    const paidThroughMvec = order.paymentStatus === "PAID" && !order.paidOffline;
+    order.orderStatus = "CANCELLED";
+    order.cancellationReason = reason || "Cancelled by the seller";
+    if (paidThroughMvec || order.paidOffline) order.paymentStatus = "REFUNDED";
+    await order.save({ session });
+
+    for (const item of order.items || []) {
+      if (!item.product || !item.vendor || !vendorIds.includes(item.vendor.toString())) continue;
+      const product = await Product.findOneAndUpdate(
+        { _id: item.product },
+        { $inc: { stockQuantity: Number(item.quantity) || 0 } },
+        { new: true, session },
+      );
+      if (product && product.status === "OUT_OF_STOCK" && product.stockQuantity > 0) {
+        await Product.updateOne({ _id: product._id }, { $set: { status: "ACTIVE" } }, { session });
+      }
+    }
+
+    if (paidThroughMvec) {
+      await Payment.updateMany({ parentOrder: order._id, status: "SUCCESS" }, { $set: { status: "REFUNDED" } }, { session });
+      const held = await Settlement.find({ order: order._id, status: { $in: ["HELD", "ADMIN_HOLD"] } }).session(session);
+      for (const settlement of held) {
+        settlement.status = "REFUNDED";
+        await settlement.save({ session });
+        await VendorWallet.updateOne(
+          { vendor: settlement.vendor },
+          { $inc: { pendingBalance: -Number(settlement.netAmount || 0) } },
+          { session },
+        );
+      }
+      // Wallets never go negative.
+      await VendorWallet.updateMany({ pendingBalance: { $lt: 0 } }, { $set: { pendingBalance: 0 } }, { session });
+    }
+
+    await session.commitTransaction();
+    await promotionService.release(order);
+    session.endSession();
+    return { refunded: paidThroughMvec };
+  } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+    throw error;
+  }
+}
 
 // @desc    Update vendor-specific order status / item status
 // @route   PATCH /api/orders/vendor/:id/status
@@ -607,6 +693,8 @@ async function cancelOrder({ orderId, actor, reason }) {
     order.orderStatus = "CANCELLED";
     await order.save({ session });
     await session.commitTransaction();
+    // Give back the coupon use this order held.
+    await promotionService.release(order);
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
     throw error;

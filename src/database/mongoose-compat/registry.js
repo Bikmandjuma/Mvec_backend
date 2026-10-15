@@ -29,7 +29,7 @@ const LEGACY = {
       companyName: F("string"), resetPasswordToken: F("string"), resetPasswordExpires: F("date"), isVendorStaff: F("bool"),
       lastPasswordChangeAt: F("date"), businessName: F("string"), description: F("string"), logoUrl: F("string"),
       category: F("string"), location: F("json"), isOnboarded: F("bool"), verificationStatus: F("string"), avatarUrl: F("string"),
-      resetPasswordCode: F("string"), resetPasswordCodeExpires: F("date"), resetPasswordAttempts: F("number"), isSupplierStaff: F("bool"),
+      resetPasswordCode: F("string"), resetPasswordCodeExpires: F("date"), resetPasswordAttempts: F("number"), isSupplierStaff: F("bool"), preferences: F("json"), tokensValidAfter: F("date"),
     },
     hidden: ["isVendorStaff", "isSupplierStaff", "resetPasswordCode", "resetPasswordCodeExpires", "resetPasswordAttempts"],
     children: {
@@ -78,9 +78,10 @@ const LEGACY = {
       store: F("ref", "storeId", "Store"), vendorOwner: F("ref", "vendorOwnerId", "User"), user: F("ref", "userId", "User"),
       email: F("string"), invitationTokenHash: F("string"), invitationExpiresAt: F("date"),
       role: F("string"),
-      ...Object.fromEntries(["canViewDashboard", "canManageProducts", "canManageOrders", "canManagePayouts", "canManageStaff", "canViewAnalytics", "canManageSettings"]
+      ...Object.fromEntries(["canViewDashboard", "canManageProducts", "canManageOrders", "canManagePayouts", "canManageStaff", "canViewAnalytics", "canManageSettings", "canManageMarketing"]
         .map((p) => [`permissions.${p}`, F("bool", p)])),
       status: F("string"),
+      lastActiveAt: F("date"),
       // Legacy alias fields kept in sync by the Mongoose pre-save hook.
       vendor_id: { ...F("ref", "storeId", "Store"), alias: true },
       user_id: { ...F("ref", "userId", "User"), alias: true },

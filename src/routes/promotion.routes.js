@@ -7,6 +7,8 @@ const { checkStaffPermission } = require("../middleware/staff.middleware");
 router.use(protect);
 
 // Vendors manage their own promotions; admins can list/manage all.
+// Any signed-in buyer can check a code against their basket.
+router.post("/validate", promotion.validateCoupon);
 router.get("/", promotion.listPromotions);
 router.post("/", authorize("vendor", "super_admin"), checkStaffPermission("canManageProducts"), promotion.createPromotion);
 router.patch("/:id", checkStaffPermission("canManageProducts"), promotion.updatePromotion);
