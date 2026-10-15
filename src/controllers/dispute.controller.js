@@ -48,6 +48,7 @@ exports.openDispute = async (req, res) => {
     const dispute = await disputeService.openDispute({
       orderId,
       raisedById,
+      raisedByRole: req.user.role,
       reason,
       description,
       disputedAmount,

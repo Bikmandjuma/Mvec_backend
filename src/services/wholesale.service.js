@@ -104,15 +104,28 @@ class WholesaleService {
   /**
    * Hold Vendor Funds in Escrow upon successful B2B Payment
    */
-  async holdWholesaleEscrow(orderId) {
+  async holdWholesaleEscrow(orderId, vendorUserId = null) {
     const session = await mongoose.startSession();
     session.startTransaction();
 
     try {
-      const order = await WholesaleOrder.findById(orderId).session(session);
+      const order = await WholesaleOrder.findOne(vendorUserId ? { _id: orderId, vendor: vendorUserId } : { _id: orderId }).session(session);
       if (!order) throw new Error("Wholesale order not found.");
       if (order.status !== "PENDING_PAYMENT") {
         throw new Error(`Invalid order status transition from ${order.status}`);
+      }
+
+      // Paying reserves the supplier's stock (atomic, so it can't be oversold).
+      for (const item of order.items || []) {
+        const reserved = await WholesaleProduct.findOneAndUpdate(
+          { _id: item.product, stockQuantity: { $gte: item.quantity } },
+          { $inc: { stockQuantity: -item.quantity } },
+          { new: true, session },
+        );
+        if (!reserved) throw new Error(`Not enough stock left for '${item.productName}'. Ask the supplier to restock or reduce the quantity.`);
+        if (reserved.stockQuantity <= 0) {
+          await WholesaleProduct.updateOne({ _id: reserved._id }, { $set: { status: "OUT_OF_STOCK" } }, { session });
+        }
       }
 
       order.status = "ESCROW_HELD";
@@ -126,6 +139,20 @@ class WholesaleService {
       session.endSession();
       throw error;
     }
+  }
+
+  /**
+   * Cancel an order that hasn't been paid yet (vendor or supplier side).
+   */
+  async cancelWholesaleOrder(orderId, userId) {
+    const order = await WholesaleOrder.findOne({ _id: orderId, $or: [{ vendor: userId }, { supplier: userId }] });
+    if (!order) throw new Error("Wholesale order not found.");
+    if (order.status !== "PENDING_PAYMENT") {
+      throw new Error("Only orders awaiting payment can be cancelled. Paid orders are handled through a dispute.");
+    }
+    order.status = "CANCELLED";
+    await order.save();
+    return order;
   }
 
   /**

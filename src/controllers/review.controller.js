@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const Review = require("../models/Review");
 const Product = require("../models/Product");
 const Order = require("../models/Order");
+const Notification = require("../models/Notification");
 
 // Map DB document -> API row shape the frontend reviews tables expect.
 function imageUrl(product) {
@@ -288,12 +289,22 @@ exports.replyToReview = async (req, res) => {
       return res.status(403).json({ message: "You can only reply to reviews of your own products" });
     }
 
+    const firstReply = !review.vendorReply?.text;
     review.vendorReply = {
       text: String(reply).trim(),
       repliedAt: new Date(),
     };
     await review.save();
     await Review.populate(review, populateOpts);
+
+    // Let the buyer know the seller answered (first reply only).
+    if (firstReply && review.user?._id) {
+      Notification.create({
+        recipient: review.user._id, type: "REVIEW", title: "The seller replied to your review",
+        message: `${productDoc?.name || "The seller"}: “${String(reply).trim().slice(0, 140)}”`,
+        reference: String(productDoc?._id || ""),
+      }).catch(() => {});
+    }
 
     return res.status(200).json({
       message: "Reply submitted",

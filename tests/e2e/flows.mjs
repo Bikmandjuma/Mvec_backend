@@ -18,7 +18,7 @@ export async function runFlows(base, { adminEmail, adminPassword }) {
       try { data = await res.json(); } catch { data = null; }
       return { status: res.status, data };
     };
-    return { call, setToken: (t) => { token = t; } };
+    return { call, setToken: (t) => { token = t; }, token: () => token };
   };
   const rec = (step, res, pick = () => undefined) => {
     let picked;
@@ -123,10 +123,21 @@ export async function runFlows(base, { adminEmail, adminPassword }) {
   rec("order paid", await BUY.call("GET", `/orders/${order1?.id}`), (d) => ({ payment: d?.order?.paymentStatus, status: d?.order?.orderStatus }));
 
   // ── Vendor fulfilment + payouts ──────────────────────────────────────────
-  for (const s of ["SHIPPED", "DELIVERED"]) rec(`vendor A -> ${s}`, await A.call("PATCH", "/orders/vendor/status", { orderId: order1?.id, status: s }), (d) => ({ status: d?.order?.orderStatus }));
-  rec("vendor A balance", await A.call("GET", "/payouts/balance"), (d) => ({ available: d?.balance?.availableBalance, rate: d?.commissionRate }));
-  rec("payout request", await A.call("POST", "/payouts/request", { amount: 1000, payoutDetails: { accountName: "Alpha", accountNumber: "0788300001" } }), (d) => ({ msg: !!d?.message, status: d?.payout?.status }));
-  rec("payout history", await A.call("GET", "/payouts/history"), (d) => ({ n: d?.payouts?.length, bank: d?.payouts?.[0]?.payoutDetails?.bankName }));
+  rec("vendor cannot deliver an MVEC-paid order", await A.call("PATCH", "/orders/vendor/status", { orderId: order1?.id, status: "DELIVERED" }), msg);
+  for (const s of ["READY_FOR_SHIPMENT", "SHIPPED"]) rec(`vendor A -> ${s}`, await A.call("PATCH", "/orders/vendor/status", { orderId: order1?.id, status: s }), (d) => ({ status: d?.order?.orderStatus }));
+  const otp1 = (await BUY.call("GET", `/orders/${order1?.id}`)).data?.order?.deliveryOtp;
+  rec("delivery confirmed with buyer's code", await ADM.call("PATCH", `/orders/${order1?.id}/deliver`, { deliveryOtp: otp1 }), (d) => ({ status: d?.order?.orderStatus, error: d?.order ? undefined : d?.message }));
+  rec("vendor A balance", await A.call("GET", "/payouts/balance"), (d) => ({ available: d?.balance?.availableBalance, rate: d?.commissionRate, summary: d?.summary }));
+  rec("payout below minimum", await A.call("POST", "/payouts/request", { amount: 500, payoutDetails: { accountName: "Alpha", accountNumber: "0788300001" } }), msg);
+  const pay1 = await A.call("POST", "/payouts/request", { amount: 1000, payoutDetails: { accountName: "Alpha", accountNumber: "0788300001" } });
+  rec("payout request", pay1, (d) => ({ msg: !!d?.message, status: d?.payout?.status }));
+  rec("payout cancel", await A.call("POST", `/payouts/${pay1.data?.payout?._id}/cancel`), (d) => ({ status: d?.payout?.status }));
+  const pay2 = await A.call("POST", "/payouts/request", { amount: 1500, payoutDetails: { accountName: "Alpha", accountNumber: "0788300001" } });
+  rec("admin vendor payouts", await ADM.call("GET", "/admin/vendor-payouts?status=PENDING"), (d) => ({ n: d?.data?.length, totals: d?.totals, left: d?.data?.[0]?.sellerAvailableBalance }));
+  rec("admin approve payout", await ADM.call("POST", `/admin/vendor-payouts/${pay2.data?.payout?._id}/approve`), (d) => ({ status: d?.payout?.status }));
+  rec("admin mark payout paid", await ADM.call("POST", `/admin/vendor-payouts/${pay2.data?.payout?._id}/mark-paid`, { transferReference: "E2E-REF-1" }), (d) => ({ status: d?.payout?.status, ref: d?.payout?.transferReference }));
+  rec("payout history", await A.call("GET", "/payouts/history"), (d) => ({ n: d?.payouts?.length, bank: d?.payouts?.[0]?.payoutDetails?.bankName, statuses: d?.payouts?.map((p) => p.status) }));
+  rec("vendor statement", await A.call("GET", "/payouts/statement"), (d) => ({ types: d?.entries?.map((e) => `${e.type}:${e.state}:${e.effect}`), totals: d?.totals }));
 
   // ── Manual orders ────────────────────────────────────────────────────────
   rec("manual guest COD", await A.call("POST", "/orders/vendor/manual", { customer: { name: "Walk In", phone: "0788999111" }, items: [{ productId: p1?.id, qty: 1 }], shippingAddress: { province: "Kigali City", district: "Kicukiro", street: "KK 1" }, payment: "COD" }),
@@ -142,8 +153,39 @@ export async function runFlows(base, { adminEmail, adminPassword }) {
   const staff = rec("staff add", await A.call("POST", "/staff", { name: "Staffer", email: "staff@e2e.test", password: "Passw0rd!x", role: "ORDER_MANAGER" }), (d) => ({ role: d?.staff?.role, perms: d?.staff?.permissions }));
   rec("staff role change", await A.call("PUT", `/staff/${staff.data?.staff?._id}`, { role: "STORE_MANAGER" }), (d) => ({ role: d?.staff?.role }));
   rec("staff list", await A.call("GET", "/staff"), (d) => d?.staff?.map((s) => s.role));
+  // Staff sign in to the owner's store; access follows their permissions.
+  const STF = client();
+  const sl = rec("staff login", await STF.call("POST", "/auth/login", { email: "staff@e2e.test", password: "Passw0rd!x" }), (d) => ({ staff: d?.user?.isStaff, role: d?.user?.staffRole, store: d?.user?.staffStoreName, perms: d?.user?.permissionsMap }));
+  STF.setToken(sl.data?.token);
+  rec("staff sees owner orders", await STF.call("GET", "/orders/vendor/orders"), (d) => ({ n: d?.orders?.length }));
+  rec("staff blocked from payouts", await STF.call("GET", "/payouts/history"), (d) => ({ msg: d?.message, code: d?.code }));
+  rec("staff adds product for owner", await STF.call("POST", "/products", { name: "Staff Lamp", description: "d", price: 3000, stockQuantity: 2, categoryId: catId, mainImage: "http://x/s.jpg", status: "ACTIVE" }), (d) => ({ name: d?.product?.name }));
+  rec("owner sees staff product", await A.call("GET", "/products/vendor/me"), (d) => d?.products?.map((p) => p.name).sort());
+  rec("staff activity", await A.call("GET", "/staff/activity"), (d) => d?.activity?.map((a) => [a.name, a.action]));
+  rec("owner limits staff access", await A.call("PUT", `/staff/${staff.data?.staff?._id}`, { permissions: { canManageProducts: false } }), (d) => ({ perms: d?.staff?.permissions, custom: d?.staff?.customized }));
+  rec("staff product blocked now", await STF.call("POST", "/products", { name: "Nope", description: "d", price: 1, stockQuantity: 1, categoryId: catId, mainImage: "http://x/n.jpg" }), (d) => ({ code: d?.code }));
+  rec("owner suspends staff", await A.call("PUT", `/staff/${staff.data?.staff?._id}`, { active: false }), (d) => ({ status: d?.staff?.status }));
+  rec("suspended staff blocked", await STF.call("GET", "/orders/vendor/orders"), msg);
   rec("review create", await BUY.call("POST", "/reviews", { product: p1?.id, productId: p1?.id, rating: 5, reviewText: "Great" }), (d) => ({ rating: d?.review?.rating, msg: d?.message }));
   rec("vendor reviews", await A.call("GET", "/reviews/vendor/mine"), (d) => d?.data?.map((r) => [r.rating, r.comment]));
+
+  // ── Portal search ────────────────────────────────────────────────────────
+  const groups = (d) => Object.fromEntries((d?.groups || []).map((g) => [g.key, g.items.map((i) => i.title)]));
+  rec("portal search vendor", await A.call("GET", "/search/portal?q=phone"), groups);
+  rec("portal search admin", await ADM.call("GET", "/search/portal?q=phone"), groups);
+  rec("portal search admin users", await ADM.call("GET", "/search/portal?q=e2e.test"), (d) => ({ users: (d?.groups || []).find((g) => g.key === "users")?.items.length }));
+  rec("portal search short", await A.call("GET", "/search/portal?q=p"), (d) => ({ total: d?.total }));
+
+  // ── Account settings ─────────────────────────────────────────────────────
+  rec("profile me", await BUY.call("GET", "/auth/me"), (d) => ({ avatar: d?.user?.avatarUrl, hasPassword: d?.user?.hasPassword, prefs: d?.user?.preferences }));
+  rec("profile update", await BUY.call("PATCH", "/auth/profile", { Fullname: "Buyer Renamed", gender: "female", preferences: { notifications: { marketing: true }, theme: "dark" } }), (d) => ({ name: d?.user?.Fullname, gender: d?.user?.gender, prefs: d?.user?.preferences }));
+  rec("profile phone needs password", await BUY.call("PATCH", "/auth/profile", { phone: "0788300077" }), (d) => ({ code: d?.code }));
+  const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082", "hex");
+  const fd = new FormData(); fd.append("avatar", new Blob([png], { type: "image/png" }), "a.png");
+  const av = await fetch(base + "/uploads/avatar", { method: "POST", headers: { Authorization: `Bearer ${BUY.token()}` }, body: fd });
+  rec("avatar upload", { status: av.status, data: await av.json() }, (d) => ({ ok: /\/uploads\/avatar-/.test(d?.avatarUrl || "") }));
+  rec("avatar on me", await BUY.call("GET", "/auth/me"), (d) => ({ has: !!d?.user?.avatarUrl }));
+  rec("avatar remove", await BUY.call("DELETE", "/auth/avatar"), (d) => ({ avatar: d?.avatarUrl }));
 
   // ── Messaging + notifications + support ──────────────────────────────────
   const conv = rec("start conversation", await BUY.call("POST", "/conversations", { recipientId: vendorA?.id || vendorA?._id }), (d) => ({ participants: (d?.conversation || d)?.participants?.length }));

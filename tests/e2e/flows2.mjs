@@ -118,6 +118,15 @@ export async function runMoreFlows(base, { adminEmail, adminPassword }) {
     rec("track click 2", await BUY.call("GET", `/affiliates/track/${code}`), (d) => ({ ok: true }));
   }
   rec("affiliate links (aggregates)", await AFF.call("GET", "/affiliates/links"), (d) => (d?.links || d?.data || []).map((l) => [l.clicks ?? l.clickCount, l.conversions ?? l.conversionCount ?? 0]));
+  // Coupon + affiliate referral on one order (Growth).
+  rec("vendor coupon", await V.call("POST", "/promotions", { name: "Gamma ten", code: "GAMMA10", type: "PERCENT", value: 10, status: "ACTIVE" }), (d) => ({ code: d?.promotion?.code, live: d?.promotion?.liveStatus }));
+  rec("coupon preview", await BUY.call("POST", "/promotions/validate", { code: "gamma10", items: [{ productId: bulb?.id, qty: 5 }] }), (d) => ({ discount: d?.discount, msg: d?.message }));
+  rec("coupon preview unknown", await BUY.call("POST", "/promotions/validate", { code: "NOPE", items: [{ productId: bulb?.id, qty: 5 }] }), msg);
+  const co = rec("coupon + referral order", await BUY.call("POST", "/orders/direct-checkout", { items: [{ productId: bulb?.id, qty: 5 }], shippingAddress: addr, paymentMethod: "MOMO", couponCode: "GAMMA10", affiliateCode: code }),
+    (d) => ({ discount: d?.order?.discountAmount, total: d?.order?.totalAmount, coupon: d?.order?.coupon?.code, line: d?.order?.items?.[0]?.discount, referred: d?.order?.affiliateCode === code }));
+  await pay("pay coupon order", co.data?.order, "E2E2-TX-CPN");
+  rec("vendor affiliate summary", await V.call("GET", "/affiliates/vendor/summary"), (d) => d?.totals);
+  rec("vendor promotion stats", await V.call("GET", "/promotions"), (d) => d?.data?.map((p) => [p.code, p.liveStatus, p.usedCount, p.stats]));
   rec("affiliate stats", await AFF.call("GET", "/affiliates/stats"), (d) => ({ ok: !!d }));
   rec("affiliate overview", await AFF.call("GET", "/affiliates/overview"), (d) => ({ ok: !!d }));
   rec("affiliate dashboard", await AFF.call("GET", "/affiliates/me/dashboard"), (d) => ({ ok: !!d }));
@@ -137,6 +146,12 @@ export async function runMoreFlows(base, { adminEmail, adminPassword }) {
   rec("admin subscriptions", await ADM.call("GET", "/admin/subscriptions"), (d) => ({ n: (d?.data || d?.subscriptions || []).length }));
   rec("admin ads", await ADM.call("GET", "/admin/advertisements"), (d) => ({ n: (d?.data || d?.advertisements || []).length }));
   rec("admin approves ad", await ADM.call("PATCH", `/admin/advertisements/${ad.data?.advertisement?.id}/status`, { status: "ACTIVE" }), (d) => ({ status: d?.advertisement?.status }));
+  rec("vendor cannot self-approve ad", await V.call("PATCH", `/vendor/advertisements/${ad.data?.advertisement?.id}/status`, { status: "ACTIVE" }), msg);
+  rec("sponsored home", await BUY.call("GET", "/ads/sponsored?surface=home"), (d) => d?.data?.map((a) => a.name));
+  rec("sponsored click", await BUY.call("POST", `/ads/${ad.data?.advertisement?.id}/click`), (d) => ({ product: !!d?.productId }));
+  rec("vendor ads", await V.call("GET", "/vendor/advertisements"), (d) => d?.data?.map((a) => [a.statusKey, a.clicks, a.impressions, a.spent, a.remaining]));
+  rec("vendor ends ad", await V.call("POST", `/vendor/advertisements/${ad.data?.advertisement?.id}/end`), (d) => ({ status: d?.advertisement?.statusKey, msg: d?.message }));
+  rec("statement ad entries", await V.call("GET", "/payouts/statement"), (d) => d?.entries?.filter((e) => ["ADVERTISING", "SUBSCRIPTION"].includes(e.type)).map((e) => [e.type, e.effect]));
   rec("buyer subscription", await BUY.call("POST", "/buyer/subscription", { plan: "PREMIUM" }), (d) => ({ plan: d?.subscription?.planKey }));
 
   // ── Admin: become seller, vendors, users; search; reports ────────────────

@@ -27,7 +27,8 @@ async function getApplicableCommissionRule({ productId, vendorId, categoryId }) 
 exports.createItemPricingSnapshot = async ({ orderId, item, session, hasAffiliate = false, gatewayFee = 0 }) => {
   const { product, vendor, category, price, quantity } = item;
   const unitPrice = price;
-  const grossTotal = unitPrice * quantity;
+  // Coupon discounts are paid by the seller, so escrow uses the discounted line.
+  const grossTotal = Math.max(0, unitPrice * quantity - (Number(item.discount) || 0));
 
   const rule = await getApplicableCommissionRule({
     productId: product._id || product,

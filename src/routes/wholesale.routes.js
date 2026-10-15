@@ -29,7 +29,16 @@ router.post(
 router.post(
   "/orders/:orderId/hold-escrow",
   protect,
+  authorize("vendor", "super_admin"),
   wholesaleController.holdEscrow
+);
+
+// Vendor or supplier cancels an order that hasn't been paid yet.
+router.post(
+  "/orders/:orderId/cancel",
+  protect,
+  authorize("vendor", "supplier"),
+  wholesaleController.cancelWholesaleOrder
 );
 
 // Vendor/Supplier confirms delivery receipt & releases escrow funds

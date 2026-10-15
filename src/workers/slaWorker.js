@@ -1,4 +1,5 @@
 const cron = require("node-cron");
+const promotionService = require("../services/promotion.service");
 const mongoose = require("mongoose");
 const Order = require("../models/Order");
 const Product = require("../models/Product");
@@ -53,6 +54,7 @@ const cancelExpiredUnpaidOrders = async () => {
 
         await session.commitTransaction();
         session.endSession();
+        await promotionService.release(freshOrder);
         console.log(`[Expiry Worker] Successfully auto-cancelled expired Order #${freshOrder._id}`);
       } catch (err) {
         await session.abortTransaction();
@@ -98,7 +100,32 @@ const enforceFulfillmentSLA = async () => {
 /**
  * Initialize Background Jobs
  */
+// 3. Vendor Premium renewals / expiry (hourly).
+const renewSubscriptions = async () => {
+  try {
+    const { renewDueSubscriptions } = require("../services/subscriptionBilling.service");
+    const r = await renewDueSubscriptions();
+    if (r.renewed || r.ended) console.log(`[Subscription Worker] renewed ${r.renewed}, ended ${r.ended}`);
+  } catch (error) {
+    console.error("[Subscription Worker] Error:", error.message);
+  }
+};
+exports.renewSubscriptions = renewSubscriptions;
+
+// 4. End ad campaigns past their end date and return unspent budget (hourly).
+const endExpiredCampaigns = async () => {
+  try {
+    const r = await require("../services/advertising.service").sweep();
+    if (r.ended) console.log(`[Ads Worker] ended ${r.ended} campaign(s)`);
+  } catch (error) {
+    console.error("[Ads Worker] Error:", error.message);
+  }
+};
+exports.endExpiredCampaigns = endExpiredCampaigns;
+
 exports.initBackgroundWorkers = () => {
+  cron.schedule("7 * * * *", renewSubscriptions);
+  cron.schedule("17 * * * *", endExpiredCampaigns);
   // Run 30-min expiration check every minute: "* * * * *"
   cron.schedule("* * * * *", () => {
     cancelExpiredUnpaidOrders();

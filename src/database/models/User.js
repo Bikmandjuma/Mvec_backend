@@ -18,6 +18,9 @@ module.exports = (sequelize) => {
     resetPasswordExpires: { type: DataTypes.DATE, allowNull: true },
     isVendorStaff: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     lastPasswordChangeAt: { type: DataTypes.DATE, allowNull: true },
+    avatarUrl: { type: DataTypes.STRING(500), allowNull: true, defaultValue: "" },
+    preferences: { type: DataTypes.JSON, allowNull: true },
+    tokensValidAfter: { type: DataTypes.DATE(3), allowNull: true },
   }, {
     tableName: "users",
     timestamps: true,

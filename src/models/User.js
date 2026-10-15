@@ -112,6 +112,12 @@ const userSchema = new mongoose.Schema(
     resetPasswordExpires: { type: Date },
     isVendorStaff: { type: Boolean, default: false, select: false },
     lastPasswordChangeAt: { type: Date },
+    // Profile photo (uploaded through /api/uploads/avatar).
+    avatarUrl: { type: String, default: "" },
+    // { notifications: { orders, payouts, marketing, email, sms }, language, theme }
+    preferences: { type: mongoose.Schema.Types.Mixed, default: undefined },
+    // Tokens issued before this moment are rejected ("sign out everywhere").
+    tokensValidAfter: { type: Date },
   },
   { timestamps: true },
 );

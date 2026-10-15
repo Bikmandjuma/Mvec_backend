@@ -167,7 +167,32 @@ function verifyWebhookSignature(rawBody, signatureHeader, secret = process.env.P
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+/**
+ * Send money to a mobile money number (Paypack "cashout"), used for seller payouts.
+ *
+ * POST ${PAYPACK_BASE_URL}/transactions/cashout  { amount, number }
+ * Only called when PAYOUT_AUTO_DISBURSE=true; otherwise MVEC finance pays out
+ * manually and records the transfer reference.
+ */
+async function cashout({ amount, phone }) {
+  if (isSandbox()) {
+    return { ref: `SANDBOX-CASHOUT-${Date.now()}`, status: "PENDING", raw: { sandbox: true } };
+  }
+  try {
+    const response = await axios.post(
+      `${BASE_URL()}/transactions/cashout`,
+      { amount: Number(amount), number: String(phone).replace(/^\+?250/, "0") },
+      { headers: await authHeaders() }
+    );
+    return { ref: response.data?.ref, status: normalizeStatus(response.data?.status), raw: response.data };
+  } catch (error) {
+    const detail = error.response?.data?.message || error.message;
+    throw new Error(`Paypack cashout failed${error.response ? ` (${error.response.status})` : ""}: ${detail}`);
+  }
+}
+
 module.exports = {
+  cashout,
   isSandbox,
   normalizeStatus,
   getAccessToken,
