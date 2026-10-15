@@ -26,7 +26,12 @@ module.exports = {
     const date = (allowNull = true, extra = {}) => ({ type: S.DATE(3), allowNull, ...extra });
     const now = () => S.literal("CURRENT_TIMESTAMP(3)");
     const timestamps = () => ({ createdAt: date(false, { defaultValue: now() }), updatedAt: date(false, { defaultValue: now() }) });
-    const add = (table, columns) => Promise.all(Object.entries(columns).map(([name, def]) => queryInterface.addColumn(table, name, def)));
+    // Skips columns that already exist, so a database that partly ran this
+    // migration (or got avatarUrl from 20261014000500-user-profile) can finish it.
+    const add = async (table, columns) => {
+      const existing = await queryInterface.describeTable(table);
+      await Promise.all(Object.entries(columns).filter(([name]) => !existing[name]).map(([name, def]) => queryInterface.addColumn(table, name, def)));
+    };
     const cascade = (model) => ({ references: { model, key: "id" }, onDelete: "CASCADE", onUpdate: "CASCADE" });
 
     // ── users: onboarding profile, password-reset codes, delivery role ──────
