@@ -1,6 +1,6 @@
 const { DataTypes, primaryKey, foreignKey, withIds } = require("./_shared");
 
-const PERMISSIONS = ["canViewDashboard", "canManageProducts", "canManageOrders", "canManagePayouts", "canManageStaff", "canViewAnalytics", "canManageSettings"];
+const PERMISSIONS = ["canViewDashboard", "canManageProducts", "canManageOrders", "canManagePayouts", "canManageStaff", "canViewAnalytics", "canManageSettings", "canManageMarketing"];
 
 module.exports = (sequelize) => {
   const Staff = sequelize.define("Staff", {
@@ -8,7 +8,7 @@ module.exports = (sequelize) => {
     storeId: foreignKey(false),
     vendorOwnerId: foreignKey(false),
     userId: foreignKey(false),
-    role: { type: DataTypes.ENUM("STORE_MANAGER", "ORDER_MANAGER", "CATALOG_MANAGER"), allowNull: false, defaultValue: "ORDER_MANAGER" },
+    role: { type: DataTypes.ENUM("STORE_MANAGER", "ORDER_MANAGER", "CATALOG_MANAGER", "MARKETING_MANAGER", "FINANCE_MANAGER"), allowNull: false, defaultValue: "ORDER_MANAGER" },
     // `permissions` sub-document as boolean columns.
     canViewDashboard: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
     canManageProducts: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
@@ -17,6 +17,8 @@ module.exports = (sequelize) => {
     canManageStaff: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     canViewAnalytics: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     canManageSettings: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    canManageMarketing: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    lastActiveAt: { type: DataTypes.DATE(3), allowNull: true },
     status: { type: DataTypes.ENUM("INVITED", "ACTIVE", "SUSPENDED"), allowNull: false, defaultValue: "ACTIVE" },
   }, { tableName: "staff", timestamps: true });
 

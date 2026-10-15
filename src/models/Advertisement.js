@@ -63,6 +63,10 @@ const advertisementSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    // Budget is paid from the seller balance up front; clicks spend it.
+    spent: { type: Number, default: 0, min: 0 },
+    refunded: { type: Number, default: 0, min: 0 },
+    rejectionReason: { type: String, default: "" },
   },
   { timestamps: true }
 );

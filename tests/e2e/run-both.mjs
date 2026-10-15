@@ -85,6 +85,8 @@ for (const d of which === "both" ? ["mongo", "mysql"] : [which]) {
   results[d] = await runDriver(d);
   console.log(`  ${results[d].transcript.length} steps, ${results[d].failures.length} expectation failures`);
   results[d].failures.forEach((f) => console.log("  ✗", f));
+  // E2E_SHOW=<regex> prints matching steps, e.g. E2E_SHOW=payout
+  if (process.env.E2E_SHOW) results[d].transcript.filter((t) => new RegExp(process.env.E2E_SHOW, "i").test(t.step)).forEach((t) => console.log(`  · ${t.step}: ${t.status} ${show(t.data)}`));
   const errors = (results[d].log.match(/^.*(Error|error:|TypeError|ReferenceError|mysql-compat).*$/gm) || []).filter((l) => !/Error connecting/.test(l));
   if (errors.length) { console.log("  server errors:"); [...new Set(errors)].slice(0, 15).forEach((l) => console.log("   ", l.slice(0, 220))); }
 }

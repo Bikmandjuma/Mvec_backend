@@ -53,7 +53,8 @@ exports.createWholesaleOrder = async (req, res) => {
 exports.holdEscrow = async (req, res) => {
   try {
     const { orderId } = req.params;
-    const updatedOrder = await wholesaleService.holdWholesaleEscrow(orderId);
+    // Only the vendor who placed the order pays it (admins may record it).
+    const updatedOrder = await wholesaleService.holdWholesaleEscrow(orderId, req.user.role === "super_admin" ? null : req.user.id);
 
     return res.status(200).json({
       success: true,
@@ -105,5 +106,15 @@ exports.markShipped = async (req, res) => {
   } catch (error) {
     const status = error.message === "Wholesale order not found." ? 404 : 400;
     return res.status(status).json({ success: false, message: error.message });
+  }
+};
+// @desc    Cancel an unpaid wholesale order (vendor or supplier)
+// @route   POST /api/wholesale/orders/:orderId/cancel
+exports.cancelWholesaleOrder = async (req, res) => {
+  try {
+    const order = await wholesaleService.cancelWholesaleOrder(req.params.orderId, req.user.id);
+    return res.status(200).json({ success: true, message: "Wholesale order cancelled.", data: order });
+  } catch (error) {
+    return res.status(400).json({ success: false, message: error.message });
   }
 };

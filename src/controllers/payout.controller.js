@@ -8,6 +8,9 @@ const { TOTAL_PLATFORM_FEE_PERCENT } = require("../config/revenueSplit");
 // Helper: Generate unique payout reference number
 const generatePayoutNumber = () => `PAY-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
 
+const sellerFinance = require("../services/sellerFinance.service");
+const MIN_PAYOUT = 1000;
+
 // @desc    Get Vendor Financial Balance Summary
 // @route   GET /api/payouts/balance
 // @access  Private (Vendor)
@@ -18,73 +21,123 @@ exports.getVendorBalance = async (req, res) => {
     if (!balance) {
       balance = await VendorBalance.create({ vendor: userId });
     }
-    return res.status(200).json({ balance, commissionRate: `${TOTAL_PLATFORM_FEE_PERCENT}%` });
+    const live = await sellerFinance.summary(userId);
+    const out = balance.toJSON ? balance.toJSON() : balance;
+    // Escrow is worked out from the orders themselves so it can't drift.
+    out.pendingBalance = live.inEscrow;
+    return res.status(200).json({
+      balance: out,
+      summary: { ...live, available: Number(balance.availableBalance || 0), minimumPayout: MIN_PAYOUT },
+      commissionRate: `${TOTAL_PLATFORM_FEE_PERCENT}%`,
+    });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }
 };
 
-// @desc    Automated Vendor Instant Payout / Withdrawal Request
+// @desc    Request a withdrawal. The amount is reserved from the available
+//          balance and paid out by MVEC finance (admin) to mobile money.
 // @route   POST /api/payouts/request
 // @access  Private (Vendor)
 exports.requestPayout = async (req, res) => {
   try {
-    const { amount, payoutMethod, payoutDetails } = req.body;
+    const { payoutMethod, payoutDetails } = req.body;
+    const amount = Number(req.body.amount);
     const userId = req.user.id || req.user._id;
 
-    if (!amount || amount <= 0) {
-      return res.status(400).json({ message: "Valid withdrawal amount is required." });
+    if (!Number.isInteger(amount) || amount <= 0) {
+      return res.status(400).json({ message: "Enter a whole amount in RWF." });
     }
-
-    if (!payoutDetails || !payoutDetails.accountName || !payoutDetails.accountNumber) {
-      return res.status(400).json({ message: "Amount and complete payout details are required." });
+    if (amount < MIN_PAYOUT) {
+      return res.status(400).json({ message: `The minimum payout is ${MIN_PAYOUT.toLocaleString("en-RW")} RWF.` });
+    }
+    if (!payoutDetails || !String(payoutDetails.accountName || "").trim() || !payoutDetails.accountNumber) {
+      return res.status(400).json({ message: "Enter the account name and mobile money number." });
     }
 
     // Format & validate Rwandan Phone Number for MOMO / AIRTEL
     const phoneInfo = formatRwandanPhone(payoutDetails.accountNumber);
     if (!phoneInfo) {
       return res.status(400).json({
-        message: "Invalid Rwandan phone number. Must start with 078/079 (MTN) or 073 (Airtel).",
+        message: "Invalid Rwandan phone number. Must start with 078/079 (MTN) or 072/073 (Airtel).",
       });
     }
+    const details = {
+      accountName: String(payoutDetails.accountName).trim(),
+      accountNumber: phoneInfo.formattedNumber,
+      bankName: phoneInfo.provider === "MTN" ? "MTN MoMo" : "Airtel Money",
+    };
+    const method = payoutMethod || (phoneInfo.provider === "MTN" ? "MOMO" : "AIRTEL");
 
-    const determinedMethod = payoutMethod || (phoneInfo.provider === "MTN" ? "MOMO" : "AIRTEL");
-    payoutDetails.accountNumber = phoneInfo.formattedNumber;
-    payoutDetails.bankName = phoneInfo.provider === "MTN" ? "MTN MoMo" : "Airtel Money";
-
-    let balance = await VendorBalance.findOne({ vendor: userId });
-    if (!balance || balance.availableBalance < amount) {
-      return res.status(400).json({
-        message: `Insufficient available balance. Available: ${balance ? balance.availableBalance : 0} RWF`,
-      });
+    // Reserve the amount atomically, so two requests can't spend the same money.
+    const reserved = await VendorBalance.findOneAndUpdate(
+      { vendor: userId, availableBalance: { $gte: amount } },
+      { $inc: { availableBalance: -amount } },
+      { new: true },
+    );
+    if (!reserved) {
+      const balance = await VendorBalance.findOne({ vendor: userId });
+      return res.status(400).json({ message: `Insufficient available balance. Available: ${Number(balance?.availableBalance || 0).toLocaleString("en-RW")} RWF.` });
     }
 
-    // 1. Deduct from available balance & credit lifetime withdrawn amount immediately
-    balance.availableBalance -= amount;
-    balance.withdrawnAmount = (balance.withdrawnAmount || 0) + amount;
-    await balance.save();
-
-    // 2. Automatically create and complete payout record
-    const payout = await Payout.create({
-      vendor: userId,
-      payoutNumber: generatePayoutNumber(),
-      amount,
-      payoutMethod: determinedMethod,
-      payoutDetails,
-      status: "PAID", // Auto-approved and marked as PAID instantly
-      processedAt: new Date(),
-    });
-
-    // Note: Gateway disbursement API (e.g. Paystack Transfer / MoMo API call) triggers here seamlessly
+    let payout;
+    try {
+      payout = await Payout.create({
+        vendor: userId,
+        payoutNumber: generatePayoutNumber(),
+        amount,
+        payoutMethod: method,
+        payoutDetails: details,
+        status: "PENDING",
+      });
+    } catch (err) {
+      await VendorBalance.updateOne({ vendor: userId }, { $inc: { availableBalance: amount } });
+      throw err;
+    }
 
     return res.status(201).json({
-      message: `Instant payout of ${amount} RWF disbursed to ${payoutDetails.bankName} (${phoneInfo.localNumber}).`,
+      message: `Payout request of ${amount.toLocaleString("en-RW")} RWF received. MVEC sends it to ${details.bankName} (${phoneInfo.localNumber}), usually within 1 business day.`,
       payout,
-      updatedBalance: {
-        availableBalance: balance.availableBalance,
-        withdrawnAmount: balance.withdrawnAmount,
-      },
+      updatedBalance: { availableBalance: reserved.availableBalance },
     });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Cancel a payout request that hasn't been processed yet
+// @route   POST /api/payouts/:id/cancel
+// @access  Private (Vendor)
+exports.cancelPayout = async (req, res) => {
+  try {
+    const userId = req.user.id || req.user._id;
+    const payout = await Payout.findOneAndUpdate(
+      { _id: req.params.id, vendor: userId, status: "PENDING" },
+      { $set: { status: "CANCELLED", rejectionReason: "Cancelled by the seller", processedAt: new Date() } },
+      { new: true },
+    );
+    if (!payout) return res.status(400).json({ message: "Only pending payout requests can be cancelled." });
+    await VendorBalance.updateOne({ vendor: userId }, { $inc: { availableBalance: Number(payout.amount) } });
+    return res.status(200).json({ message: "Payout request cancelled. The amount is back in your available balance.", payout });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Seller statement: sales, payouts, charges and dispute releases
+// @route   GET /api/payouts/statement?from=YYYY-MM-DD&to=YYYY-MM-DD
+// @access  Private (Vendor)
+exports.getStatement = async (req, res) => {
+  try {
+    const userId = req.user.id || req.user._id;
+    const entries = await sellerFinance.statement(userId, { from: req.query.from, to: req.query.to });
+    const totals = {
+      released: entries.filter((e) => e.type === "SALE" && e.state === "RELEASED").reduce((t, e) => t + e.net, 0),
+      commission: entries.filter((e) => e.type === "SALE" && ["RELEASED", "ARBITRATED"].includes(e.state)).reduce((t, e) => t + e.commission, 0),
+      paidOut: entries.filter((e) => e.type === "PAYOUT" && e.state === "PAID").reduce((t, e) => t - e.net, 0),
+      charges: entries.filter((e) => !["SALE", "PAYOUT", "DISPUTE_RELEASE"].includes(e.type) && e.state === "CHARGED").reduce((t, e) => t - e.net, 0),
+    };
+    return res.status(200).json({ entries, totals });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }

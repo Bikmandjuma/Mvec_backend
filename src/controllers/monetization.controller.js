@@ -3,6 +3,12 @@ const Subscription = require("../models/Subscription");
 const BuyerSubscription = require("../models/BuyerSubscription");
 const Advertisement = require("../models/Advertisement");
 const Vendor = require("../models/Vendor");
+const SellerCharge = require("../models/SellerCharge");
+const { VendorBalance } = require("../models/Payout");
+const subscriptionBilling = require("../services/subscriptionBilling.service");
+const advertising = require("../services/advertising.service");
+const sellerFinance = require("../services/sellerFinance.service");
+const Product = require("../models/Product");
 
 // ─── DISPLAY / DICTIONARY HELPERS ────────────────────────────────────────────
 // All mapping constants keep the backend "friendly" values in sync with the
@@ -29,7 +35,7 @@ const AD_PLACEMENT_LOOKUP = Object.fromEntries(
 );
 
 const AD_STATUS_LABEL = {
-  PENDING: "Scheduled",
+  PENDING: "In review",
   ACTIVE: "Active",
   PAUSED: "Paused",
   REJECTED: "Rejected",
@@ -78,6 +84,9 @@ const mapSubscription = (sub, holder = "") => ({
         ? "Monthly"
         : "Free",
   renewal: sub ? fmtDate(sub.renewalDate) : "—",
+  renewalDate: sub?.renewalDate || null,
+  startDate: sub?.startDate || null,
+  autoRenew: sub ? sub.autoRenew !== false : false,
   status: sub
     ? SUB_STATUS_LABEL[sub.status] || "Active"
     : "Available",
@@ -146,6 +155,14 @@ const mapAdvertisement = (ad) => ({
   endDate: ad.endDate ? fmtDate(ad.endDate) : "—",
   clicks: ad.clicks,
   impressions: ad.impressions,
+  spent: Number(ad.spent || 0),
+  refunded: Number(ad.refunded || 0),
+  remaining: advertising.remaining(ad),
+  costPerClick: advertising.COST_PER_CLICK,
+  rejectionReason: ad.rejectionReason || "",
+  placementKey: ad.placement,
+  startDateRaw: ad.startDate,
+  endDateRaw: ad.endDate,
   ctr: ad.impressions
     ? `${((ad.clicks / ad.impressions) * 100).toFixed(1)}%`
     : "—",
@@ -170,10 +187,16 @@ exports.getVendorSubscription = async (req, res) => {
     }
 
     const subscription = await Subscription.findOne({ vendor: req.user.id });
+    const [balance, charges] = await Promise.all([
+      VendorBalance.findOne({ vendor: req.user.id }),
+      SellerCharge.find({ vendor: req.user.id, type: "SUBSCRIPTION" }).sort({ createdAt: -1 }).limit(24),
+    ]);
 
     return res.status(200).json({
       subscription: subscription ? mapSubscription(subscription, vendor.businessName) : null,
       tiers: buildTierRows(subscription, vendor.businessName),
+      availableBalance: Number(balance?.availableBalance || 0),
+      charges,
     });
   } catch (error) {
     return res.status(500).json({ message: error.message });
@@ -192,45 +215,21 @@ exports.upgradeVendorSubscription = async (req, res) => {
         .json({ message: "Vendor profile not found. Please complete onboarding." });
     }
 
+    // Premium is paid from the seller's available balance; "FREE" stops auto-renew.
     const plan = normalizePlan(req.body.plan);
-    let subscription = await Subscription.findOne({ vendor: req.user.id });
+    const { sub: subscription, message } = plan === "PREMIUM"
+      ? await subscriptionBilling.startPremium(req.user.id)
+      : await subscriptionBilling.cancelPremium(req.user.id);
 
-    if (plan === "PREMIUM") {
-      const tier = SUBSCRIPTION_TIERS.find((t) => t.key === "PREMIUM");
-      if (!subscription) {
-        subscription = new Subscription({ vendor: req.user.id });
-      }
-      subscription.plan = "PREMIUM";
-      subscription.status = "ACTIVE";
-      subscription.price = tier.price;
-      subscription.billingCycle = "MONTHLY";
-      subscription.autoRenew = req.body.autoRenew !== false;
-      if (!subscription.startDate) subscription.startDate = new Date();
-      subscription.renewalDate = new Date(
-        subscription.startDate.getTime() + 30 * 24 * 60 * 60 * 1000
-      );
-      await subscription.save();
-    } else {
-      if (subscription) {
-        subscription.plan = "FREE";
-        subscription.status = "ACTIVE";
-        subscription.price = 0;
-        subscription.billingCycle = "FREE";
-        subscription.renewalDate = null;
-        await subscription.save();
-      }
-    }
-
+    const balance = await VendorBalance.findOne({ vendor: req.user.id });
     return res.status(200).json({
-      message:
-        plan === "PREMIUM"
-          ? "Vendor Premium activated successfully."
-          : "Downgraded to the Free plan.",
-      subscription: mapSubscription(subscription, vendor.businessName),
+      message,
+      subscription: subscription ? mapSubscription(subscription, vendor.businessName) : null,
       tiers: buildTierRows(subscription, vendor.businessName),
+      availableBalance: Number(balance?.availableBalance || 0),
     });
   } catch (error) {
-    return res.status(500).json({ message: error.message });
+    return res.status(error.status || 500).json({ message: error.message });
   }
 };
 
@@ -373,7 +372,7 @@ exports.getMyAdvertisements = async (req, res) => {
   }
 };
 
-// @desc    Submit an ad placement campaign
+// @desc    Submit an ad campaign; the budget is paid from the seller balance
 // @route   POST /api/vendor/advertisements
 // @access  Private (vendor)
 exports.createAdvertisement = async (req, res) => {
@@ -385,67 +384,128 @@ exports.createAdvertisement = async (req, res) => {
         .json({ message: "Vendor profile not found. Please complete onboarding." });
     }
 
-    const { product, placement, budget, startDate, endDate, productId } = req.body;
-
-    if (!product) {
-      return res.status(400).json({ message: "product is required" });
+    const { placement, startDate, endDate, productId } = req.body;
+    const budget = Number(req.body.budget);
+    if (!productId || !mongoose.isValidObjectId(productId)) {
+      return res.status(400).json({ message: "Choose one of your products to advertise." });
     }
-    if (budget === undefined || budget === null || Number(budget) < 0) {
-      return res.status(400).json({ message: "budget is required and must be positive" });
+    const product = await Product.findOne({ _id: productId, vendor: req.user.id });
+    if (!product) return res.status(400).json({ message: "You can only advertise your own products." });
+    if (product.status !== "ACTIVE" || !(product.stockQuantity > 0)) {
+      return res.status(400).json({ message: `${product.name} must be active and in stock to advertise.` });
+    }
+    if (!Number.isInteger(budget) || budget < advertising.MIN_BUDGET) {
+      return res.status(400).json({ message: `The minimum budget is ${advertising.MIN_BUDGET.toLocaleString("en-RW")} RWF (whole RWF).` });
+    }
+    const start = startDate ? new Date(startDate) : new Date();
+    if (endDate && new Date(endDate) < start) {
+      return res.status(400).json({ message: "The end date must be on or after the start date." });
+    }
+    if (endDate && new Date(endDate) < new Date(new Date().toDateString())) {
+      return res.status(400).json({ message: "The end date can't be in the past." });
     }
 
-    const ad = await Advertisement.create({
+    const ad = new Advertisement({
       vendor: vendor._id,
-      product: String(product).trim(),
-      productId: productId || null,
+      product: product.name,
+      productId: product._id,
       placement: normalizePlacement(placement),
-      budget: Number(budget),
-      startDate: startDate || new Date(),
+      budget,
+      startDate: start,
       endDate: endDate || null,
       status: "PENDING", // awaits MVEC admin approval
     });
+    await ad.validate();
+    // Make sure the publicId exists before charging against it.
+    if (!ad.publicId) ad.publicId = `MVEC-AD-${require("crypto").randomBytes(4).toString("hex").toUpperCase()}`;
+
+    const charged = await sellerFinance.chargeBalance(req.user.id, budget, {
+      type: "ADVERTISING", reference: ad.publicId, description: `Ad budget · ${product.name} · ${AD_PLACEMENTS[ad.placement]}`,
+    });
+    if (!charged) {
+      const balance = await VendorBalance.findOne({ vendor: req.user.id });
+      return res.status(402).json({
+        message: `The ${budget.toLocaleString("en-RW")} RWF budget is paid from your available balance (${Math.round(balance?.availableBalance || 0).toLocaleString("en-RW")} RWF). Lower the budget or wait for more sales to be released.`,
+      });
+    }
+    try {
+      await ad.save();
+    } catch (err) {
+      await sellerFinance.creditBalance(req.user.id, budget, { type: "ADVERTISING", reference: ad.publicId, description: "Ad budget refunded (campaign not created)" });
+      throw err;
+    }
 
     return res.status(201).json({
-      message: "Advertisement campaign submitted for review.",
+      message: `Campaign submitted. ${budget.toLocaleString("en-RW")} RWF was reserved from your balance; anything not spent on clicks comes back to you.`,
       advertisement: mapAdvertisement(ad),
+      availableBalance: Number(charged.availableBalance || 0),
     });
   } catch (error) {
     return res.status(400).json({ message: error.message });
   }
 };
 
-// @desc    Vendor pauses / reactivates one of their own campaigns
+const findOwnAd = async (req) => {
+  const vendor = await resolveVendor(req.user.id);
+  if (!vendor) return null;
+  const adId = req.params.id;
+  return Advertisement.findOne({
+    ...(mongoose.isValidObjectId(adId) ? { _id: adId } : { publicId: adId }),
+    vendor: vendor._id,
+  });
+};
+
+// @desc    Vendor pauses / resumes a live campaign
 // @route   PATCH /api/vendor/advertisements/:id/status
 // @access  Private (vendor)
 exports.updateMyAdvertisementStatus = async (req, res) => {
   try {
-    const vendor = await resolveVendor(req.user.id);
-    if (!vendor) {
-      return res
-        .status(404)
-        .json({ message: "Vendor profile not found. Please complete onboarding." });
-    }
-
     const { status } = req.body;
     if (!["ACTIVE", "PAUSED"].includes(status)) {
       return res.status(400).json({ message: "status must be ACTIVE or PAUSED" });
     }
+    const ad = await findOwnAd(req);
+    if (!ad) return res.status(404).json({ message: "Advertisement campaign not found" });
 
-    // The list endpoint exposes publicId as `id`, so accept either identifier.
-    const adId = req.params.id;
-    const ad = await Advertisement.findOne({
-      ...(mongoose.isValidObjectId(adId) ? { _id: adId } : { publicId: adId }),
-      vendor: vendor._id,
-    });
-    if (!ad) {
-      return res.status(404).json({ message: "Advertisement campaign not found" });
+    // Only approved campaigns can be paused or resumed; review stays with MVEC.
+    const from = status === "PAUSED" ? "ACTIVE" : "PAUSED";
+    if (ad.status === status) {
+      return res.status(400).json({ message: status === "ACTIVE" ? "This campaign is already live." : "This campaign is already paused." });
+    }
+    if (ad.status !== from) {
+      return res.status(400).json({
+        message: ad.status === "PENDING" ? "This campaign is still being reviewed by MVEC." : `A ${AD_STATUS_LABEL[ad.status].toLowerCase()} campaign can't be ${status === "PAUSED" ? "paused" : "resumed"}.`,
+      });
+    }
+    if (status === "ACTIVE" && ad.endDate && new Date(ad.endDate) < new Date(new Date().toDateString())) {
+      return res.status(400).json({ message: "This campaign's end date has passed." });
     }
 
     ad.status = status;
     await ad.save();
 
     return res.status(200).json({
-      message: `Campaign ${status === "PAUSED" ? "paused" : "activated"}.`,
+      message: `Campaign ${status === "PAUSED" ? "paused" : "resumed"}.`,
+      advertisement: mapAdvertisement(ad),
+    });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Vendor ends a campaign (or withdraws one in review); unspent budget is returned
+// @route   POST /api/vendor/advertisements/:id/end
+// @access  Private (vendor)
+exports.endMyAdvertisement = async (req, res) => {
+  try {
+    const ad = await findOwnAd(req);
+    if (!ad) return res.status(404).json({ message: "Advertisement campaign not found" });
+    if (!["PENDING", "ACTIVE", "PAUSED"].includes(ad.status)) {
+      return res.status(400).json({ message: "This campaign has already ended." });
+    }
+    const returned = await advertising.finish(ad, "COMPLETED", { notify: false });
+    return res.status(200).json({
+      message: `Campaign ended. ${Math.round(returned).toLocaleString("en-RW")} RWF is back in your balance.`,
       advertisement: mapAdvertisement(ad),
     });
   } catch (error) {
@@ -568,18 +628,37 @@ exports.adminListAdvertisements = async (req, res) => {
 // @access  Private (super_admin)
 exports.adminUpdateAdvertisementStatus = async (req, res) => {
   try {
-    const { status } = req.body;
+    const { status, reason } = req.body;
     if (!["ACTIVE", "PAUSED", "REJECTED", "COMPLETED"].includes(status)) {
       return res.status(400).json({ message: "Invalid advertisement status" });
     }
 
-    const ad = await Advertisement.findById(req.params.id);
+    // The list exposes publicId as `id`; accept either identifier.
+    const adId = req.params.id;
+    const ad = await Advertisement.findOne(mongoose.isValidObjectId(adId) ? { _id: adId } : { publicId: adId });
     if (!ad) {
       return res.status(404).json({ message: "Advertisement campaign not found" });
     }
 
-    ad.status = status;
-    await ad.save();
+    const allowedFrom = { ACTIVE: ["PENDING", "PAUSED"], PAUSED: ["ACTIVE"], REJECTED: ["PENDING"], COMPLETED: ["ACTIVE", "PAUSED", "PENDING"] }[status];
+    if (!allowedFrom.includes(ad.status)) {
+      return res.status(400).json({ message: `A ${AD_STATUS_LABEL[ad.status].toLowerCase()} campaign can't be marked ${AD_STATUS_LABEL[status].toLowerCase()}.` });
+    }
+
+    if (status === "REJECTED" || status === "COMPLETED") {
+      if (status === "REJECTED" && !String(reason || "").trim()) {
+        return res.status(400).json({ message: "Give the seller a reason for rejecting the campaign." });
+      }
+      await advertising.finish(ad, status, { reason: String(reason || "").trim() });
+    } else {
+      const wasPending = ad.status === "PENDING";
+      ad.status = status;
+      await ad.save();
+      if (wasPending) {
+        const user = await advertising.sellerUserOf(ad);
+        if (user) await sellerFinance.notify(user, "Ad campaign approved", `Your campaign for ${ad.product} is live. Each buyer click costs ${advertising.COST_PER_CLICK} RWF from its budget.`, ad.publicId, "SYSTEM");
+      }
+    }
 
     return res.status(200).json({
       message: `Campaign marked ${AD_STATUS_LABEL[status] || status.toLowerCase()}.`,

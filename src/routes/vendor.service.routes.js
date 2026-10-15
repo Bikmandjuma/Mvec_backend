@@ -6,6 +6,7 @@ const {
   getMyAdvertisements,
   createAdvertisement,
   updateMyAdvertisementStatus,
+  endMyAdvertisement,
 } = require("../controllers/monetization.controller");
 const { protect, authorize } = require("../middleware/auth.middleware");
 
@@ -20,5 +21,6 @@ router.post("/subscription", upgradeVendorSubscription);          // POST /api/v
 router.get("/advertisements", getMyAdvertisements);               // GET  /api/vendor/advertisements
 router.post("/advertisements", createAdvertisement);              // POST /api/vendor/advertisements
 router.patch("/advertisements/:id/status", updateMyAdvertisementStatus); // PATCH /api/vendor/advertisements/:id/status
+router.post("/advertisements/:id/end", endMyAdvertisement);             // POST  /api/vendor/advertisements/:id/end
 
 module.exports = router;

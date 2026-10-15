@@ -25,7 +25,7 @@ const staffSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      enum: ["STORE_MANAGER", "ORDER_MANAGER", "CATALOG_MANAGER"],
+      enum: ["STORE_MANAGER", "ORDER_MANAGER", "CATALOG_MANAGER", "MARKETING_MANAGER", "FINANCE_MANAGER"],
       default: "ORDER_MANAGER",
     },
     permissions: {
@@ -36,7 +36,9 @@ const staffSchema = new mongoose.Schema(
       canManageStaff: { type: Boolean, default: false },
       canViewAnalytics: { type: Boolean, default: false },
       canManageSettings: { type: Boolean, default: false },
+      canManageMarketing: { type: Boolean, default: false },
     },
+    lastActiveAt: { type: Date, default: null },
     vendor_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Store",

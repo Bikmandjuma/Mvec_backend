@@ -560,7 +560,7 @@ describe("Order Controller Unit Tests", () => {
 
   // ─── 5. updateVendorOrderStatus ────────────────────────────────────────────
   describe("updateVendorOrderStatus()", () => {
-    it("should update order status and trigger payout release when marked DELIVERED", async () => {
+    it("should let the seller deliver a manual order they collected payment for, and release earnings", async () => {
       const vendorId = new mongoose.Types.ObjectId();
       const orderId = new mongoose.Types.ObjectId().toString();
 
@@ -579,6 +579,8 @@ describe("Order Controller Unit Tests", () => {
         _id: orderId,
         orderStatus: "SHIPPED",
         paymentStatus: "PAID",
+        source: "MANUAL",
+        paidOffline: true,
         items: [{ vendor: vendorId }],
         save: async function () {
           return this;
@@ -610,6 +612,43 @@ describe("Order Controller Unit Tests", () => {
         payoutController.releaseOrderEarnings = originalRelease;
         Order.findById = originalFindById;
       }
+    });
+
+    const sellerUpdate = async (order, body) => {
+      const vendorId = order.items[0].vendor;
+      const originalFindById = Order.findById;
+      Order.findById = async () => order;
+      try {
+        const { req, res } = createMockReqRes({ user: { id: vendorId.toString(), role: "vendor" }, body: { orderId: order._id, ...body } });
+        await orderController.updateVendorOrderStatus(req, res);
+        return res;
+      } finally {
+        Order.findById = originalFindById;
+      }
+    };
+    const onlineOrder = (status) => ({
+      _id: new mongoose.Types.ObjectId().toString(), orderStatus: status, paymentStatus: "PAID", source: "ONLINE",
+      items: [{ vendor: new mongoose.Types.ObjectId() }], save: async function () { return this; },
+    });
+
+    it("should block a seller from marking an MVEC-paid order DELIVERED (needs the buyer's OTP)", async () => {
+      const order = onlineOrder("SHIPPED");
+      const res = await sellerUpdate(order, { status: "DELIVERED" });
+      assert.equal(res.statusCode, 400);
+      assert.equal(order.orderStatus, "SHIPPED");
+    });
+
+    it("should block a seller from changing payment status on an online order", async () => {
+      const order = { ...onlineOrder("PROCESSING"), paymentStatus: "PENDING" };
+      const res = await sellerUpdate(order, { paymentStatus: "PAID" });
+      assert.equal(res.statusCode, 403);
+      assert.equal(order.paymentStatus, "PENDING");
+    });
+
+    it("should block skipping steps (PENDING -> SHIPPED)", async () => {
+      const order = onlineOrder("PENDING");
+      const res = await sellerUpdate(order, { status: "SHIPPED" });
+      assert.equal(res.statusCode, 400);
     });
 
     it("should reject invalid order status with 400", async () => {

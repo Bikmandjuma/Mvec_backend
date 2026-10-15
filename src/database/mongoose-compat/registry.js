@@ -27,7 +27,7 @@ const LEGACY = {
       Fullname: F("string"), email: F("string"), password: F("string"), gender: F("string"), phone: F("string"),
       googleId: F("string"), email_verified: F("bool"), role: F("string"), isSellerEnabled: F("bool"), status: F("string"),
       companyName: F("string"), resetPasswordToken: F("string"), resetPasswordExpires: F("date"), isVendorStaff: F("bool"),
-      lastPasswordChangeAt: F("date"),
+      lastPasswordChangeAt: F("date"), avatarUrl: F("string"), preferences: F("json"), tokensValidAfter: F("date"),
     },
     hidden: ["isVendorStaff"],
     children: {
@@ -70,9 +70,10 @@ const LEGACY = {
     fields: {
       store: F("ref", "storeId", "Store"), vendorOwner: F("ref", "vendorOwnerId", "User"), user: F("ref", "userId", "User"),
       role: F("string"),
-      ...Object.fromEntries(["canViewDashboard", "canManageProducts", "canManageOrders", "canManagePayouts", "canManageStaff", "canViewAnalytics", "canManageSettings"]
+      ...Object.fromEntries(["canViewDashboard", "canManageProducts", "canManageOrders", "canManagePayouts", "canManageStaff", "canViewAnalytics", "canManageSettings", "canManageMarketing"]
         .map((p) => [`permissions.${p}`, F("bool", p)])),
       status: F("string"),
+      lastActiveAt: F("date"),
       // Legacy alias fields kept in sync by the Mongoose pre-save hook.
       vendor_id: { ...F("ref", "storeId", "Store"), alias: true },
       user_id: { ...F("ref", "userId", "User"), alias: true },

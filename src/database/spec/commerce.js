@@ -87,6 +87,11 @@ module.exports = [
       paymentReference: str({ len: 120 }),
       affiliateCode: str({ len: 60 }),
       affiliateUser: ref("users"),
+      "coupon.code": str({ len: 60 }),
+      "coupon.promotion": ref("promotions", { fk: false, index: true }),
+      "coupon.vendor": ref("users", { fk: false }),
+      "coupon.type": str({ len: 20 }),
+      discountAmount: money({ required: true, default: 0 }),
       status: str({ len: 30 }), // legacy top-level status set by payment reconciliation
     },
     children: {
@@ -100,6 +105,7 @@ module.exports = [
           price: money({ required: true }),
           quantity: int({ required: true }),
           image: str({ len: 1000 }),
+          discount: money({ required: true, default: 0 }),
         },
       },
       shippingBreakdown: {
@@ -112,6 +118,7 @@ module.exports = [
           zoneName: str({ len: 150 }),
           method: str({ len: 20 }),
           fee: money({ required: true, default: 0 }),
+          originalFee: money(),
           eta: str({ len: 60 }),
         },
       },
@@ -239,7 +246,7 @@ module.exports = [
       amount: money({ required: true }),
       payoutMethod: en(["MOMO", "AIRTEL"], { default: "MOMO" }),
       ...accountDetails("payoutDetails"),
-      status: en(PAYOUT_STATUS, { default: "PENDING", required: true, index: true }),
+      status: en([...PAYOUT_STATUS, "CANCELLED"], { default: "PENDING", required: true, index: true }),
       transferReference: str({ len: 120 }),
       rejectionReason: str({ len: 500 }),
       processedAt: date(),

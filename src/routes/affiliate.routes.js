@@ -3,6 +3,9 @@ const router = express.Router();
 const affiliateController = require("../controllers/affiliate.controller");
 const { protect, authorize } = require("../middleware/auth.middleware");
 
+// Seller view: affiliate-referred sales of their products.
+router.get("/vendor/summary", protect, authorize("vendor"), require("../controllers/vendorAffiliate.controller").getVendorAffiliateSummary);
+
 // Affiliate dashboard (wallet, links, aggregates, own payouts)
 router.get("/me/dashboard", protect, affiliateController.getMyDashboard);
 

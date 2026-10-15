@@ -25,6 +25,8 @@ const orderItemSchema = new mongoose.Schema({
   price: { type: Number, required: true },
   quantity: { type: Number, required: true },
   image: { type: String },
+  // Coupon discount on this line (RWF), paid by the seller.
+  discount: { type: Number, default: 0 },
 });
 
 const orderSchema = new mongoose.Schema(
@@ -79,6 +81,7 @@ const orderSchema = new mongoose.Schema(
         zoneName: String,
         method: String,
         fee: { type: Number, default: 0 },
+        originalFee: Number, // before a free-shipping coupon
         eta: String,
       },
     ],
@@ -133,6 +136,14 @@ const orderSchema = new mongoose.Schema(
     paymentReference: String,
     affiliateCode: { type: String, default: null },
     affiliateUser: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    // Seller coupon applied at checkout; discountAmount = item + delivery discount.
+    coupon: {
+      code: String,
+      promotion: { type: mongoose.Schema.Types.ObjectId, ref: "Promotion" },
+      vendor: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+      type: { type: String },
+    },
+    discountAmount: { type: Number, default: 0 },
   },
   { timestamps: true },
 );

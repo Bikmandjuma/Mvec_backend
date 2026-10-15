@@ -59,7 +59,7 @@ const payoutSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["PENDING", "PROCESSING", "PAID", "REJECTED", "FAILED"],
+      enum: ["PENDING", "PROCESSING", "PAID", "REJECTED", "FAILED", "CANCELLED"],
       default: "PENDING",
     },
     transferReference: String, // Gateway transfer reference ID

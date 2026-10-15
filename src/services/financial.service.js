@@ -255,7 +255,8 @@ exports.releaseEscrowToVendor = async ({ settlementId, session, adminUserId = nu
         description: `Platform commission deducted for settlement ${settlement.settlementReference}`,
       },
     ],
-    { session }
+    // Several documents in one transactional create() need ordered:true (Mongoose 9).
+    { session, ordered: true }
   );
 
   await VendorWallet.findOneAndUpdate(
