@@ -1,5 +1,6 @@
 const disputeService = require("../services/dispute.service");
 const Dispute = require("../models/Dispute");
+const Order = require("../models/Order");
 const socketService = require("../services/socket.service");
 
 const DISPUTE_POPULATE = [
@@ -29,8 +30,13 @@ exports.adminListDisputes = async (req, res) => {
 exports.listMyDisputes = async (req, res) => {
   try {
     const userId = req.user.id;
+    // Sellers also see cases on orders they share with another seller.
+    const disputedOrders = await Dispute.distinct("order", { vendor: { $ne: userId } });
+    const sharedOrders = disputedOrders.length
+      ? (await Order.find({ _id: { $in: disputedOrders }, "items.vendor": userId }).select("_id")).map((o) => o._id)
+      : [];
     const disputes = await Dispute.find({
-      $or: [{ raisedBy: userId }, { vendor: userId }],
+      $or: [{ raisedBy: userId }, { vendor: userId }, ...(sharedOrders.length ? [{ order: { $in: sharedOrders } }] : [])],
     })
       .sort({ createdAt: -1 })
       .populate(DISPUTE_POPULATE);

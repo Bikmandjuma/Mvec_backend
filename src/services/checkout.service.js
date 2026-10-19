@@ -20,12 +20,37 @@ const clean = (value, max = 200) => (typeof value === "string" ? value.trim().sl
 const generateOrderNumber = () => `ORD-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
 const generateDeliveryOtp = () => Math.floor(100000 + Math.random() * 900000).toString();
 
+// Name and phone of the person receiving (or collecting) the order.
+function parseRecipient(recipient = {}, role = "receiving the order") {
+  const name = clean(recipient.name, 120);
+  if (name.length < 2) throw httpError(400, `Enter the name of the person ${role}.`);
+  const phone = normalizePhone(recipient.phone);
+  if (!phone) throw httpError(400, "Enter a valid Rwandan phone number, for example 0788 123 456.");
+  const email = clean(recipient.email, 160).toLowerCase();
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw httpError(400, "Enter a valid email address or leave it empty.");
+  return { name, phone, email: email || undefined };
+}
+
 /**
  * Validate and normalise the delivery details sent by the checkout form.
  * Accepts the current shape ({ street, district, sector, province }) and the
  * legacy one ({ street, city, state }) so older clients keep working.
  */
 function parseDelivery({ shippingAddress = {}, recipient = {}, deliveryMethod, shippingMethod }) {
+  const requested = String(shippingMethod || deliveryMethod || "standard").toLowerCase();
+  const method = DELIVERY_METHODS[requested] ? requested : "standard";
+  const contact = parseRecipient(recipient, "collecting the order");
+
+  // Pickup: the buyer collects from the store, so no delivery address.
+  if (method === "pickup") {
+    return {
+      shippingAddress: { street: "Store pickup", city: "Pickup", country: "Rwanda" },
+      recipient: contact,
+      deliveryMethod: method,
+      shippingMethod: DELIVERY_METHODS[method],
+    };
+  }
+
   const street = clean(shippingAddress.street || shippingAddress.address);
   const districtInput = clean(shippingAddress.district || shippingAddress.city, 80);
   const sector = clean(shippingAddress.sector, 80);
@@ -39,16 +64,6 @@ function parseDelivery({ shippingAddress = {}, recipient = {}, deliveryMethod, s
   const district = (RWANDA_LOCATIONS[province] || []).find((d) => d.toLowerCase() === districtInput.toLowerCase());
   if (!district) throw httpError(400, `${districtInput} is not a district of ${province}. Choose your district from the list.`);
 
-  const requested = String(shippingMethod || deliveryMethod || "standard").toLowerCase();
-  const method = DELIVERY_METHODS[requested] ? requested : "standard";
-
-  const name = clean(recipient.name, 120);
-  if (name.length < 2) throw httpError(400, "Enter the name of the person receiving the order.");
-  const phone = normalizePhone(recipient.phone);
-  if (!phone) throw httpError(400, "Enter a valid Rwandan phone number for delivery, for example 0788 123 456.");
-  const email = clean(recipient.email, 160).toLowerCase();
-  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw httpError(400, "Enter a valid email address or leave it empty.");
-
   return {
     shippingAddress: {
       street,
@@ -60,7 +75,7 @@ function parseDelivery({ shippingAddress = {}, recipient = {}, deliveryMethod, s
       country: "Rwanda",
       postalCode: clean(shippingAddress.postalCode, 20) || undefined,
     },
-    recipient: { name, phone, email: email || undefined },
+    recipient: contact,
     deliveryMethod: method,
     shippingMethod: DELIVERY_METHODS[method],
   };
@@ -131,9 +146,25 @@ async function reserveStock(lines) {
  * Create a PENDING order for a buyer from product lines. Prices, shipping and
  * totals are computed here, never trusted from the client.
  */
+// Guest buyers (phone verified, no account password) get tighter limits:
+// unpaid orders hold stock, so a guest can only have a few waiting at once,
+// and one order can't exceed a set value. Both are configurable.
+const GUEST_MAX_UNPAID_ORDERS = Number(process.env.GUEST_MAX_UNPAID_ORDERS || 2);
+const GUEST_MAX_ORDER_AMOUNT = Number(process.env.GUEST_MAX_ORDER_AMOUNT || 2000000);
+
 async function createOrder({ userId, lines: rawLines, delivery, paymentMethod, visitorId, couponCode }) {
   const parsed = parseDelivery(delivery);
   const lines = normaliseLines(rawLines);
+
+  const User = require("../models/User");
+  const buyer = await User.findById(userId).select("isGuest");
+  const isGuest = Boolean(buyer?.isGuest);
+  if (isGuest) {
+    const waiting = await Order.countDocuments({ user: userId, paymentStatus: "PENDING", orderStatus: "PENDING" });
+    if (waiting >= GUEST_MAX_UNPAID_ORDERS) {
+      throw httpError(429, "You already have orders waiting for payment. Pay for them or cancel them in My orders before placing another.");
+    }
+  }
 
   const products = await Product.find({ _id: { $in: lines.map((l) => l.productId) } });
   const byId = new Map(products.map((p) => [p._id.toString(), p]));
@@ -207,6 +238,10 @@ async function createOrder({ userId, lines: rawLines, delivery, paymentMethod, v
     productIds: orderItems.map((i) => i.product),
   });
   orderItems.forEach((i) => affiliateAttribution.applyAttribution(i, attributions.get(String(i.product))));
+
+  if (isGuest && subtotal - itemDiscount + shippingFee > GUEST_MAX_ORDER_AMOUNT) {
+    throw httpError(400, `Guest orders are limited to RWF ${GUEST_MAX_ORDER_AMOUNT.toLocaleString("en-US")}. Create an account with a password to place a larger order.`);
+  }
 
   const stockLines = orderItems.map((i) => ({ product: i.product, quantity: i.quantity, name: i.name }));
   await reserveStock(stockLines);

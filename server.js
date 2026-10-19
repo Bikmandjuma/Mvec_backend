@@ -122,7 +122,6 @@ app.get("/api/events", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
-  res.setHeader("Access-Control-Allow-Origin", "*")
   res.flushHeaders?.();
 
   // Send initial connection event
@@ -187,6 +186,15 @@ const HOST = process.env.HOST || "0.0.0.0";
 
 const httpServer = http.createServer(app);
 socketService.init(httpServer);
+
+// Tokens signed with a short or example secret can be forged by anyone who
+// has read .env.example, so production refuses to start with one.
+const weakJwtSecret = (secret) =>
+  !secret || secret.length < 32 || /your_jwt_secret|change_me|secret_key_here/i.test(secret);
+if (isMain && isProduction && weakJwtSecret(process.env.JWT_SECRET)) {
+  console.error("\n[config] JWT_SECRET is missing, too short, or still the example value. Set a random secret of at least 32 characters.\n");
+  process.exit(1);
+}
 
 if (isMain) {
   connectDatabase()

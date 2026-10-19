@@ -1,12 +1,16 @@
 const express = require("express");
 const router = express.Router();
 const vendor = require("../controllers/vendor.controller");
-const { protect, authorize } = require("../middleware/auth.middleware");
+const { protect, authorize, optionalProtect } = require("../middleware/auth.middleware");
 const { checkStaffPermission } = require("../middleware/staff.middleware");
 
 // ─── PUBLIC ROUTES ──────────────────────────────────────────────────────────
 router.get("/", vendor.getVendors);                    // GET /api/vendors?q=&location=&page=
-router.get("/:idOrSlug", vendor.getVendorByIdOrSlug);  // GET /api/vendors/:idOrSlug
+router.get("/:idOrSlug", optionalProtect, vendor.getVendorByIdOrSlug);  // GET /api/vendors/:idOrSlug
+
+// ─── PRIVATE: FOLLOWING A STORE ─────────────────────────────────────────────
+router.post("/:id/follow", protect, vendor.followVendor);
+router.delete("/:id/follow", protect, vendor.unfollowVendor);
 
 // ─── PRIVATE: VENDOR'S OWN PROFILE ──────────────────────────────────────────
 router.post("/become-seller", protect, authorize("super_admin"), vendor.becomeSeller);

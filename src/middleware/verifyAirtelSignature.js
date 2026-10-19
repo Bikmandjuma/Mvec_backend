@@ -1,24 +1,15 @@
-// middlewares/verifyAirtelSignature.js
-const crypto = require("crypto");
+// Verifies Airtel Money callbacks (HMAC-SHA256 of the raw body, hex) with
+// AIRTEL_WEBHOOK_SECRET before the controller touches any order.
+const { checkWebhook, hmacMatches } = require("../utils/webhookAuth");
 
 module.exports = (req, res, next) => {
-  if (process.env.NODE_ENV !== "production") return next();
-
-  const signature = req.headers["x-airtel-signature"];
-  const secretKey = process.env.AIRTEL_SECRET_KEY;
-
-  if (!signature) {
-    return res.status(401).json({ message: "Missing Airtel signature header." });
-  }
-
-  const expectedSignature = crypto
-    .createHmac("sha256", secretKey)
-    .update(JSON.stringify(req.body))
-    .digest("hex");
-
-  if (signature !== expectedSignature) {
-    return res.status(403).json({ message: "Invalid webhook signature." });
-  }
-
-  next();
+  const signature = req.headers["x-airtel-signature"] || req.headers["x-signature"];
+  const failure = checkWebhook({
+    provider: "Airtel",
+    secret: process.env.AIRTEL_WEBHOOK_SECRET,
+    signature,
+    verify: (sig, secret) => hmacMatches(req, sig, secret),
+  });
+  if (failure) return res.status(failure.status).json({ message: failure.message });
+  return next();
 };

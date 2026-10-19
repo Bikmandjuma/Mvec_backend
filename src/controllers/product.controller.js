@@ -90,7 +90,9 @@ exports.getAllProducts = async (req, res) => {
     const page = parseInt(req.query.page, 10);
     const limit = parseInt(req.query.limit, 10);
 
+    // Cost prices are the seller's private margins; never on public routes.
     let cursor = Product.find(query)
+      .select("-costPrice")
       .populate("vendor", "Fullname companyName")
       .populate("category", "name slug")
       .sort({ createdAt: -1 });
@@ -308,7 +310,10 @@ exports.getProductById = async (req, res) => {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    return res.status(200).json({ product });
+    // Only the seller and admins see the cost price.
+    const body = product.toJSON ? product.toJSON() : { ...product };
+    if (!canSeeHidden) delete body.costPrice;
+    return res.status(200).json({ product: body });
   } catch (error) {
     console.error("Error fetching product by ID:", error);
     return res
@@ -323,6 +328,7 @@ exports.getProductById = async (req, res) => {
 exports.getProductBySlug = async (req, res) => {
   try {
     const product = await Product.findOne({ slug: String(req.params.slug), status: { $in: ["ACTIVE", "OUT_OF_STOCK"] } })
+      .select("-costPrice")
       .populate("vendor", "Fullname companyName")
       .populate("category", "name slug");
 

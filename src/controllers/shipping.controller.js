@@ -214,6 +214,7 @@ exports.quote = async (req, res) => {
         .filter((i) => byId[i.productId])
         .map((i) => ({ product: byId[i.productId], quantity: Number(i.qty || i.quantity) || 1, price: byId[i.productId].discountPrice || byId[i.productId].price }));
     } else {
+      if (!req.user) return res.status(400).json({ message: "Choose the products to deliver." });
       const cart = await Cart.findOne({ user: req.user.id }).populate("items.product");
       lines = (cart?.items || [])
         .filter((i) => i.product)

@@ -56,7 +56,7 @@ const getStaffDetailsForUser = async (userId) => {
   }
 };
 
-const signToken = (userId, staffDetails = null) => {
+const signToken = (userId, staffDetails = null, expiresIn = "1d") => {
   const payload = {
     userId: userId.toString(),
     id: userId.toString(),
@@ -70,9 +70,7 @@ const signToken = (userId, staffDetails = null) => {
     payload.permissions = staffDetails.permissions;
     payload.permissionsMap = staffDetails.permissionsMap;
   }
-  return jwt.sign(payload, process.env.JWT_SECRET, {
-    expiresIn: "1d",
-  });
+  return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn });
 };
 
 const buildUserResponse = (u, staffDetails = null) => ({
@@ -93,6 +91,7 @@ const buildUserResponse = (u, staffDetails = null) => ({
   isOnboarded: u.isOnboarded,
   verificationStatus: u.verificationStatus,
   lastPasswordChangeAt: u.lastPasswordChangeAt,
+  isGuest: Boolean(u.isGuest),
   isStaff: Boolean(staffDetails),
   isVendorStaff: Boolean(staffDetails),
   storeId: staffDetails ? staffDetails.storeId : null,
@@ -436,8 +435,9 @@ exports.registerUser = async (req, res) => {
     });
     if (phoneTaken) {
       return res.status(400).json({
-        message:
-          "An account with this phone number already exists. Log in with it instead, or use a different number.",
+        message: phoneTaken.isGuest
+          ? "You've ordered with this number as a guest. Use \"Forgot password\" with this number to set a password for that account."
+          : "An account with this phone number already exists. Log in with it instead, or use a different number.",
       });
     }
 
@@ -986,6 +986,7 @@ exports.resetPassword = async (req, res) => {
     }
 
     user.password = await bcrypt.hash(newPassword, 10);
+    user.isGuest = false; // a guest who sets a password now has a full account
     user.resetPasswordToken = undefined;
     user.resetPasswordExpires = undefined;
     // Signs out every existing session (see protect middleware).
@@ -1279,6 +1280,34 @@ exports.sendOtp = async (req, res) => {
 //                                      short-lived verificationToken that the
 //                                      sign-up flow presents along with the rest
 //                                      of the profile to /api/auth/register.
+// Checks a one-time code for phone+purpose and uses it up. Returns null when
+// the code is right, otherwise { status, message }. Wrong guesses count
+// against the code and lock it after OTP_MAX_ATTEMPTS.
+async function consumeOtp(normalizedPhone, code, purpose) {
+  const codeHash = crypto.createHash("sha256").update(String(code).trim()).digest("hex");
+  const otp = await Otp.findOne({
+    phone: normalizedPhone,
+    purpose,
+    consumed: false,
+    expiresAt: { $gt: Date.now() },
+  }).sort({ createdAt: -1 });
+  if (!otp) return { status: 400, message: "Invalid or expired verification code" };
+
+  const maxAttempts = Number(process.env.OTP_MAX_ATTEMPTS || 5);
+  if (otp.codeHash !== codeHash) {
+    otp.attempts += 1;
+    const exhausted = otp.attempts >= maxAttempts;
+    if (exhausted) otp.consumed = true;
+    await otp.save();
+    return exhausted
+      ? { status: 429, message: "Too many failed attempts. Please request a new code." }
+      : { status: 400, message: "Invalid or expired verification code" };
+  }
+  otp.consumed = true; // single-use
+  await otp.save();
+  return null;
+}
+
 exports.verifyOtp = async (req, res) => {
   try {
     const { phone, code, purpose, role } = req.body;
@@ -1303,46 +1332,8 @@ exports.verifyOtp = async (req, res) => {
         .json({ message: "A 6-digit verification code is required" });
     }
 
-    const codeHash = crypto
-      .createHash("sha256")
-      .update(code.trim())
-      .digest("hex");
-
-    // Look up the latest unconsumed, unexpired code for this phone+purpose
-    const otp = await Otp.findOne({
-      phone: normalizedPhone,
-      purpose,
-      consumed: false,
-      expiresAt: { $gt: Date.now() },
-    }).sort({ createdAt: -1 });
-
-    if (!otp) {
-      return res
-        .status(400)
-        .json({ message: "Invalid or expired verification code" });
-    }
-
-    const maxAttempts = Number(process.env.OTP_MAX_ATTEMPTS || 5);
-
-    // Wrong code → count the failed attempt (and lock the code when exceeded)
-    if (otp.codeHash !== codeHash) {
-      otp.attempts += 1;
-      const exhausted = otp.attempts >= maxAttempts;
-      if (exhausted) otp.consumed = true;
-      await otp.save();
-      if (exhausted) {
-        return res.status(429).json({
-          message: "Too many failed attempts. Please request a new code.",
-        });
-      }
-      return res
-        .status(400)
-        .json({ message: "Invalid or expired verification code" });
-    }
-
-    // Code matches → mark consumed (single-use)
-    otp.consumed = true;
-    await otp.save();
+    const otpFailure = await consumeOtp(normalizedPhone, code, purpose);
+    if (otpFailure) return res.status(otpFailure.status).json({ message: otpFailure.message });
 
     // ── PURPOSE: PASSWORDLESS LOGIN ─────────────────────────────────────────
     if (purpose === "login") {
@@ -1453,5 +1444,88 @@ exports.removeFromWishlist = async (req, res) => {
   } catch (error) {
     console.error("Wishlist remove failed:", error);
     return res.status(500).json({ message: "Could not remove this product." });
+  }
+};
+
+// ─── GUEST CHECKOUT ─────────────────────────────────────────────────────────
+// Buyers can order without creating an account. Safety comes from proving
+// the phone with a one-time code (rate-limited, 5 tries, single use): the
+// order is tied to a real, reachable number, and only that number can see it.
+// A new number gets a guest buyer account with a short session; an existing
+// buyer number signs in to its own account. Seller, admin and partner numbers
+// must sign in normally.
+const GUEST_SESSION = "12h";
+
+async function guestAccountFor(normalizedPhone) {
+  return User.findOne({ phone: { $in: phoneVariants(normalizedPhone) } });
+}
+
+// @route POST /api/auth/guest/send-code   { phone }
+exports.guestSendCode = async (req, res) => {
+  const normalizedPhone = normalizePhone(req.body?.phone);
+  if (!normalizedPhone) {
+    return res.status(400).json({
+      message: `Enter a valid Rwandan phone number (e.g. 0788123456). ${describePhoneIssue(req.body?.phone) || ""}`.trim(),
+    });
+  }
+  const existing = await guestAccountFor(normalizedPhone);
+  if (existing && existing.role !== "buyer") {
+    return res.status(409).json({ message: "This number belongs to a business account. Log in to buy with it, or use another number." });
+  }
+  req.body = { phone: normalizedPhone, purpose: "login" };
+  return exports.sendOtp(req, res);
+};
+
+// @route POST /api/auth/guest/verify   { phone, code, fullName, email? }
+exports.guestVerify = async (req, res) => {
+  try {
+    const { phone, code, fullName, email } = req.body || {};
+    const normalizedPhone = normalizePhone(phone);
+    if (!normalizedPhone) return res.status(400).json({ message: "Enter a valid Rwandan phone number." });
+    if (!code || !/^\d{6}$/.test(String(code).trim())) return res.status(400).json({ message: "Enter the 6-digit code we sent you." });
+    const name = String(fullName || "").trim().slice(0, 120);
+    // A name is needed only to create a new guest account; checking it first
+    // keeps the code unused if it's missing.
+    if (name.length < 2 && !(await guestAccountFor(normalizedPhone))) {
+      return res.status(400).json({ message: "Enter your full name." });
+    }
+
+    const otpFailure = await consumeOtp(normalizedPhone, code, "login");
+    if (otpFailure) return res.status(otpFailure.status).json({ message: otpFailure.message });
+
+    let user = await guestAccountFor(normalizedPhone);
+    if (user && user.role !== "buyer") {
+      return res.status(409).json({ message: "This number belongs to a business account. Log in to buy with it." });
+    }
+    if (user && user.status && user.status !== "ACTIVE") {
+      return res.status(403).json({ message: "This account is blocked or suspended. Contact MVEC support.", code: "ACCOUNT_BLOCKED" });
+    }
+    if (!user) {
+      const normalizedEmail = String(email || "").trim().toLowerCase();
+      const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) && !(await User.findOne({ email: normalizedEmail }));
+      user = new User({
+        Fullname: name,
+        phone: normalizedPhone,
+        email: emailOk ? normalizedEmail : undefined,
+        role: "buyer",
+        isGuest: true,
+        isOnboarded: true,
+        // Never used to sign in: the guest proves the phone each time, and
+        // sets a real password later with "Forgot password".
+        password: await bcrypt.hash(crypto.randomBytes(32).toString("hex"), 10),
+      });
+      await user.save();
+    }
+
+    const token = signToken(user._id, null, user.isGuest ? GUEST_SESSION : "1d");
+    return res.status(200).json({
+      message: user.isGuest ? "Phone verified. You can place your order." : "Phone verified. You're signed in to your account.",
+      token,
+      user: await buildAuthenticatedUserResponse(user),
+      guest: Boolean(user.isGuest),
+    });
+  } catch (error) {
+    console.error("Guest verification failed:", error);
+    return res.status(500).json({ message: "We could not verify your phone right now. Please try again." });
   }
 };

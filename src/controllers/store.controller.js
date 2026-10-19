@@ -346,7 +346,7 @@ exports.getPublicStoreBySlug = async (req, res) => {
 
     // Products listed under this store; unassigned ones belong to the primary store.
     const storeFilter = store.isPrimary ? { $in: [store._id, null] } : store._id;
-    const products = await Product.find({ vendor: store.vendor._id, status: "ACTIVE", store: storeFilter });
+    const products = await Product.find({ vendor: store.vendor._id, status: "ACTIVE", store: storeFilter }).select("-costPrice");
 
     return res.status(200).json({ store, productsCount: products.length, products });
   } catch (error) {

@@ -128,6 +128,16 @@ exports.updateMyProfile = async (req, res) => {
 // ─── 4. PUBLIC SUPPLIER DIRECTORY ───────────────────────────────────────────
 // @route   GET /api/suppliers?q=&category=&location=&page=&pageSize=
 // @access  Public
+// Public supplier shape: contact details and internal review notes stay private.
+const toPublicSupplier = (doc) => {
+  const s = doc && doc.toJSON ? doc.toJSON() : { ...doc };
+  delete s.phone;
+  delete s.email;
+  delete s.verificationNote;
+  return s;
+};
+const escapeSupplierRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 exports.getSuppliers = async (req, res) => {
   try {
     const { q, location, page = 1, pageSize = 20 } = req.query;
@@ -138,7 +148,7 @@ exports.getSuppliers = async (req, res) => {
     };
 
     if (q) {
-      filter.businessName = { $regex: q, $options: "i" };
+      filter.businessName = { $regex: escapeSupplierRegex(String(q).slice(0, 100)), $options: "i" };
     }
     if (location) {
       filter.location = location;
@@ -154,7 +164,7 @@ exports.getSuppliers = async (req, res) => {
     ]);
 
     return res.status(200).json({
-      data: suppliers,
+      data: suppliers.map(toPublicSupplier),
       meta: { page: pageNum, pageSize: limit, total },
     });
   } catch (error) {
@@ -184,8 +194,7 @@ exports.getSupplierByIdOrSlug = async (req, res) => {
       return res.status(404).json({ message: "Supplier not found" });
     }
 
-    // NOTE: once Product model links `supplier`, populate their products/reviews here too
-    return res.status(200).json({ supplier });
+    return res.status(200).json({ supplier: toPublicSupplier(supplier) });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }

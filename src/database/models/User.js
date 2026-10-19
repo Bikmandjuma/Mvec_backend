@@ -17,6 +17,8 @@ module.exports = (sequelize) => {
     resetPasswordToken: { type: DataTypes.STRING(255), allowNull: true },
     resetPasswordExpires: { type: DataTypes.DATE, allowNull: true },
     isVendorStaff: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    // Checked out as a guest (phone verified, no password chosen yet).
+    isGuest: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     lastPasswordChangeAt: { type: DataTypes.DATE, allowNull: true },
     // Seller / supplier onboarding profile.
     businessName: { type: DataTypes.STRING(150), allowNull: true, defaultValue: "" },

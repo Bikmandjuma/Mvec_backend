@@ -165,12 +165,13 @@ module.exports = {
       SHIPPED: ["has been shipped", true],
       OUT_FOR_DELIVERY: ["is out for delivery", true],
     };
-    const [text, sms] = labels[order.orderStatus] || [];
+    const pickupReady = order.shippingMethod === "PICKUP" && order.orderStatus === "READY_FOR_SHIPMENT";
+    const [text, sms] = pickupReady ? ["is ready for pickup", true] : labels[order.orderStatus] || [];
     if (!text) return;
     await notify(order.user, {
       type: "DELIVERY",
       title: `Order ${order.orderNumber} ${text}`,
-      message: order.orderStatus === "OUT_FOR_DELIVERY" ? "Have your delivery code ready. Only give it once you have your items." : "",
+      message: order.orderStatus === "OUT_FOR_DELIVERY" || pickupReady ? "Have your delivery code ready. Only give it once you have your items." : "",
       reference: order.orderNumber,
       link: orderLink(order),
       sms: sms ? { phone: order.recipient?.phone, text: `MVEC: order ${order.orderNumber} ${text}.` } : undefined,
@@ -261,16 +262,56 @@ module.exports = {
     }
   },
 
+  // A buyer reported a problem: every seller on the order and every admin
+  // gets it (each with a link to their own disputes page), and the buyer
+  // gets a receipt.
   async disputeOpened(order, dispute) {
-    for (const id of [...vendorIdsOf(order), ...(await adminIds())]) {
+    const reason = String(dispute.reason || "").toLowerCase().replace(/_/g, " ");
+    const reference = dispute.disputeNumber || order.orderNumber;
+    for (const id of vendorIdsOf(order)) {
       await notify(id, {
         type: "ORDER",
         title: `Problem reported on ${order.orderNumber}`,
-        message: `${String(dispute.reason || "").toLowerCase().replace(/_/g, " ")}. Payment is on hold until MVEC reviews it.`,
-        reference: dispute.disputeNumber || order.orderNumber,
+        message: `The buyer reported: ${reason}. Payment is on hold. Respond with your side so MVEC can resolve it.`,
+        reference,
+        link: "/vendor/refunds",
+      });
+    }
+    for (const id of await adminIds()) {
+      await notify(id, {
+        type: "ADMIN",
+        title: `Problem reported on ${order.orderNumber}`,
+        message: `${reason}. Payment is on hold until MVEC reviews it.`,
+        reference,
         link: "/admin/disputes",
       });
     }
+    if (order.user) {
+      await notify(order.user, {
+        type: "ORDER",
+        title: `We received your report on ${order.orderNumber}`,
+        message: "The seller and MVEC have been told. The payment stays on hold until the problem is resolved.",
+        reference,
+        link: orderLink(order),
+      });
+    }
+  },
+
+  // A new message on a dispute goes to everyone else involved.
+  async disputeReply(order, dispute, { fromUserId, fromRole }) {
+    const reference = dispute.disputeNumber || order.orderNumber;
+    const from = fromRole === "super_admin" ? "MVEC" : fromRole === "vendor" ? "The seller" : "The buyer";
+    const title = `${from} replied on ${reference}`;
+    const message = `New message on the problem reported for ${order.orderNumber}.`;
+    const skip = String(fromUserId);
+    for (const id of vendorIdsOf(order)) {
+      if (id !== skip) await notify(id, { type: "ORDER", title, message, reference, link: "/vendor/refunds" });
+    }
+    if (fromRole !== "super_admin") {
+      for (const id of await adminIds()) await notify(id, { type: "ADMIN", title, message, reference, link: "/admin/disputes" });
+    }
+    const buyer = order.user ? idOf(order.user) : null;
+    if (buyer && buyer !== skip) await notify(buyer, { type: "ORDER", title, message, reference, link: orderLink(order) });
   },
 
   async affiliateCommission(affiliateUserId, { orderNumber, amount, approved }) {

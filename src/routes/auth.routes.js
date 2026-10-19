@@ -12,6 +12,10 @@ router.post("/google-login", limits.login, auth.googleLogin);
 router.post("/send-otp", limits.sendCode, auth.sendOtp);
 router.post("/verify-otp", limits.verifyCode, auth.verifyOtp);
 
+// Guest checkout: prove the phone with a one-time code instead of signing up.
+router.post("/guest/send-code", limits.sendCode, auth.guestSendCode);
+router.post("/guest/verify", limits.verifyCode, auth.guestVerify);
+
 router.post("/forgot-password", limits.sendCode, auth.forgotPassword);
 router.post("/verify-reset-otp", limits.verifyCode, auth.verifyResetOtp);
 router.post("/reset-password", limits.verifyCode, auth.resetPassword);

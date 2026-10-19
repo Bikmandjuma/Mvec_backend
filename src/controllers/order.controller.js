@@ -182,6 +182,7 @@ exports.getOrderById = async (req, res) => {
       const paid = await Payment.findOne({ parentOrder: order._id, status: { $in: ["SUCCESS", "REFUNDED"] } }).sort({ createdAt: -1 });
       const body = typeof order.toJSON === "function" ? order.toJSON() : { ...order };
       body.paidVia = paid ? { gateway: paid.gateway, method: paid.method } : null;
+      if (order.shippingMethod === "PICKUP") body.pickupLocations = await pickupLocationsFor(order);
       return res.status(200).json({ order: body });
     }
 
@@ -273,8 +274,19 @@ const SELLER_FLOW = {
 const sellerCollectsPayment = (order) =>
   order.source === "MANUAL" && (order.paidOffline || order.paymentMethod === "CASH_ON_DELIVERY");
 
+// Where the buyer collects each parcel of a pickup order.
+async function pickupLocationsFor(order) {
+  const shippingService = require("../services/shipping.service");
+  const storeIds = (order.shippingBreakdown || []).map((p) => String(p.store?._id || p.store || "")).filter(Boolean);
+  const byStore = await shippingService.pickupLocations(storeIds);
+  return Object.values(byStore);
+}
+
 function sellerNextStatuses(order) {
-  const next = [...(SELLER_FLOW[order.orderStatus] || [])];
+  // A pickup order is never shipped: once it is ready, the buyer collects it
+  // and gives the seller the delivery code.
+  const flow = order.shippingMethod === "PICKUP" ? { ...SELLER_FLOW, READY_FOR_SHIPMENT: ["CANCELLED"] } : SELLER_FLOW;
+  const next = [...(flow[order.orderStatus] || [])];
   if (sellerCollectsPayment(order)) {
     const deliverFrom = order.shippingMethod === "PICKUP"
       ? ["CONFIRMED", "PROCESSING", "READY_FOR_SHIPMENT"]
@@ -357,6 +369,9 @@ async function advanceFulfilment({ order, status, actor }) {
     throw checkoutService.httpError(400, order.paymentStatus === "DISPUTED"
       ? "This order is under dispute review. Wait for MVEC's decision before moving it."
       : "This order isn't paid yet, so it can't be prepared or shipped.");
+  }
+  if (order.shippingMethod === "PICKUP" && ["SHIPPED", "OUT_FOR_DELIVERY"].includes(next)) {
+    throw checkoutService.httpError(400, "The buyer collects this order, so it isn't shipped. Mark it ready, then enter the buyer's code when they collect it.");
   }
   const current = FULFILMENT_FLOW.indexOf(order.orderStatus === "PENDING" ? "CONFIRMED" : order.orderStatus);
   if (current === -1) {

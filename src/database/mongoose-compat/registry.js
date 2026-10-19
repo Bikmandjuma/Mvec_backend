@@ -30,6 +30,7 @@ const LEGACY = {
       lastPasswordChangeAt: F("date"), businessName: F("string"), description: F("string"), logoUrl: F("string"),
       category: F("string"), location: F("json"), isOnboarded: F("bool"), verificationStatus: F("string"), avatarUrl: F("string"),
       resetPasswordCode: F("string"), resetPasswordCodeExpires: F("date"), resetPasswordAttempts: F("number"), isSupplierStaff: F("bool"), preferences: F("json"), tokensValidAfter: F("date"),
+      isGuest: F("bool"), // checked out as a guest (see auth.controller guest checkout)
     },
     hidden: ["isVendorStaff", "isSupplierStaff", "resetPasswordCode", "resetPasswordCodeExpires", "resetPasswordAttempts"],
     children: {

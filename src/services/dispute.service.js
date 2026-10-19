@@ -58,8 +58,10 @@ class DisputeService {
     const dispute = await Dispute.findById(disputeId);
     if (!dispute) throw new Error("Dispute not found.");
 
-    // Only the buyer who raised it, the seller involved and MVEC admins take part.
-    const isParty = [String(dispute.raisedBy), String(dispute.vendor)].includes(String(userId)) || userRole === "super_admin";
+    // Only the buyer who raised it, every seller on the order and MVEC admins take part.
+    const order = await Order.findById(dispute.order);
+    const sellers = new Set([String(dispute.vendor), ...(order?.items || []).filter((i) => i.vendor).map((i) => String(i.vendor._id || i.vendor))]);
+    const isParty = String(dispute.raisedBy) === String(userId) || sellers.has(String(userId)) || userRole === "super_admin";
     if (!isParty) throw Object.assign(new Error("Dispute not found."), { statusCode: 404 });
 
     if (["RESOLVED_BUYER_REFUNDED", "RESOLVED_VENDOR_RELEASED", "RESOLVED_SPLIT", "REJECTED"].includes(dispute.status)) {
@@ -77,6 +79,9 @@ class DisputeService {
     if (dispute.status === "OPEN") {
       dispute.status = "EVIDENCE_SUBMITTED";
       await dispute.save();
+    }
+    if (order) {
+      require("./notification.service").disputeReply(order, dispute, { fromUserId: userId, fromRole: userRole }).catch(() => {});
     }
 
     return evidence;

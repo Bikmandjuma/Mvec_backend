@@ -1,41 +1,21 @@
-const crypto = require("crypto");
 const Payment = require("../models/Payment");
 const paymentService = require("../services/payment.service");
 const paypackService = require("../services/paypack.service");
+const { checkWebhook, hmacMatches } = require("../utils/webhookAuth");
 
-/**
- * HMAC Validation Helper
- */
-function verifyWebhookSignature(payload, signatureHeader, secret) {
-  if (!signatureHeader || !secret) return false;
-  const hmac = crypto
-    .createHmac("sha256", secret)
-    .update(JSON.stringify(payload))
-    .digest("hex");
-  const a = Buffer.from(hmac);
-  const b = Buffer.from(signatureHeader);
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
 
 // @desc    MTN MoMo Payment Webhook Receiver
 // @route   POST /api/webhooks/momo
 // @access  Public (Provider Verified)
 exports.handleMomoWebhook = async (req, res) => {
   try {
-    const signature = req.headers["x-momo-signature"];
-    const isSandbox =
-      process.env.NODE_ENV !== "production" || !process.env.MOMO_WEBHOOK_SECRET;
-
-    if (
-      !isSandbox &&
-      !verifyWebhookSignature(
-        req.body,
-        signature,
-        process.env.MOMO_WEBHOOK_SECRET,
-      )
-    ) {
-      return res.status(401).json({ message: "Invalid webhook signature" });
-    }
+    const failure = checkWebhook({
+      provider: "MoMo",
+      secret: process.env.MOMO_WEBHOOK_SECRET,
+      signature: req.headers["x-momo-signature"],
+      verify: (sig, secret) => hmacMatches(req, sig, secret),
+    });
+    if (failure) return res.status(failure.status).json({ message: failure.message });
 
     // MoMo callback payload: { status, externalId, financialTransactionId, amount, fee }
     const { financialTransactionId, externalId, amount, fee } = req.body;
@@ -108,28 +88,7 @@ exports.handleMomoWebhook = async (req, res) => {
 // @access  Public (Provider Verified)
 exports.handleAirtelWebhook = async (req, res) => {
   try {
-    // 1. Safe Signature Header Retrieval
-    const signature =
-      req.headers["x-airtel-signature"] ||
-      req.headers["x-signature"] ||
-      req.headers["authorization"];
-
-    const isSandbox =
-      process.env.NODE_ENV !== "production" ||
-      !process.env.AIRTEL_WEBHOOK_SECRET;
-
-    // 2. Signature Check (Pass req.rawBody or raw buffer if HMAC verification is used)
-    if (!isSandbox) {
-      const isValid = verifyWebhookSignature(
-        req.rawBody || req.body,
-        signature,
-        process.env.AIRTEL_WEBHOOK_SECRET,
-      );
-      if (!isValid) {
-        return res.status(401).json({ message: "Invalid webhook signature" });
-      }
-    }
-
+    // The signature was checked by verifyAirtelSignature before this runs.
     const { transaction, status } = req.body;
 
     // 3. Robust Extraction across V1 / V2 Webhook Schemas
@@ -223,21 +182,13 @@ exports.handleAirtelWebhook = async (req, res) => {
 // @access  Public (Provider Verified via X-Paypack-Signature)
 exports.handlePaypackWebhook = async (req, res) => {
   try {
-    // Production must verify every callback; without a secret anyone could
-    // post a fake "payment successful" event.
-    if (!process.env.PAYPACK_WEBHOOK_SECRET && process.env.NODE_ENV === "production") {
-      console.error("[Paypack Webhook] PAYPACK_WEBHOOK_SECRET is not set; rejecting callback.");
-      return res.status(503).json({ message: "Webhook verification is not configured." });
-    }
-    if (process.env.PAYPACK_WEBHOOK_SECRET) {
-      const isValid = paypackService.verifyWebhookSignature(
-        req.rawBody,
-        req.headers["x-paypack-signature"],
-      );
-      if (!isValid) {
-        return res.status(401).json({ message: "Invalid webhook signature" });
-      }
-    }
+    const failure = checkWebhook({
+      provider: "Paypack",
+      secret: process.env.PAYPACK_WEBHOOK_SECRET,
+      signature: req.headers["x-paypack-signature"],
+      verify: (sig, secret) => paypackService.verifyWebhookSignature(req.rawBody, sig, secret),
+    });
+    if (failure) return res.status(failure.status).json({ message: failure.message });
 
     // Payload: { event_id, event_kind, created_at, data: { ref, kind, amount, fee, status, ... } }
     const { event_kind: eventKind, data = {} } = req.body;

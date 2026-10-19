@@ -9,7 +9,6 @@ router.use(protect);
 // Only admins send manual notifications; the system creates the rest.
 router.post("/", authorize("super_admin"), notification.createNotification);
 router.get("/mine", notification.listMyNotifications);
-router.get("/read-all", notification.markAllRead);
 router.post("/read-all", notification.markAllRead);
 router.patch("/:id/read", notification.markRead);
 

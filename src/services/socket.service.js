@@ -137,12 +137,13 @@ class SocketService {
     }
   }
 
-  // Helper to emit events to specific rooms from controllers/services
+  // Helper to emit events to specific rooms from controllers/services.
+  // Room events are private (a user's chats, a dispute's evidence), so they
+  // never go to the public, unauthenticated /api/events stream.
   emitToRoom(room, event, data) {
     if (this.io) {
       this.io.to(room).emit(event, data);
     }
-    this.broadcastSse(event, data);
   }
 
   // Global broadcast

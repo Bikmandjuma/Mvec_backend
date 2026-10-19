@@ -78,6 +78,24 @@ const zonesForStore = async (vendorId, storeId, cache) => {
 };
 
 /**
+ * Where a buyer collects an order from each store: { [storeId]: { storeName, address, phone } }.
+ */
+exports.pickupLocations = async (storeIds) => {
+  const ids = [...new Set((storeIds || []).filter(Boolean).map(String))];
+  if (!ids.length) return {};
+  const stores = await Store.find({ _id: { $in: ids } }).lean();
+  return Object.fromEntries(stores.map((s) => {
+    const street = s.businessAddress || s.address?.street || s.addressStreet || "";
+    const city = s.address?.city || s.addressCity || "";
+    return [String(s._id), {
+      storeName: s.storeName,
+      address: [street, city].filter(Boolean).join(", ") || "Ask the seller for the pickup address",
+      phone: s.businessPhone || s.contactPhone || "",
+    }];
+  }));
+};
+
+/**
  * Quote delivery for order lines.
  * lines: [{ product (doc with vendor/store), quantity, price }]
  * Returns { shippingFee, deliverable, method, groups: [...] }.
@@ -106,6 +124,18 @@ exports.quoteShipping = async ({ lines, address, method = "STANDARD" }) => {
   const storeIds = [...groupsByKey.values()].map((g) => g.store).filter(Boolean);
   const stores = await Store.find({ _id: { $in: storeIds } }).select("storeName").lean();
   const storeNames = Object.fromEntries(stores.map((s) => [String(s._id), s.storeName]));
+
+  // The buyer collects the order from each store: no delivery fee, and the
+  // buyer's address doesn't matter.
+  if (requested === "PICKUP") {
+    const locations = await exports.pickupLocations(storeIds);
+    const groups = [...groupsByKey.values()].map((group) => ({
+      ...group, storeName: storeNames[group.store] || "Seller", deliverable: true, fee: 0, method: "PICKUP",
+      eta: "Collect when the seller says it's ready", zone: null, zoneName: "Pickup", source: "pickup",
+      pickup: locations[group.store] || null, message: null,
+    }));
+    return { address: where, method: "PICKUP", deliverable: true, shippingFee: 0, groups };
+  }
 
   const groups = [];
   for (const group of groupsByKey.values()) {

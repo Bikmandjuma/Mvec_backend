@@ -125,6 +125,7 @@ exports.search = async (req, res) => {
     const limitNum = Math.min(parseInt(limit, 10) || 20, 100);
 
     let allMatches = await Product.find(filter)
+      .select("-costPrice")
       .populate("vendor", "companyName logoUrl address")
       .populate("category", "name slug");
 
@@ -258,6 +259,7 @@ exports.getHomeFeed = async (req, res) => {
     const [categories, featuredProducts, topVendors] = await Promise.all([
       Category.find({ active: true, parentId: null }).sort({ sortOrder: 1, name: 1 }).limit(8),
       Product.find({ status: "ACTIVE" })
+        .select("-costPrice")
         .sort({ createdAt: -1 })
         .limit(10)
         .populate("vendor", "companyName logoUrl"),

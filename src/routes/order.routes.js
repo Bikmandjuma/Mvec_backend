@@ -35,8 +35,11 @@ router.get("/vendor/orders", authorize("vendor"), getVendorOrders);
 router.post("/vendor/manual", authorize("vendor"), checkStaffPermission("canManageOrders"), limits.checkout, require("../controllers/manualOrder.controller").createManualOrder);
 router.get("/:id", getOrderById);
 router.post("/:id/cancel", protect, cancelOrderByBuyer);
+// Vendor fulfilment updates (excluding delivery payout triggers). Staff need
+// the order permission; the handler also checks the order has their items.
 router.patch(
   "/vendor/status",
+  authorize("vendor", "super_admin"),
   checkStaffPermission("canManageOrders"),
   updateVendorOrderStatus,
 );
@@ -52,7 +55,5 @@ router.patch("/:id/deliver", protect, authorize("super_admin", "courier", "deliv
 router.patch("/:id/courier", protect, authorize("super_admin"), assignCourier);
 router.patch("/:id/out-for-delivery", protect, authorize("super_admin", "delivery", "courier"), markOutForDelivery);
 
-// Status route for general vendor updates (excluding delivery payout triggers)
-router.patch("/vendor/status", protect, authorize("vendor", "super_admin"), updateVendorOrderStatus);
 
 module.exports = router;

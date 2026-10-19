@@ -1,4 +1,7 @@
 node_modules
 zz
 .env
-priority_docs.md.DS_Store
+priority_docs.md
+.DS_Store
+# User uploads are data, not source
+uploads/

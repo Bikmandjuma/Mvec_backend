@@ -288,8 +288,7 @@ const toPublicVendor = (v) => ({
   description: v.description,
   category: v.category,
   location: v.location,
-  phone: v.phone,
-  email: v.email,
+  // Contact details stay private: buyers reach sellers through MVEC messages.
   ratingAvg: v.ratingAvg,
   verificationStatus: v.verificationStatus,
   status: v.status,
@@ -355,7 +354,11 @@ exports.getVendorByIdOrSlug = async (req, res) => {
       return res.status(404).json({ message: "Vendor store not found" });
     }
 
-    return res.status(200).json({ vendor: toPublicVendor(vendor) });
+    const [followers, following] = await Promise.all([
+      countFollowers(vendor._id),
+      req.user ? isFollowing(req.user.id, vendor._id) : false,
+    ]);
+    return res.status(200).json({ vendor: { ...toPublicVendor(vendor), followers, following } });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }
@@ -510,5 +513,64 @@ exports.updateAffiliateProgram = async (req, res) => {
     if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
     console.error("Affiliate program update failed:", error);
     return res.status(500).json({ message: "We could not save your affiliate program right now. Please try again." });
+  }
+};
+
+// ─── FOLLOWING A STORE ──────────────────────────────────────────────────────
+// Saved per account in vendor_follows, so it works on every device.
+const { sequelize } = require("../database");
+
+async function countFollowers(vendorId) {
+  const [rows] = await sequelize.query("SELECT COUNT(*) AS n FROM vendor_follows WHERE vendorId = ?", { replacements: [String(vendorId)] });
+  return Number(rows[0]?.n) || 0;
+}
+
+async function isFollowing(userId, vendorId) {
+  const [rows] = await sequelize.query("SELECT 1 FROM vendor_follows WHERE userId = ? AND vendorId = ? LIMIT 1", { replacements: [String(userId), String(vendorId)] });
+  return rows.length > 0;
+}
+
+async function findFollowableVendor(req, res) {
+  const id = String(req.params.id);
+  if (!/^[0-9a-fA-F]{24}$/.test(id)) {
+    res.status(400).json({ message: "A valid store ID is required." });
+    return null;
+  }
+  const vendor = await Vendor.findOne({ _id: id, status: "ACTIVE" });
+  if (!vendor) {
+    res.status(404).json({ message: "Vendor store not found" });
+    return null;
+  }
+  return vendor;
+}
+
+// @route   POST /api/vendors/:id/follow
+// @access  Private
+exports.followVendor = async (req, res) => {
+  try {
+    const vendor = await findFollowableVendor(req, res);
+    if (!vendor) return undefined;
+    if (String(vendor.user) === String(req.user.id)) {
+      return res.status(400).json({ message: "You can't follow your own store." });
+    }
+    await sequelize.query("INSERT IGNORE INTO vendor_follows (userId, vendorId) VALUES (?, ?)", { replacements: [String(req.user.id), String(vendor._id)] });
+    return res.status(200).json({ following: true, followers: await countFollowers(vendor._id) });
+  } catch (error) {
+    console.error("Follow vendor failed:", error);
+    return res.status(500).json({ message: "We could not follow this store right now. Please try again." });
+  }
+};
+
+// @route   DELETE /api/vendors/:id/follow
+// @access  Private
+exports.unfollowVendor = async (req, res) => {
+  try {
+    const vendor = await findFollowableVendor(req, res);
+    if (!vendor) return undefined;
+    await sequelize.query("DELETE FROM vendor_follows WHERE userId = ? AND vendorId = ?", { replacements: [String(req.user.id), String(vendor._id)] });
+    return res.status(200).json({ following: false, followers: await countFollowers(vendor._id) });
+  } catch (error) {
+    console.error("Unfollow vendor failed:", error);
+    return res.status(500).json({ message: "We could not unfollow this store right now. Please try again." });
   }
 };
