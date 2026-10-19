@@ -108,6 +108,24 @@ describe("Monetization: Subscriptions, Advertisements & Localization", () => {
     });
     // Premium and ad budgets are paid from the seller's available balance.
     await VendorWallet.create({ vendor: vendorUser._id, availableBalance: 1000000 });
+    // These tests exercise paid plans, so the program is switched on (it is off by default).
+    await require("../../src/services/platformSettings.service").update({ subscriptionsEnabled: true, sellerPremiumPrice: 15000, buyerPremiumPrice: 5000 });
+  });
+
+  describe("0. Subscription program switched off (the default)", () => {
+    test("nobody can buy Premium and plans say so", async () => {
+      await require("../../src/services/platformSettings.service").update({ subscriptionsEnabled: false });
+      const info = await request(app).get("/api/vendor/subscription").set("Authorization", `Bearer ${vendorToken}`);
+      expect(info.status).toBe(200);
+      expect(info.body.plans.programActive).toBe(false);
+      expect(info.body.entitlements.plan).toBe("ALL_ACCESS");
+      const seller = await request(app).post("/api/vendor/subscription").set("Authorization", `Bearer ${vendorToken}`).send({ plan: "premium" });
+      expect(seller.status).toBe(403);
+      const buyer = await request(app).post("/api/buyer/subscription/checkout").set("Authorization", `Bearer ${buyerToken}`).send({ method: "momo", phoneNumber: "0788123456" });
+      expect(buyer.status).toBe(403);
+      const wallet = await VendorWallet.findOne({ vendor: vendorUser._id });
+      expect(wallet.availableBalance).toBe(1000000); // nothing was charged
+    });
   });
 
   describe("1. Vendor Subscription endpoints", () => {
@@ -118,11 +136,11 @@ describe("Monetization: Subscriptions, Advertisements & Localization", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.tiers).toHaveLength(2);
-      expect(res.body.tiers.map((t) => t.plan)).toContain("Vendor Premium");
+      expect(res.body.tiers.map((t) => t.plan)).toContain("Seller Premium");
       expect(res.body.subscription).toBeNull();
     });
 
-    test("POST /api/vendor/subscription upgrades to Vendor Premium", async () => {
+    test("POST /api/vendor/subscription upgrades to Seller Premium", async () => {
       const res = await request(app)
         .post("/api/vendor/subscription")
         .set("Authorization", `Bearer ${vendorToken}`)
@@ -130,7 +148,7 @@ describe("Monetization: Subscriptions, Advertisements & Localization", () => {
 
       expect(res.status).toBe(200);
       expect(res.body.subscription.planKey).toBe("PREMIUM");
-      expect(res.body.subscription.plan).toBe("Vendor Premium");
+      expect(res.body.subscription.plan).toBe("Seller Premium");
       expect(res.body.subscription.status).toBe("Active");
       expect(res.body.subscription.billing).toBe("Monthly");
       expect(res.body.subscription.renewal).not.toBe("—");
@@ -171,6 +189,18 @@ describe("Monetization: Subscriptions, Advertisements & Localization", () => {
   });
 
   describe("2. Vendor Advertisement endpoints", () => {
+    // With plans on, promotions are a Premium tool: these tests use a Premium seller.
+    beforeEach(async () => {
+      await Subscription.create({ vendor: vendorUser._id, plan: "PREMIUM", status: "ACTIVE", price: 15000, billingCycle: "MONTHLY", autoRenew: true, renewalDate: new Date(Date.now() + 20 * 86400000) });
+    });
+
+    test("a Free seller is asked to upgrade before running ads (plans on)", async () => {
+      await Subscription.deleteMany({ vendor: vendorUser._id });
+      const res = await request(app).post("/api/vendor/advertisements").set("Authorization", `Bearer ${vendorToken}`).send({ productId: "x", budget: 5000 });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe("PREMIUM_REQUIRED");
+    });
+
     test("POST /api/vendor/advertisements submits a pending campaign", async () => {
       const category = await Category.create({ name: "Phones", slug: "phones" });
       const product = await Product.create({

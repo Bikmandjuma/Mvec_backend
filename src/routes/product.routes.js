@@ -47,6 +47,7 @@ router.post("/vendor/move-store", requireOnboarded, checkStaffPermission("canMan
 // checkStaffPermission already passes through if the user IS the store owner or super_admin,
 // so it covers all three cases in a single middleware chain.
 router.post("/", requireOnboarded, checkStaffPermission("canManageProducts"), createProduct);
+router.post("/bulk", requireOnboarded, checkStaffPermission("canManageProducts"), require("../services/plans.service").requireFeature("bulkUpload"), require("../controllers/product.controller").bulkCreateProducts);
 router.put("/:id", requireOnboarded, checkStaffPermission("canManageProducts"), updateProduct);
 router.patch("/:id/stock", requireOnboarded, checkStaffPermission("canManageProducts"), adjustStock);
 router.delete("/:id", requireOnboarded, checkStaffPermission("canManageProducts"), deleteProduct);

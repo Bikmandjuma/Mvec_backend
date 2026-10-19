@@ -124,6 +124,13 @@ async function chargeBalance(vendorId, amount, { type, reference, description })
   );
   if (!charged) return null;
   await SellerCharge.create({ vendor: vendorId, type, amount, reference, description });
+  const ledger = require("./ledger.service");
+  if (type === "ADVERTISING") {
+    // Reserved for the campaign; it becomes MVEC revenue click by click.
+    await ledger.post({ from: ["VENDOR_PAYABLE", vendorId], to: ["AD_BUDGETS"], amount, entryType: "AD_BUDGET_RESERVED", reference, description });
+  } else {
+    await ledger.mvecEarned({ from: ["VENDOR_PAYABLE", vendorId], amount, entryType: "SUBSCRIPTION_FEE", reference, description });
+  }
   return charged;
 }
 
@@ -133,6 +140,15 @@ async function creditBalance(vendorId, amount, { type, reference, description })
   const VendorWallet = require("../models/VendorWallet");
   await VendorWallet.findOneAndUpdate({ vendor: vendorId }, { $inc: { availableBalance: amount } }, { upsert: true });
   await SellerCharge.create({ vendor: vendorId, type, amount: -amount, reference, description });
+  if (type === "ADVERTISING") {
+    await require("./ledger.service").post({ from: ["AD_BUDGETS"], to: ["VENDOR_PAYABLE", vendorId], amount, entryType: "AD_BUDGET_RETURNED", reference, description });
+  }
 }
 
-module.exports = { orderLines, summary, statement, notify, chargeBalance, creditBalance };
+// What a campaign really took from the seller (charges minus returns).
+async function netCharged(reference) {
+  const rows = await SellerCharge.find({ reference, type: "ADVERTISING" }).select("amount").lean();
+  return rows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+}
+
+module.exports = { orderLines, summary, statement, notify, chargeBalance, creditBalance, netCharged };

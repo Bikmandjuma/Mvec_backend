@@ -347,6 +347,11 @@ exports.createWholesaleProduct = async (req, res) => {
       return res.status(400).json({ message: "A valid wholesalePrice is required" });
     }
 
+    try {
+      await require("../services/plans.service").assertCanList(req.user.id, () => WholesaleProduct.countDocuments({ supplier: supplier._id, status: { $ne: "ARCHIVED" } }));
+    } catch (limitError) {
+      return res.status(limitError.statusCode || 403).json({ message: limitError.message, code: limitError.code });
+    }
     const payload = sanitizeWholesalePayload(req.body);
     const product = await WholesaleProduct.create({ supplier: supplier._id, ...payload });
 

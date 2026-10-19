@@ -404,7 +404,7 @@ describe("Financials & Payments Integration Suite", () => {
   });
 
   describe("3. Revenue Split Test (no affiliate, default gateway fee)", () => {
-    test("Should apply 5% platform fee and credit vendor/developer/admin wallets", async () => {
+    test("Should apply 5% platform fee and credit vendor and MVEC wallets (MVEC keeps the developer share)", async () => {
       if (!mongoReady) return;
       const commissionResponse = await request(app)
         .post("/api/admin/commissions")
@@ -453,8 +453,8 @@ describe("Financials & Payments Integration Suite", () => {
       expect(snapshot.commissionRateValue).toBe(5);
       expect(snapshot.commissionAmount).toBe(500);
       expect(snapshot.vendorNetEarnings).toBe(9500);
-      expect(snapshot.developerShare).toBe(100);
-      expect(snapshot.adminShare).toBe(400);
+      expect(snapshot.developerShare).toBe(0);
+      expect(snapshot.adminShare).toBe(500);
       expect(snapshot.affiliateShare).toBe(0);
       expect(snapshot.gatewayFee).toBe(0);
       expect(snapshot.hasAffiliate).toBe(false);
@@ -462,17 +462,22 @@ describe("Financials & Payments Integration Suite", () => {
       const vendorWallet = await VendorWallet.findOne({ vendor: vendorUser._id });
       expect(vendorWallet.pendingBalance).toBe(9500);
 
+      // The developer share belongs to the platform: no developer wallet is credited.
       const developerWallet = await DeveloperWallet.findOne({ developerUser: developerUser._id });
-      expect(developerWallet.pendingBalance).toBe(100);
+      expect(Number(developerWallet?.pendingBalance || 0)).toBe(0);
 
       const adminWallet = await AdminWallet.findOne({ adminUser: superAdminUser._id });
-      expect(adminWallet.pendingBalance).toBe(400);
+      expect(adminWallet.pendingBalance).toBe(500);
 
+      // Buyer payment received into MVEC holding; both balances moved.
       const ledgerEntry = await LedgerEntry.findOne({
         relatedOrder: order._id,
-        entryType: "PAYMENT_ESCROW_LOCK",
+        entryType: "PAYMENT_RECEIVED",
       });
       expect(ledgerEntry).toBeTruthy();
+      expect(ledgerEntry.amount).toBe(10000);
+      const holding = await LedgerAccount.findOne({ accountType: "ESCROW_HOLDING" });
+      expect(holding.balance).toBe(10000);
       expect(ledgerEntry.amount).toBe(10000);
     });
   });
@@ -571,15 +576,15 @@ describe("Financials & Payments Integration Suite", () => {
       expect(snapshot.grossTotal).toBe(100000);
       expect(snapshot.commissionAmount).toBe(5000);
       expect(snapshot.vendorNetEarnings).toBe(95000);
-      expect(snapshot.developerShare).toBe(1000);
+      expect(snapshot.developerShare).toBe(0);
       expect(snapshot.affiliateShare).toBe(500);
       expect(snapshot.gatewayFee).toBe(1000);
-      expect(snapshot.adminShare).toBe(2500);
+      expect(snapshot.adminShare).toBe(3500);
 
       const settlement = await Settlement.findOne({ order: order._id });
       expect(settlement).toBeTruthy();
-      expect(settlement.developerShare).toBe(1000);
-      expect(settlement.adminShare).toBe(2500);
+      expect(settlement.developerShare).toBe(0);
+      expect(settlement.adminShare).toBe(3500);
       expect(settlement.affiliateShare).toBe(500);
       expect(settlement.gatewayFee).toBe(1000);
       expect(String(settlement.affiliateUser)).toBe(String(affiliateUser._id));
@@ -588,13 +593,13 @@ describe("Financials & Payments Integration Suite", () => {
       expect(vendorWallet.pendingBalance).toBe(95000);
 
       const developerWallet = await DeveloperWallet.findOne({ developerUser: developerUser._id });
-      expect(developerWallet.pendingBalance).toBe(1000);
+      expect(Number(developerWallet?.pendingBalance || 0)).toBe(0);
 
       const affiliateWallet = await AffiliateWallet.findOne({ affiliateUser: affiliateUser._id });
       expect(affiliateWallet.pendingBalance).toBe(500);
 
       const adminWallet = await AdminWallet.findOne({ adminUser: superAdminUser._id });
-      expect(adminWallet.pendingBalance).toBe(2500);
+      expect(adminWallet.pendingBalance).toBe(3500);
 
       const released = await financialService.releaseEscrowToVendor({
         settlementId: settlement._id,
@@ -603,14 +608,22 @@ describe("Financials & Payments Integration Suite", () => {
       expect(released.status).toBe("RELEASED");
 
       const developerWalletAfter = await DeveloperWallet.findOne({ developerUser: developerUser._id });
-      expect(developerWalletAfter.pendingBalance).toBe(0);
-      expect(developerWalletAfter.availableBalance).toBe(1000);
-      expect(developerWalletAfter.totalEarned).toBe(1000);
+      expect(Number(developerWalletAfter?.availableBalance || 0)).toBe(0);
 
       const adminWalletAfter = await AdminWallet.findOne({ adminUser: superAdminUser._id });
       expect(adminWalletAfter.pendingBalance).toBe(0);
-      expect(adminWalletAfter.availableBalance).toBe(2500);
-      expect(adminWalletAfter.totalEarned).toBe(2500);
+      expect(adminWalletAfter.availableBalance).toBe(3500);
+      expect(adminWalletAfter.totalEarned).toBe(3500);
+
+      // Release empties MVEC holding to its owners: seller 95,000, MVEC 3,500,
+      // affiliate 500, provider 1,000; the books still add up to zero.
+      const accounts = await LedgerAccount.find({});
+      const byType = (t) => accounts.filter((a) => a.accountType === t).reduce((n, a) => n + Number(a.balance), 0);
+      expect(byType("ESCROW_HOLDING")).toBe(0);
+      expect(byType("VENDOR_PAYABLE")).toBe(95000);
+      expect(byType("PLATFORM_REVENUE")).toBe(3500);
+      expect(byType("AFFILIATE_COMMISSION")).toBe(500);
+      expect(Math.round(accounts.reduce((n, a) => n + Number(a.balance), 0))).toBe(0);
 
       const affiliateWalletAfter = await AffiliateWallet.findOne({ affiliateUser: affiliateUser._id });
       // Affiliate commission is approved only by confirmed delivery, never by a manual escrow release.

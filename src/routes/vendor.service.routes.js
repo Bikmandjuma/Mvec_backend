@@ -19,7 +19,7 @@ router.use(authorize("vendor"));
 router.get("/subscription", getVendorSubscription);               // GET  /api/vendor/subscription
 router.post("/subscription", upgradeVendorSubscription);          // POST /api/vendor/subscription
 router.get("/advertisements", getMyAdvertisements);               // GET  /api/vendor/advertisements
-router.post("/advertisements", createAdvertisement);              // POST /api/vendor/advertisements
+router.post("/advertisements", require("../services/plans.service").requireFeature("promotions"), createAdvertisement);              // POST /api/vendor/advertisements
 router.patch("/advertisements/:id/status", updateMyAdvertisementStatus); // PATCH /api/vendor/advertisements/:id/status
 router.post("/advertisements/:id/end", endMyAdvertisement);             // POST  /api/vendor/advertisements/:id/end
 

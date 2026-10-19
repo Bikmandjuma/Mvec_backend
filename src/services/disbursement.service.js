@@ -1,6 +1,7 @@
 // Sends refunds and seller/affiliate withdrawals to mobile money through Paypack,
 // confirms them from the provider callback (or by polling), and retries.
 const Disbursement = require("../models/Disbursement");
+const ledger = require("./ledger.service");
 const Order = require("../models/Order");
 const AffiliatePayout = require("../models/AffiliatePayout");
 const AffiliateWallet = require("../models/AffiliateWallet");
@@ -26,6 +27,7 @@ async function onSuccess(d) {
     );
     if (payout) {
       await AffiliateWallet.updateOne({ affiliateUser: payout.affiliateUser }, { $inc: { totalWithdrawn: payout.amount } });
+      await ledger.payoutSent({ fromType: "AFFILIATE_COMMISSION", amount: payout.amount, reference: d.gatewayReference, description: "Affiliate withdrawal sent" });
       await notifications.affiliatePayout(payout.affiliateUser, { amount: payout.amount, status: "COMPLETED" });
     }
   }
@@ -37,6 +39,7 @@ async function onSuccess(d) {
     );
     if (payout) {
       await VendorWallet.updateOne({ vendor: payout.vendor }, { $inc: { totalWithdrawn: payout.amount } });
+      await ledger.payoutSent({ fromType: "VENDOR_PAYABLE", ownerId: payout.vendor, amount: payout.amount, reference: payout.payoutNumber, description: `Withdrawal sent (${payout.payoutNumber})` });
       await notifications.vendorPayout(payout.vendor, { amount: payout.amount, status: "PAID", supplier: String(payout.payoutNumber || "").startsWith("SUP-") }).catch(() => {});
     }
   }

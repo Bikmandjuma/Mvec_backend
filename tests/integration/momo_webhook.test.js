@@ -133,7 +133,7 @@ describe("MoMo USSD Push Webhook Integration", () => {
     expect(settlements.length).toBeGreaterThan(0);
     expect(settlements[0].status).toBe("HELD");
 
-    const escrowEntries = await LedgerEntry.find({ relatedOrder: order._id, entryType: "PAYMENT_ESCROW_LOCK" });
+    const escrowEntries = await LedgerEntry.find({ relatedOrder: order._id, entryType: "PAYMENT_RECEIVED" });
     expect(escrowEntries.length).toBe(1);
 
     // 3. Idempotency — replay the exact same callback
