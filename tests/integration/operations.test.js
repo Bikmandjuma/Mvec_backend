@@ -272,6 +272,82 @@ describe("Operations: Reviews, Users, Promotions, Shipping, Notifications, Repor
     });
   });
 
+  describe("2b. Roles: couriers and admins are added, never switched", () => {
+    const bcrypt = require("bcryptjs");
+    async function realAdmin() {
+      const me = await User.create({ Fullname: "Owner Admin", email: "owner@mvec.rw", password: await bcrypt.hash("Owner@12345", 10), phone: "0788000009", role: "super_admin" });
+      return { me, token: jwt.sign({ userId: me._id, role: "super_admin" }, JWT_SECRET) };
+    }
+
+    test("A buyer can't be switched to courier or admin", async () => {
+      for (const role of ["delivery", "super_admin"]) {
+        const res = await request(app).patch(`/api/users/${buyerUser._id}`).set("Authorization", `Bearer ${superAdminToken}`).send({ role });
+        expect(res.status).toBe(400);
+        expect(res.body.message).toMatch(/can't be switched/);
+      }
+      expect((await User.findById(buyerUser._id)).role).toBe("buyer");
+    });
+
+    test("Add courier creates a new courier account and refuses an existing shopper", async () => {
+      const taken = await request(app).post("/api/users/couriers").set("Authorization", `Bearer ${superAdminToken}`)
+        .send({ fullName: "Jean Paul", email: "jeanpaul@gmail.com", phone: "0788555111" });
+      expect(taken.status).toBe(400);
+      expect(taken.body.message).toMatch(/already uses this email/);
+
+      const res = await request(app).post("/api/users/couriers").set("Authorization", `Bearer ${superAdminToken}`)
+        .send({ fullName: "Eric Moto", email: "eric.moto@mvec.rw", phone: "0788555111" });
+      expect(res.status).toBe(201);
+      expect(res.body.user.role).toBe("delivery");
+      const courier = await User.findById(res.body.user.id);
+      expect(courier.phone).toBe("0788555111");
+      expect(await bcrypt.compare("", courier.password)).toBe(false);
+    });
+
+    test("Add admin needs the acting admin's own password", async () => {
+      const { token } = await realAdmin();
+      const body = { fullName: "Grace Ops", email: "grace@mvec.rw", phone: "0788555333" };
+      const wrong = await request(app).post("/api/users/admins").set("Authorization", `Bearer ${token}`).send({ ...body, currentPassword: "nope" });
+      expect(wrong.status).toBe(403);
+      const ok = await request(app).post("/api/users/admins").set("Authorization", `Bearer ${token}`).send({ ...body, currentPassword: "Owner@12345" });
+      expect(ok.status).toBe(201);
+      expect(ok.body.user.role).toBe("super_admin");
+    });
+
+    test("Admin access: not yourself, password required, and can be restored", async () => {
+      const { me, token } = await realAdmin();
+      const self = await request(app).post(`/api/users/${me._id}/admin-access`).set("Authorization", `Bearer ${token}`).send({ active: false, currentPassword: "Owner@12345" });
+      expect(self.status).toBe(400);
+
+      const noPassword = await request(app).post(`/api/users/${superAdmin._id}/admin-access`).set("Authorization", `Bearer ${token}`).send({ active: false });
+      expect(noPassword.status).toBe(403);
+      const removed = await request(app).post(`/api/users/${superAdmin._id}/admin-access`).set("Authorization", `Bearer ${token}`).send({ active: false, currentPassword: "Owner@12345" });
+      expect(removed.status).toBe(200);
+      expect((await User.findById(superAdmin._id)).status).toBe("BLOCK");
+
+      const restored = await request(app).post(`/api/users/${superAdmin._id}/admin-access`).set("Authorization", `Bearer ${token}`).send({ active: true, currentPassword: "Owner@12345" });
+      expect(restored.status).toBe(200);
+      expect((await User.findById(superAdmin._id)).status).toBe("ACTIVE");
+    });
+
+    test("Admins can't be blocked from the user list", async () => {
+      const { token } = await realAdmin();
+      const res = await request(app).patch(`/api/users/${superAdmin._id}`).set("Authorization", `Bearer ${token}`).send({ status: "BLOCK" });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toMatch(/admin access/);
+    });
+
+    test("A courier with a delivery in progress can't be blocked", async () => {
+      const courier = await User.create({ Fullname: "Eric Moto", email: "eric@mvec.rw", password: "x", phone: "0788555222", role: "delivery" });
+      const order = await makeDeliveredOrder();
+      await Order.updateOne({ _id: order._id }, { $set: { orderStatus: "OUT_FOR_DELIVERY", courier: courier._id } });
+      const res = await request(app).patch(`/api/users/${courier._id}`).set("Authorization", `Bearer ${superAdminToken}`).send({ status: "BLOCK" });
+      expect(res.status).toBe(409);
+      await Order.updateOne({ _id: order._id }, { $set: { orderStatus: "DELIVERED" } });
+      const ok = await request(app).patch(`/api/users/${courier._id}`).set("Authorization", `Bearer ${superAdminToken}`).send({ status: "BLOCK" });
+      expect(ok.status).toBe(200);
+    });
+  });
+
   describe("3. Promotions", () => {
     test("Vendor creates a promotion", async () => {
       const res = await request(app)

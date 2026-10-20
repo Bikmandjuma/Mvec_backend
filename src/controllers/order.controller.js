@@ -600,6 +600,7 @@ exports.assignCourier = async (req, res) => {
       const User = require("../models/User");
       const courier = orm.isValidObjectId(courierId) ? await User.findOne({ _id: courierId, role: "delivery" }) : null;
       if (!courier) return res.status(400).json({ message: "Choose a courier account." });
+      if (courier.status && courier.status !== "ACTIVE") return res.status(400).json({ message: "This courier's account is blocked or suspended. Choose another courier." });
       order.courier = courier._id;
     } else {
       order.courier = null;
