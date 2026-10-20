@@ -713,6 +713,25 @@ describe("Financials & Payments Integration Suite", () => {
       expect(payout.amount).toBe(15000);
     });
 
+    test("Seller withdraws released money to mobile money; the balance shows it", async () => {
+      if (!mongoReady) return;
+      await VendorWallet.updateOne({ vendor: vendorUser._id }, { $set: { availableBalance: 30000, totalEarned: 30000 } });
+      const before = await request(app).get("/api/payouts/balance").set("Authorization", `Bearer ${vendorToken}`);
+      expect(before.status).toBe(200);
+      expect(before.body.summary.available).toBe(30000);
+      expect(before.body.summary.minimumPayout).toBe(1000);
+
+      const res = await request(app)
+        .post("/api/payouts/request")
+        .set("Authorization", `Bearer ${vendorToken}`)
+        .send({ amount: 20000, payoutDetails: { accountName: "Vendor", accountNumber: "0788123456" } });
+      expect(res.status).toBe(201);
+      expect(res.body.payout.payoutDetails.bankName).toBe("MTN MoMo");
+
+      const after = await request(app).get("/api/payouts/balance").set("Authorization", `Bearer ${vendorToken}`);
+      expect(after.body.summary.available).toBe(10000);
+    });
+
     test("Should reject payout with insufficient balance", async () => {
       if (!mongoReady) return;
       await AdminWallet.create({

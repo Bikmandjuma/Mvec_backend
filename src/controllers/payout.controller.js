@@ -25,12 +25,14 @@ const walletOf = async (vendorId) =>
 exports.getVendorBalance = async (req, res) => {
   try {
     const vendorId = req.vendorId || req.targetVendorId || req.user.id;
-    const [wallet, fees] = await Promise.all([
+    const [wallet, fees, live] = await Promise.all([
       walletOf(vendorId),
       Settlement.aggregate([
         { $match: { vendor: new orm.Types.ObjectId(String(vendorId)), status: "RELEASED" } },
         { $group: { _id: null, commission: { $sum: "$commissionAmount" } } },
       ]).catch(() => []),
+      // Escrow, holds and payouts worked out from the orders themselves.
+      sellerFinance.summary(vendorId),
     ]);
     const balance = {
       pendingBalance: wallet.pendingBalance || 0,
@@ -41,7 +43,9 @@ exports.getVendorBalance = async (req, res) => {
       commissionPaid: fees[0]?.commission || 0,
     };
     const rate = await require("../services/commission.service").resolveRate({ vendorId: req.vendorId || req.user._id || req.user.id, categoryId: null });
-    return res.status(200).json({ balance, commissionRate: `${rate.percent}%` });
+    // The Payouts, Transactions and Advertisements pages read `summary`.
+    const summary = { ...live, available: balance.availableBalance, minimumPayout: MIN_PAYOUT };
+    return res.status(200).json({ balance, summary, commissionRate: `${rate.percent}%` });
   } catch (error) {
     console.error("Vendor balance failed:", error);
     return res.status(500).json({ message: "We could not load your balance right now. Your money is safe; refresh in a moment." });
@@ -69,12 +73,6 @@ exports.requestPayout = async (req, res) => {
     if (!phoneInfo) {
       return res.status(400).json({ message: "Enter a Rwandan mobile money number: 078/079 (MTN) or 072/073 (Airtel)." });
     }
-    const details = {
-      accountName: String(payoutDetails.accountName).trim(),
-      accountNumber: phoneInfo.formattedNumber,
-      bankName: phoneInfo.provider === "MTN" ? "MTN MoMo" : "Airtel Money",
-    };
-    const method = payoutMethod || (phoneInfo.provider === "MTN" ? "MOMO" : "AIRTEL");
 
     // Reserve the money first; this fails if the balance is too low, even
     // when two withdrawals are sent at the same time.
