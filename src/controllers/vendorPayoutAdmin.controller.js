@@ -2,6 +2,7 @@
 // PENDING -> PROCESSING (approved) -> PAID (transfer reference recorded)
 // PENDING/PROCESSING -> REJECTED (amount returned to the seller's balance)
 const orm = require("../database/orm");
+const ledger = require("../services/ledger.service");
 const { Payout } = require("../models/Payout");
 const VendorWallet = require("../models/VendorWallet");
 const User = require("../models/User");
@@ -60,7 +61,10 @@ exports.approveVendorPayout = async (req, res) => {
           transferReference: result.ref || null,
           ...(result.status === "SUCCESSFUL" ? { status: "PAID", processedAt: new Date() } : {}),
         });
-        if (payout.status === "PAID") await VendorWallet.updateOne({ vendor: payout.vendor }, { $inc: { totalWithdrawn: Number(payout.amount) } });
+        if (payout.status === "PAID") {
+          await VendorWallet.updateOne({ vendor: payout.vendor }, { $inc: { totalWithdrawn: Number(payout.amount) } });
+          await ledger.payoutSent({ fromType: "VENDOR_PAYABLE", ownerId: payout.vendor, amount: payout.amount, reference: payout.payoutNumber, description: `Withdrawal sent by Paypack (${payout.payoutNumber})` });
+        }
       } catch (err) {
         payout = await transition(payout._id, ["PROCESSING"], { status: "PENDING" });
         return res.status(502).json({ message: `Approval undone: ${err.message}`, payout });
@@ -82,6 +86,7 @@ exports.markVendorPayoutPaid = async (req, res) => {
     const payout = await transition(req.params.id, ["PENDING", "PROCESSING"], { status: "PAID", transferReference: ref, processedAt: new Date() });
     if (!payout) return res.status(400).json({ message: "This payout was already completed, rejected or cancelled." });
     await VendorWallet.updateOne({ vendor: payout.vendor }, { $inc: { totalWithdrawn: Number(payout.amount) } });
+    await ledger.payoutSent({ fromType: "VENDOR_PAYABLE", ownerId: payout.vendor, amount: payout.amount, reference: payout.payoutNumber, description: `Withdrawal sent (ref ${ref})` });
     await notify(payout.vendor, "Payout sent", `${fmt(payout.amount)} was sent to ${payout.payoutDetails?.accountNumber || "your mobile money"} (ref ${ref}).`, payout.payoutNumber);
     return res.status(200).json({ message: "Payout marked as paid.", payout });
   } catch (error) {

@@ -229,7 +229,7 @@ module.exports = [
     model: "LedgerAccount", table: "ledger_accounts", collection: "ledgeraccounts",
     fields: {
       accountNumber: str({ len: 80, required: true, unique: true }),
-      accountType: en(["ESCROW_HOLDING", "PLATFORM_REVENUE", "VENDOR_PAYABLE", "SUPPLIER_PAYABLE", "COURIER_PAYABLE", "BUYER_REFUND_HOLD", "DEVELOPER_REVENUE", "ADMIN_REVENUE", "AFFILIATE_COMMISSION", "GATEWAY_FEES"], { required: true, index: true }),
+      accountType: en(["ESCROW_HOLDING", "PLATFORM_REVENUE", "VENDOR_PAYABLE", "SUPPLIER_PAYABLE", "COURIER_PAYABLE", "BUYER_REFUND_HOLD", "DEVELOPER_REVENUE", "ADMIN_REVENUE", "AFFILIATE_COMMISSION", "GATEWAY_FEES", "BUYER_PAYMENTS", "PAID_OUT", "AD_BUDGETS"], { required: true, index: true }),
       ownerId: { type: "ref", ref: "users", fk: false, column: "ownerId" },
       currency: str({ len: 8, default: "RWF", required: true }),
       balance: money({ required: true, default: 0 }),
@@ -243,7 +243,7 @@ module.exports = [
       creditAccount: ref("ledger_accounts", { required: true }),
       amount: money({ required: true }),
       currency: str({ len: 8, default: "RWF", required: true }),
-      entryType: en(["PAYMENT_ESCROW_LOCK", "ESCROW_RELEASE_VENDOR", "PLATFORM_COMMISSION_DEDUCTION", "COURIER_FEE_PAYOUT", "BUYER_REFUND", "ADMIN_MANUAL_ADJUSTMENT", "AFFILIATE_COMMISSION"], { required: true }),
+      entryType: en(["PAYMENT_ESCROW_LOCK", "ESCROW_RELEASE_VENDOR", "PLATFORM_COMMISSION_DEDUCTION", "COURIER_FEE_PAYOUT", "BUYER_REFUND", "ADMIN_MANUAL_ADJUSTMENT", "AFFILIATE_COMMISSION", "PAYMENT_RECEIVED", "PAYOUT_SENT", "AD_BUDGET_RESERVED", "AD_BUDGET_RETURNED", "AD_CLICK_REVENUE", "SUBSCRIPTION_FEE", "GATEWAY_FEE"], { required: true }),
       relatedOrder: ref("orders", { fk: false, index: true }),
       description: text({ required: true }),
     },

@@ -32,7 +32,10 @@ const remaining = (ad) => Math.max(0, Number(ad.budget) - Number(ad.spent || 0) 
 
 // Close a campaign and return what is left of the budget.
 async function finish(ad, status, { reason = "", notify = true } = {}) {
-  const left = remaining(ad);
+  // Only return what was really taken from the seller and not spent yet: a
+  // campaign whose budget was never charged gives nothing back.
+  const stillReserved = Math.max(0, (await sellerFinance.netCharged(ad.publicId)) - Number(ad.spent || 0));
+  const left = Math.min(remaining(ad), stillReserved);
   ad.status = status;
   if (reason) ad.rejectionReason = reason;
   ad.refunded = Number(ad.refunded || 0) + left;
@@ -98,18 +101,26 @@ async function serve({ surface = "shop", q = "", category = "", limit = 4, exclu
   });
 }
 
-// One paid click per visitor per campaign every 30 minutes.
-const recentClicks = new Map();
+// One paid click per visitor per campaign every 30 minutes. Remembered in the
+// database, so restarts or several servers can't bill the same click twice.
+// `visitor` is a signed-in user id or the caller's IP (decided by the route).
+async function claimClick(adId, visitor) {
+  const { sequelize } = require("../database");
+  const key = String(visitor || "unknown").slice(0, 80);
+  await sequelize.query("INSERT IGNORE INTO ad_clicks (advertisementId, visitorKey, lastClickAt, paidClicks) VALUES (?, ?, '1970-01-02', 0)", { replacements: [String(adId), key] });
+  const [result] = await sequelize.query(
+    "UPDATE ad_clicks SET lastClickAt = NOW(3), paidClicks = paidClicks + 1 WHERE advertisementId = ? AND visitorKey = ? AND lastClickAt < NOW(3) - INTERVAL ? SECOND",
+    { replacements: [String(adId), key, Math.round(CLICK_DEDUPE_MS / 1000)] },
+  );
+  return (result?.affectedRows ?? result) > 0;
+}
+
 async function click(publicId, visitor) {
   const ad = await Advertisement.findOne({ publicId });
   if (!ad) throw Object.assign(new Error("Campaign not found"), { status: 404 });
   const result = { productId: ad.productId, charged: 0 };
   if (!isLive(ad)) return result;
-  const key = `${publicId}:${visitor}`;
-  const last = recentClicks.get(key);
-  if (last && Date.now() - last < CLICK_DEDUPE_MS) return result;
-  recentClicks.set(key, Date.now());
-  if (recentClicks.size > 50000) recentClicks.clear();
+  if (!(await claimClick(ad._id, visitor))) return result;
 
   const cost = Math.min(COST_PER_CLICK, remaining(ad));
   const updated = await Advertisement.findOneAndUpdate(
@@ -119,6 +130,11 @@ async function click(publicId, visitor) {
   );
   if (!updated) return result;
   result.charged = cost;
+  // The click is MVEC's ad revenue.
+  await require("./ledger.service").mvecEarned({
+    from: ["AD_BUDGETS"], amount: cost, entryType: "AD_CLICK_REVENUE",
+    reference: ad.publicId, description: `Sponsored click · ${ad.product}`,
+  }).catch((e) => console.error("Ad revenue not recorded:", e.message));
   if (remaining(updated) < Math.min(COST_PER_CLICK, Number(updated.budget))) await finish(updated, "COMPLETED");
   return result;
 }

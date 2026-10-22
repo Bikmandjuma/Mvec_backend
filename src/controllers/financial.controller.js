@@ -39,6 +39,14 @@ exports.getLedgerEntries = async (req, res) => {
       LedgerEntry.countDocuments(filter),
     ]);
 
+    // Where the money is right now: balance per account type (all sellers'
+    // balances added together). Every entry moves money between two accounts,
+    // so the balances always add up to zero.
+    const LedgerAccount = require("../models/LedgerAccount");
+    const accounts = await LedgerAccount.find({}).select("accountType balance").lean();
+    const balances = {};
+    for (const a of accounts) balances[a.accountType] = Math.round(((balances[a.accountType] || 0) + Number(a.balance || 0)) * 100) / 100;
+    const check = Math.round(accounts.reduce((n, a) => n + Number(a.balance || 0), 0) * 100) / 100;
     return res.status(200).json({
       success: true,
       total,
@@ -46,6 +54,8 @@ exports.getLedgerEntries = async (req, res) => {
       totalPages: Math.ceil(total / limit) || 1,
       count: entries.length,
       entries,
+      balances,
+      balanced: check === 0,
     });
   } catch (error) {
     console.error("Error fetching ledger entries:", error);

@@ -28,12 +28,18 @@ exports.createSupportCase = async (req, res) => {
     const CATEGORIES = ["ORDER", "PAYMENT", "ACCOUNT", "VENDOR_ONBOARDING", "TECHNICAL", "OTHER"];
     const PRIORITIES = ["LOW", "MEDIUM", "HIGH", "URGENT"];
 
+    // Premium sellers/suppliers get priority support (only while plans are on).
+    let chosenPriority = PRIORITIES.includes(priority) ? priority : "MEDIUM";
+    if (["vendor", "supplier"].includes(req.user.role)) {
+      const ent = await require("../services/plans.service").entitlements(req.user.id);
+      if (ent.plan === "PREMIUM" && ["LOW", "MEDIUM"].includes(chosenPriority)) chosenPriority = "HIGH";
+    }
     const supportCase = await SupportCase.create({
       ticketNumber: generateTicketNumber(),
       openedBy: req.user.id,
       subject: String(subject).slice(0, 200),
       category: CATEGORIES.includes(category) ? category : "OTHER",
-      priority: PRIORITIES.includes(priority) ? priority : "MEDIUM",
+      priority: chosenPriority,
       description,
     });
     notifications.adminAlert({

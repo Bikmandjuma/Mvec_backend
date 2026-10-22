@@ -116,6 +116,24 @@ async function restoreStock(lines) {
  * left, so two buyers can never both take the last unit. If any line fails,
  * the lines already reserved are put back.
  */
+// Low-stock alert: tell the seller once, when an order takes a product down to
+// (or below) its low-stock level. A Premium tool while plans are on; everyone
+// gets it while they are off.
+async function lowStockAlert(product, sold) {
+  const threshold = Number(product.lowStockThreshold ?? 5);
+  const now = Number(product.stockQuantity) || 0;
+  if (!(threshold > 0) || now > threshold || now + Number(sold) <= threshold) return;
+  const ent = await require("./plans.service").entitlements(product.vendor);
+  if (!ent.features.lowStockAlerts) return;
+  await require("./sellerFinance.service").notify(
+    product.vendor,
+    now <= 0 ? `${product.name} is sold out` : `${product.name} is running low`,
+    now <= 0 ? "The last units were just ordered. Restock it to keep selling." : `Only ${now} left after the latest order. Restock soon so buyers can keep ordering.`,
+    String(product._id),
+    "STOCK",
+  );
+}
+
 async function reserveStock(lines) {
   const reserved = [];
   try {
@@ -129,6 +147,7 @@ async function reserveStock(lines) {
         throw httpError(409, `${line.name} is no longer available in the quantity you selected. Please update your cart.`);
       }
       reserved.push(line);
+      lowStockAlert(updated, line.quantity).catch(() => {});
       if (updated.stockQuantity <= 0) {
         await Product.updateOne(
           { _id: updated._id, stockQuantity: { $lte: 0 } },

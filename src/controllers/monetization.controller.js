@@ -17,7 +17,7 @@ const Product = require("../models/Product");
 
 const SUBSCRIPTION_TIERS = [
   { key: "FREE", name: "Free", price: 0, billing: "Free" },
-  { key: "PREMIUM", name: "Vendor Premium", price: 15000, billing: "Monthly" },
+  { key: "PREMIUM", name: "Seller Premium", price: 5000, billing: "Monthly" },
 ];
 
 const AD_PLACEMENTS = {
@@ -64,9 +64,12 @@ const normalizePlacement = (placement) => {
   return AD_PLACEMENT_LOOKUP[p.toLowerCase()] || "SEARCH_RESULTS";
 };
 
+// Sellers and suppliers share the plans; their store name comes from their profile.
 const resolveVendor = async (userId) => {
   const vendor = await Vendor.findOne({ user: userId });
-  return vendor;
+  if (vendor) return vendor;
+  const Supplier = require("../models/Supplier");
+  return Supplier.findOne({ user: userId });
 };
 
 const mapSubscription = (sub, holder = "") => ({
@@ -74,7 +77,7 @@ const mapSubscription = (sub, holder = "") => ({
   planKey: sub?.plan || "FREE",
   plan:
     sub?.plan === "PREMIUM"
-      ? "Vendor Premium"
+      ? "Seller Premium"
       : "Free",
   holder,
   price: sub?.price || 0,
@@ -114,6 +117,24 @@ const BuyerSubscriptionTier = {
   FREE: { key: "FREE", name: "Free", price: 0, billing: "Free" },
   PREMIUM: { key: "PREMIUM", name: "Buyer Ad Removal", price: 5000, billing: "Monthly" },
 };
+
+// Prices and the program switch come from Admin → Subscriptions.
+async function planInfo() {
+  const ops = await require("../services/platformSettings.service").get();
+  const { FEATURES, FREE_INCLUDES } = require("../services/plans.service");
+  SUBSCRIPTION_TIERS[1].price = ops.sellerPremiumPrice;
+  BuyerSubscriptionTier.PREMIUM.price = ops.buyerPremiumPrice;
+  require("../services/buyerSubscription.service").PREMIUM.price = ops.buyerPremiumPrice;
+  return {
+    programActive: Boolean(ops.subscriptionsEnabled),
+    sellerPremiumPrice: ops.sellerPremiumPrice,
+    buyerPremiumPrice: ops.buyerPremiumPrice,
+    freeProductLimit: ops.freeProductLimit,
+    premiumFeatures: Object.values(FEATURES),
+    freeIncludes: FREE_INCLUDES,
+  };
+}
+const closedMessage = "Paid plans haven't started yet. Everything stays free for now; we'll let you know when they open.";
 
 const mapBuyerSubscription = (sub) => ({
   id: sub?.publicId,
@@ -183,6 +204,7 @@ const mapAdvertisement = (ad) => ({
 // @access  Private (vendor)
 exports.getVendorSubscription = async (req, res) => {
   try {
+    const plans = await planInfo();
     const vendor = await resolveVendor(req.user.id);
     if (!vendor) {
       return res
@@ -201,6 +223,8 @@ exports.getVendorSubscription = async (req, res) => {
       tiers: buildTierRows(subscription, vendor.businessName),
       availableBalance: Number(balance?.availableBalance || 0),
       charges,
+      plans,
+      entitlements: await require("../services/plans.service").entitlements(req.user.id),
     });
   } catch (error) {
     return res.status(500).json({ message: error.message });
@@ -212,6 +236,7 @@ exports.getVendorSubscription = async (req, res) => {
 // @access  Private (vendor)
 exports.upgradeVendorSubscription = async (req, res) => {
   try {
+    await planInfo();
     const vendor = await resolveVendor(req.user.id);
     if (!vendor) {
       return res
@@ -246,11 +271,13 @@ exports.upgradeVendorSubscription = async (req, res) => {
 // @access  Private (buyer)
 exports.getBuyerSubscription = async (req, res) => {
   try {
+    const plans = await planInfo();
     const subscription = await BuyerSubscription.findOne({ buyer: req.user.id });
 
     return res.status(200).json({
       subscription: subscription ? mapBuyerSubscription(subscription) : null,
       tiers: buildBuyerTierRows(subscription),
+      plans,
     });
   } catch (error) {
     return res.status(500).json({ message: error.message });
@@ -262,6 +289,8 @@ exports.getBuyerSubscription = async (req, res) => {
 // @access  Private (buyer)
 exports.upgradeBuyerSubscription = async (req, res) => {
   try {
+    const plans = await planInfo();
+    if (!plans.programActive && normalizePlan(req.body.plan) === "PREMIUM") return res.status(403).json({ message: closedMessage });
     const plan = normalizePlan(req.body.plan);
     let subscription = await BuyerSubscription.findOne({ buyer: req.user.id });
 
@@ -322,6 +351,8 @@ exports.buyerPremiumCheckout = async (req, res) => {
   const Payment = require("../models/Payment");
   const { PREMIUM } = require("../services/buyerSubscription.service");
   try {
+    const plans = await planInfo();
+    if (!plans.programActive) return res.status(403).json({ message: closedMessage });
     const method = String(req.body.method || "momo").toLowerCase();
     const userId = req.user.id;
 

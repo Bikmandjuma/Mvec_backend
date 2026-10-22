@@ -25,6 +25,9 @@ router.get("/", supplier.getSuppliers);                    // GET /api/suppliers
 // Mutating routes are guarded by the caller's supplier team role: team members
 // only get what their role allows, the supplier owner always passes.
 router.get("/me/products", protect, authorize("supplier"), supplier.getMyWholesaleProducts);
+// Plans (Free / Premium), shared with sellers. Closed until an admin opens them.
+router.get("/me/subscription", protect, authorize("supplier"), require("../controllers/monetization.controller").getVendorSubscription);
+router.post("/me/subscription", protect, authorize("supplier"), checkSupplierPermission("finance"), require("../controllers/monetization.controller").upgradeVendorSubscription);
 router.post("/me/products", protect, authorize("supplier"), requireOnboarded, checkSupplierPermission("catalog"), supplier.createWholesaleProduct);
 router.put("/me/products/:productId", protect, authorize("supplier"), requireOnboarded, checkSupplierPermission("catalog"), supplier.updateWholesaleProduct);
 router.delete("/me/products/:productId", protect, authorize("supplier"), requireOnboarded, checkSupplierPermission("catalog"), supplier.deleteWholesaleProduct);
@@ -34,7 +37,7 @@ router.get("/me/finance/summary", ...requireSupplier, dashboard.getFinanceSummar
 router.get("/me/finance/ledger", ...requireSupplier, dashboard.getFinanceLedger);
 router.get("/me/finance/payouts", ...requireSupplier, dashboard.getPayouts);
 router.post("/me/finance/payouts", ...requireSupplier, checkSupplierPermission("finance"), dashboard.requestPayout);
-router.get("/me/finance/analytics", ...requireSupplier, dashboard.getAnalytics);
+router.get("/me/finance/analytics", ...requireSupplier, require("../services/plans.service").requireFeature("growthInsights"), dashboard.getAnalytics);
 
 router.get("/me/deliveries", ...requireSupplier, dashboard.getDeliveries);
 router.get("/me/settlements", ...requireSupplier, dashboard.getSettlements);

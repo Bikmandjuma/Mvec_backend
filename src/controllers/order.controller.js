@@ -381,7 +381,8 @@ async function advanceFulfilment({ order, status, actor }) {
     throw checkoutService.httpError(400, `This order is already ${String(order.orderStatus).toLowerCase().replace(/_/g, " ")}. Choose a later step.`);
   }
   order.orderStatus = next;
-  if (next === "SHIPPED" && !order.shippedAt) order.shippedAt = new Date();
+  // When the parcel leaves the seller; automatic release counts from here.
+  if (["SHIPPED", "OUT_FOR_DELIVERY"].includes(next) && !order.shippedAt) order.shippedAt = new Date();
   await order.save();
   socketService.emitOrderStatusUpdate(order);
   notifications.orderStatusChanged(order, actor).catch(() => {});
@@ -599,6 +600,7 @@ exports.assignCourier = async (req, res) => {
       const User = require("../models/User");
       const courier = orm.isValidObjectId(courierId) ? await User.findOne({ _id: courierId, role: "delivery" }) : null;
       if (!courier) return res.status(400).json({ message: "Choose a courier account." });
+      if (courier.status && courier.status !== "ACTIVE") return res.status(400).json({ message: "This courier's account is blocked or suspended. Choose another courier." });
       order.courier = courier._id;
     } else {
       order.courier = null;
@@ -795,3 +797,57 @@ async function releaseVendorEscrowFunds(orderId, vendorId, session) {
 async function releaseSettlement(settlement, orderId, vendorId, session) {
   await financialService.releaseEscrowToVendor({ settlementId: settlement._id, session });
 }
+
+
+// ---------------------------------------------------------------------------
+// Automatic release: if the buyer neither confirms delivery nor reports a
+// problem within the admin-set number of days after the parcel left the
+// seller, the order is treated as delivered and everyone is paid, exactly as
+// if the buyer had given the code. A reported problem freezes the money
+// (payment status DISPUTED), so disputed orders are never released here.
+// Pickup orders are excluded: the buyer still has to collect them.
+// ---------------------------------------------------------------------------
+exports.autoReleaseDueDeliveries = async (now = new Date()) => {
+  const ops = await require("../services/platformSettings.service").get();
+  const days = Number(ops.autoReleaseDays) || 0;
+  if (!(days > 0)) return { released: 0 };
+  const cutoff = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+  const candidates = await Order.find({
+    paymentStatus: "PAID",
+    orderStatus: { $in: ["SHIPPED", "OUT_FOR_DELIVERY"] },
+    shippingMethod: { $ne: "PICKUP" },
+  }).select("_id shippedAt updatedAt");
+  const due = candidates.filter((o) => new Date(o.shippedAt || o.updatedAt) <= cutoff);
+  let released = 0;
+  for (const { _id } of due) {
+    const session = await orm.startSession();
+    session.startTransaction();
+    try {
+      const order = await Order.findById(_id).session(session);
+      // Re-check inside the transaction: the buyer may have just confirmed or reported a problem.
+      if (!order || order.paymentStatus !== "PAID" || !["SHIPPED", "OUT_FOR_DELIVERY"].includes(order.orderStatus)) {
+        await session.abortTransaction();
+        continue;
+      }
+      const vendors = [...new Set(order.items.filter((i) => i.vendor).map((i) => String(i.vendor)))];
+      for (const vendorId of vendors) await releaseVendorEscrowFunds(order._id, vendorId, session);
+      order.deliveredVendors = vendors;
+      order.orderStatus = "DELIVERED";
+      order.isDelivered = true;
+      order.deliveredAt = new Date();
+      order.adminNotes = `${order.adminNotes || ""} | Delivered automatically: no confirmation or problem reported within ${days} day(s) of shipping.`.slice(0, 2000);
+      await order.save({ session });
+      await financialService.approveAffiliateCommissionsForOrder({ orderId: order._id, session });
+      await session.commitTransaction();
+      released += 1;
+      socketService.emitOrderStatusUpdate(order);
+      notifications.orderDelivered(order, { complete: true, vendorIds: vendors, automatic: true }).catch(() => {});
+    } catch (error) {
+      if (session.inTransaction()) await session.abortTransaction();
+      console.error(`[Auto release] Order ${_id} not released:`, error.message);
+    } finally {
+      session.endSession();
+    }
+  }
+  return { released };
+};

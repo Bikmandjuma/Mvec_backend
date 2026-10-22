@@ -14,6 +14,9 @@ router.get("/search", authorize("vendor", "super_admin"), user.searchUsers);
 
 // ─── ADMIN USER MANAGEMENT ────────────────────────────────────────────────────
 router.get("/", authorize("super_admin"), user.adminListUsers);
+router.post("/couriers", authorize("super_admin"), user.createCourier);
+router.post("/admins", authorize("super_admin"), user.createAdmin);
+router.post("/:id/admin-access", authorize("super_admin"), user.setAdminAccess);
 router.get("/:id", authorize("super_admin"), user.adminGetUser);
 router.patch("/:id", authorize("super_admin"), user.adminUpdateUser);
 
