@@ -534,6 +534,37 @@ module.exports = [
     },
   },
   {
+    // A supplier's store (warehouse, depot, branch). Same idea as a vendor
+    // store: one is primary, products without a store belong to it.
+    model: "SupplierStore", table: "supplier_stores", collection: "supplierstores",
+    indexes: [{ fields: ["supplierId", "isPrimary"] }],
+    hooks: {
+      async beforeSave(row) {
+        if (row.changed("storeName") || !row.slug) {
+          const Model = row.constructor;
+          const base = slugify(row.storeName) || "store";
+          let candidate = base;
+          for (let i = 0; i < 5 && (await Model.count({ where: { slug: candidate } })); i++) candidate = `${base}-${crypto.randomBytes(3).toString("hex")}`;
+          row.slug = candidate;
+        }
+      },
+    },
+    fields: {
+      supplier: ref("suppliers", { required: true, fk: false }),
+      isPrimary: bool(false),
+      storeName: str({ len: 150, required: true }),
+      slug: str({ len: 190, unique: true }),
+      logo: str({ len: 500, default: "" }),
+      description: text({ apiDefault: "" }),
+      businessCategory: str({ len: 120, default: "General" }),
+      contactEmail: str({ len: 190, required: true, lowercase: true }),
+      contactPhone: str({ len: 30, required: true }),
+      "address.city": str({ len: 120, default: "Kigali" }),
+      businessAddress: str({ len: 255, default: "" }),
+      status: en(["ACTIVE", "CLOSED"], { default: "ACTIVE", required: true }),
+    },
+  },
+  {
     model: "WholesaleProduct", table: "wholesale_products", collection: "wholesaleproducts",
     hooks: {
       beforeValidate(row) {
@@ -542,6 +573,9 @@ module.exports = [
     },
     fields: {
       supplier: ref("suppliers", { required: true, index: true, fk: false }),
+      store: ref("supplier_stores", { index: true, fk: false }), // empty = the supplier's primary store
+      // The marketplace listing buyers see once the supplier publishes it.
+      retailProduct: ref("products", { fk: false }),
       name: str({ required: true }),
       shortDescription: str({ len: 500, default: "" }),
       category: str({ len: 120, default: "General" }),
@@ -550,6 +584,7 @@ module.exports = [
       retailPrice: money({ required: true, default: 0 }),
       moq: int({ required: true, default: 1 }),
       stockQuantity: int({ required: true, default: 0 }),
+      lowStockThreshold: int({ required: true, default: 10 }),
       bulkDiscount: num({ required: true, default: 0 }),
       "media.mainImage": str({ len: 1000, default: "" }),
       "media.gallery": json([]),
@@ -574,6 +609,10 @@ module.exports = [
       quote: ref("quotes", { fk: false }),
       category: str({ len: 120, default: "" }),
       stockReserved: bool(false),
+      // The vendor store that receives the goods (empty = the primary store),
+      // and when they were added to its inventory (on completion).
+      store: ref("stores", { fk: false }),
+      stockedAt: date(),
       cancelledBy: str({ len: 20, default: "" }),
       cancelReason: str({ len: 300, default: "" }),
       disputeReason: text({ apiDefault: "" }),

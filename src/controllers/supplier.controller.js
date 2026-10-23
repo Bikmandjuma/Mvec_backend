@@ -3,6 +3,10 @@ const Supplier = require("../models/Supplier");
 const SupplierTeamMember = require("../models/SupplierTeamMember");
 const Product = require("../models/Product");
 const WholesaleProduct = require("../models/WholesaleProduct");
+const StockMovement = require("../models/StockMovement");
+const stock = require("../services/stock.service");
+const supplierStores = require("../services/supplierStore.service");
+const supplierRetail = require("../services/supplierRetail.service");
 
 // Resolve the signed-in supplier's profile document (used by wholesale CRUD).
 async function resolveMySupplier(userId) {
@@ -30,11 +34,24 @@ function sanitizeWholesalePayload(body = {}, defaults = {}) {
     retailPrice: Math.max(0, Number(body.retailPrice ?? defaults.retailPrice ?? 0) || 0),
     moq: Math.max(1, Number(body.moq ?? defaults.moq ?? 1) || 1),
     stockQuantity: Math.max(0, Number(body.stockQuantity ?? defaults.stockQuantity ?? 0) || 0),
+    lowStockThreshold: Math.max(0, Math.floor(Number(body.lowStockThreshold ?? defaults.lowStockThreshold ?? 10) || 0)),
     bulkDiscount: Math.min(100, Math.max(0, Number(body.bulkDiscount ?? defaults.bulkDiscount ?? 0) || 0)),
     media: body.media !== undefined ? body.media : defaults.media || { mainImage: "", gallery: [] },
     // Suppliers choose Active or Archived; Out of stock is set from the stock count.
     ...(["ACTIVE", "ARCHIVED"].includes(body.status) ? { status: body.status } : {}),
   };
+}
+
+// The store a product is stocked in, from body.storeId: undefined = unchanged,
+// empty = the primary store, otherwise one of the supplier's own stores.
+async function storeFromBody(supplier, body = {}) {
+  const raw = body.storeId !== undefined ? body.storeId : body.store;
+  const storeId = raw && typeof raw === "object" ? raw._id : raw;
+  if (storeId === undefined) return {};
+  if (storeId === null || storeId === "") return { store: null };
+  const store = await supplierStores.resolveOwnedStore(supplier, storeId);
+  if (!store) throw Object.assign(new Error("Select one of your own stores."), { status: 400 });
+  return { store: store._id };
 }
 
 // ─── 1. ONBOARD SUPPLIER (complete profile after registering) ──────────────
@@ -226,7 +243,14 @@ exports.getSupplierProducts = async (req, res) => {
       status: "ACTIVE",
     }).sort({ createdAt: -1 });
 
-    return res.status(200).json({ supplier, products });
+    // Where each product ships from (no store = the primary store).
+    const { stores } = await supplierStores.listStores(supplier);
+    const primary = stores.find((st) => st.isPrimary);
+    const shipsFrom = (p) => {
+      const st = stores.find((x) => String(x._id) === String(p.store)) || primary;
+      return st ? { storeName: st.storeName, city: st.address?.city || "" } : null;
+    };
+    return res.status(200).json({ supplier, products: products.map((p) => ({ ...p.toObject(), shipsFrom: shipsFrom(p) })) });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }
@@ -325,7 +349,9 @@ exports.adminUpdateSupplierStatus = async (req, res) => {
 exports.getMyWholesaleProducts = async (req, res) => {
   try {
     const supplier = await resolveMySupplier(req.user.id);
-    const products = await WholesaleProduct.find({ supplier: supplier._id }).sort({ createdAt: -1 });
+    const products = await WholesaleProduct.find({ supplier: supplier._id }).sort({ createdAt: -1 })
+      .populate("store", "storeName isPrimary")
+      .populate("retailProduct", "price stockQuantity status slug sku");
     return res.status(200).json({ success: true, supplier: supplier._id, count: products.length, products });
   } catch (error) {
     return res.status(error.status || 500).json({ message: error.message });
@@ -348,7 +374,7 @@ exports.createWholesaleProduct = async (req, res) => {
     }
 
     const payload = sanitizeWholesalePayload(req.body);
-    const product = await WholesaleProduct.create({ supplier: supplier._id, ...payload });
+    const product = await WholesaleProduct.create({ supplier: supplier._id, ...payload, ...(await storeFromBody(supplier, req.body)) });
 
     return res.status(201).json({ success: true, message: "Wholesale product created.", product });
   } catch (error) {
@@ -376,16 +402,22 @@ exports.updateWholesaleProduct = async (req, res) => {
       retailPrice: product.retailPrice,
       moq: product.moq,
       stockQuantity: product.stockQuantity,
+      lowStockThreshold: product.lowStockThreshold,
       bulkDiscount: product.bulkDiscount,
       media: product.media,
     });
+    const before = Number(product.stockQuantity) || 0;
 
     if (req.body.status !== undefined) {
       product.status = req.body.status;
     }
 
-    Object.assign(product, payload);
+    Object.assign(product, payload, await storeFromBody(supplier, req.body));
     await product.save();
+    // A stock change typed into the product form is a stock count, like on the Inventory page.
+    if (payload.stockQuantity !== before) {
+      await stock.recordWholesaleMovement({ supplier, product, type: "COUNT", before, after: payload.stockQuantity, reason: "Stock count correction", note: "Edited in the product form", performedBy: req.user._id });
+    }
 
     return res.status(200).json({ success: true, message: "Wholesale product updated.", product });
   } catch (error) {
@@ -403,8 +435,92 @@ exports.deleteWholesaleProduct = async (req, res) => {
     if (!product) {
       return res.status(404).json({ message: "Wholesale product not found" });
     }
+    await supplierRetail.hideListing(product);
     return res.status(200).json({ success: true, message: "Wholesale product deleted." });
   } catch (error) {
     return res.status(error.status || 500).json({ message: error.message });
   }
 };
+
+// ─── 13. SUPPLIER: ADJUST STOCK OF A WHOLESALE PRODUCT ───────────────────────
+// @route   PATCH /api/suppliers/me/products/:productId/stock   { mode: add|remove|set, quantity, reason, note }
+// @access  Private (supplier owner, or team roles with "inventory")
+exports.adjustWholesaleStock = async (req, res) => {
+  try {
+    const supplier = await resolveMySupplier(req.user.id);
+    const { mode, quantity, reason, note } = req.body || {};
+    const result = await stock.adjustWholesaleStock({ supplier, productId: req.params.productId, mode, quantity, reason, note, performedBy: req.user._id });
+    return res.status(200).json({ success: true, message: "Stock updated.", ...result });
+  } catch (error) {
+    return res.status(error.statusCode || error.status || 500).json({ message: error.message });
+  }
+};
+
+// ─── 14. SUPPLIER: STOCK HISTORY ─────────────────────────────────────────────
+// @route   GET /api/suppliers/me/stock-movements?product=&limit=
+// @access  Private (supplier and team)
+exports.listWholesaleStockMovements = async (req, res) => {
+  try {
+    const supplier = await resolveMySupplier(req.user.id);
+    const query = { vendor: supplier.user };
+    if (orm.isValidObjectId(req.query.product)) query.product = req.query.product;
+    const movements = await StockMovement.find(query)
+      .sort({ createdAt: -1 })
+      .limit(Math.min(Number(req.query.limit) || 50, 200))
+      .populate("performedBy", "Fullname");
+    return res.status(200).json({ movements, reasons: stock.WHOLESALE_REASONS });
+  } catch (error) {
+    return res.status(error.status || 500).json({ message: error.message });
+  }
+};
+
+// ─── 15. SUPPLIER: STORES (same rules as vendor stores) ──────────────────────
+// @route   GET /api/suppliers/me/stores            -> { store: primary, stores, maxStores }
+// @route   POST /api/suppliers/me/stores           { storeName, contactEmail, contactPhone, city, ... }
+// @route   PUT /api/suppliers/me/stores/:storeId
+// @route   PATCH /api/suppliers/me/stores/:storeId/primary
+// @route   DELETE /api/suppliers/me/stores/:storeId (its products move to the primary store)
+// @route   POST /api/suppliers/me/products/move-store   { productIds, storeId, note }
+// @access  Private (supplier; changes need "profile", moving products "inventory")
+const storeAction = (work, status = 200) => async (req, res) => {
+  try {
+    const supplier = await resolveMySupplier(req.user.id);
+    return res.status(status).json(await work(supplier, req));
+  } catch (error) {
+    return res.status(error.statusCode || error.status || 500).json({ message: error.message });
+  }
+};
+
+exports.listMyStores = storeAction((supplier) => supplierStores.listStores(supplier));
+exports.createMyStore = storeAction(async (supplier, req) => {
+  const store = await supplierStores.createStore(supplier, req.body);
+  return { message: `${store.storeName} has been registered.`, store };
+}, 201);
+exports.updateMyStore = storeAction(async (supplier, req) => ({ message: "Store details saved.", store: await supplierStores.updateStore(supplier, req.params.storeId, req.body) }));
+exports.setMyPrimaryStore = storeAction(async (supplier, req) => {
+  const store = await supplierStores.setPrimary(supplier, req.params.storeId);
+  return { message: `${store.storeName} is now your primary store.`, store };
+});
+exports.deleteMyStore = storeAction(async (supplier, req) => {
+  const { store, primary } = await supplierStores.removeStore(supplier, req.params.storeId);
+  return { message: `${store.storeName} was deleted. Its products moved to ${primary.storeName}.` };
+});
+exports.moveProductsToStore = storeAction((supplier, req) => supplierStores.moveProducts(supplier, { ...(req.body || {}), performedBy: req.user._id }));
+
+// ─── 16. SUPPLIER: SELL TO BUYERS ON THE MARKETPLACE ─────────────────────────
+// @route   POST /api/suppliers/me/products/:productId/publish        { price, units }
+// @route   POST /api/suppliers/me/products/:productId/listing-stock  { mode: add|remove, units }
+// @route   POST /api/suppliers/me/products/:productId/unpublish
+// @access  Private (supplier owner, or team roles with "catalog")
+exports.publishToMarketplace = storeAction(async (supplier, req) => {
+  const result = await supplierRetail.publish(supplier, req.params.productId, { ...(req.body || {}), performedBy: req.user._id });
+  return { message: `${result.listing.name} is on the marketplace: ${result.listing.stockQuantity} units at ${Math.round(result.listing.price).toLocaleString("en-RW")} RWF.`, ...result };
+});
+exports.moveListingStock = storeAction(async (supplier, req) => {
+  const result = await supplierRetail.moveListingStock(supplier, req.params.productId, { ...(req.body || {}), performedBy: req.user._id });
+  return { message: `${result.listing.stockQuantity} units are now on the marketplace.`, ...result };
+});
+exports.unpublishFromMarketplace = storeAction(async (supplier, req) => {
+  const result = await supplierRetail.unpublish(supplier, req.params.productId, { performedBy: req.user._id });
+  return { message: `Removed from the marketplace${result.returned ? `; ${result.returned} units went back to wholesale stock` : ""}.`, ...result };
+});

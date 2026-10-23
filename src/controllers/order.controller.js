@@ -132,7 +132,9 @@ exports.getDeliverable = async (req, res) => {
       ],
       orderStatus: { $nin: ["PENDING", "DELIVERED", "COMPLETED", "CANCELLED", "REFUNDED", "RETURNED", "FAILED"] },
     };
-    if (req.user.role === "vendor") query["items.vendor"] = req.user.id;
+    // Sellers (vendors and suppliers) see only orders with their own items.
+    // (a supplier team member works on the owner's orders, set in req.vendorId).
+    if (["vendor", "supplier"].includes(req.user.role)) query["items.vendor"] = req.vendorId || req.user.id;
     if (["delivery", "courier"].includes(req.user.role)) query.courier = req.user.id;
 
     const orders = await Order.find(query)
@@ -411,7 +413,8 @@ exports.updateVendorOrderStatus = async (req, res) => {
     }
 
     if (String(status || "").toUpperCase() === "CANCELLED") {
-      const result = await cancelOrder({ orderId: order._id, actor: req.user });
+      const sellerId = req.user.role === "supplier" ? req.vendorId : undefined;
+      const result = await cancelOrder({ orderId: order._id, actor: req.user, sellerId });
       return res.status(200).json({ message: "Order cancelled and the buyer refunded.", order: result.order });
     }
     await advanceFulfilment({ order, status, actor: req.user });
@@ -478,8 +481,12 @@ exports.confirmOrderDelivery = async (req, res) => {
 
     const role = req.user.role;
     const orderVendors = [...new Set(order.items.filter((i) => i.vendor).map((i) => String(i.vendor)))];
-    const isVendor = role === "vendor" || (role === "super_admin" && req.user.isSellerEnabled && orderVendors.includes(String(req.user.id)));
-    if (role === "vendor" && !orderVendors.includes(String(req.user.id))) {
+    // Suppliers sell their published products like vendors.
+    // A supplier team member confirms for the supplier owner (req.vendorId).
+    const sellerRole = role === "vendor" || role === "supplier";
+    const sellerId = String((role === "supplier" && req.vendorId) || req.user.id);
+    const isVendor = sellerRole || (role === "super_admin" && req.user.isSellerEnabled && orderVendors.includes(sellerId));
+    if (sellerRole && !orderVendors.includes(sellerId)) {
       await session.abortTransaction();
       return res.status(403).json({ message: "You do not sell items in this order." });
     }
@@ -521,7 +528,7 @@ exports.confirmOrderDelivery = async (req, res) => {
       return res.status(400).json({ message: left > 0 ? `Wrong delivery code. ${left} attempt${left === 1 ? "" : "s"} left.` : "Wrong delivery code. This delivery is now locked for MVEC support." });
     }
 
-    const releaseFor = isVendor && role !== "super_admin" ? [String(req.user.id)] : orderVendors;
+    const releaseFor = isVendor && role !== "super_admin" ? [sellerId] : orderVendors;
     for (const vendorId of releaseFor) {
       await releaseVendorEscrowFunds(order._id, vendorId, session);
     }
@@ -648,7 +655,7 @@ const SELLER_CANCELLABLE = ["PENDING", "CONFIRMED", "PROCESSING", "READY_FOR_SHI
  * cannot fulfil (before shipping) and admins.
  * @returns {{ order, isPaid, refundSent }}
  */
-async function cancelOrder({ orderId, actor, reason }) {
+async function cancelOrder({ orderId, actor, reason, sellerId: actingFor }) {
   const session = await orm.startSession();
   session.startTransaction();
   let order;
@@ -661,14 +668,16 @@ async function cancelOrder({ orderId, actor, reason }) {
 
     const role = actor.role;
     const isBuyer = String(order.user) === String(actor.id);
-    const sellerOwnsAll = order.items.length > 0 && order.items.every((i) => i.vendor && String(i.vendor) === String(actor.id));
+    // The seller the actor works for: themselves, or their supplier owner.
+    const sellerId = String(actingFor || actor.id);
+    const sellerOwnsAll = order.items.length > 0 && order.items.every((i) => i.vendor && String(i.vendor) === sellerId);
     if (role === "super_admin") {
       // admins may cancel anything not yet shipped
     } else if (isBuyer) {
       if (!BUYER_CANCELLABLE.includes(order.orderStatus)) {
         throw checkoutService.httpError(400, "This order is already being delivered or closed and cannot be cancelled.");
       }
-    } else if (role === "vendor" && order.items.some((i) => String(i.vendor) === String(actor.id))) {
+    } else if ((role === "vendor" || role === "supplier") && order.items.some((i) => String(i.vendor) === sellerId)) {
       if (!sellerOwnsAll) throw checkoutService.httpError(400, "This order includes other sellers' items. Ask MVEC support to cancel it.");
     } else {
       throw checkoutService.httpError(403, "Access denied.");
@@ -704,7 +713,7 @@ async function cancelOrder({ orderId, actor, reason }) {
     }
     order.cancellationReason = reason || (isBuyer
       ? (isPaid ? "Buyer cancelled within 30 minutes of payment" : "Buyer cancelled before payment")
-      : role === "vendor" ? "Seller could not fulfil the order" : "Cancelled by MVEC");
+      : role === "vendor" || role === "supplier" ? "Seller could not fulfil the order" : "Cancelled by MVEC");
     order.orderStatus = "CANCELLED";
     await order.save({ session });
     await session.commitTransaction();

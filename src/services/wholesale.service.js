@@ -7,7 +7,9 @@
 //                    with the wholesale commission frozen at payment time)
 //   SHIPPED          the supplier sent the goods
 //   CONFIRMED_RELEASED  the vendor confirmed receipt (or 7 days passed without
-//                    a problem report): the supplier is paid, minus commission
+//                    a problem report): the supplier is paid, minus commission,
+//                    and the goods are added to the vendor store chosen at
+//                    ordering (see stock.service)
 //   DISPUTED         the vendor reported a problem; an admin releases or refunds
 //   CANCELLED        before shipping, by the vendor, the supplier or an admin
 //                    (paid orders are refunded the way the vendor paid)
@@ -20,6 +22,8 @@ const Supplier = require("../models/Supplier");
 const WholesaleProduct = require("../models/WholesaleProduct");
 const Settlement = require("../models/Settlement");
 const Payment = require("../models/Payment");
+const stock = require("./stock.service");
+const { resolveOwnedStore } = require("../utils/vendorStore.util");
 
 const HOURS = 60 * 60 * 1000;
 const UNPAID_EXPIRY_HOURS = 48;
@@ -47,13 +51,19 @@ async function inTransaction(work) {
 
 class WholesaleService {
   /** Create an order from the supplier's catalog: validate MOQ, reserve stock. */
-  async createWholesaleOrder({ vendorId, supplierId, items }) {
+  async createWholesaleOrder({ vendorId, supplierId, items, storeId }) {
     if (!orm.isValidObjectId(supplierId)) throw httpError(400, "Invalid supplier ID provided.");
     if (!orm.isValidObjectId(vendorId)) throw httpError(400, "Invalid vendor ID provided.");
     const supplier = await Supplier.findOne({ _id: supplierId, status: "ACTIVE", verificationStatus: "VERIFIED" });
     if (!supplier) throw httpError(400, "Supplier is not active and verified.");
     if (String(supplier.user) === String(vendorId)) throw httpError(400, "You cannot order from yourself.");
     if (!Array.isArray(items) || items.length === 0) throw httpError(400, "At least one wholesale product is required.");
+    // The store that receives the goods; none chosen = the primary store.
+    let store = null;
+    if (storeId) {
+      store = await resolveOwnedStore(vendorId, storeId);
+      if (!store) throw httpError(400, "Choose one of your own stores to receive the goods.");
+    }
 
     const lines = [];
     for (const item of items) {
@@ -85,9 +95,13 @@ class WholesaleService {
         );
         if (!res) throw httpError(409, `'${line.product.name}' just sold out. Please lower the quantity.`);
         taken.push(line);
+        await stock.syncWholesaleStatus(res);
       }
     } catch (error) {
-      for (const line of taken) await WholesaleProduct.updateOne({ _id: line.product._id }, { $inc: { stockQuantity: line.quantity } });
+      for (const line of taken) {
+        await WholesaleProduct.updateOne({ _id: line.product._id }, { $inc: { stockQuantity: line.quantity } });
+        await stock.syncWholesaleStatus(line.product._id);
+      }
       throw error;
     }
 
@@ -99,6 +113,7 @@ class WholesaleService {
       totalAmount: lines.reduce((sum, l) => sum + l.unitPrice * l.quantity, 0),
       category: lines[0].product.category || "",
       stockReserved: true,
+      store: store?._id || null,
       status: "PENDING_PAYMENT",
       deliveryOtp: Math.floor(100000 + Math.random() * 900000).toString(),
     });
@@ -128,7 +143,9 @@ class WholesaleService {
   async releaseStock(order) {
     if (!order.stockReserved) return;
     for (const item of order.items || []) {
-      if (item.product) await WholesaleProduct.updateOne({ _id: item.product }, { $inc: { stockQuantity: Number(item.quantity) || 0 } });
+      if (!item.product) continue;
+      await WholesaleProduct.updateOne({ _id: item.product }, { $inc: { stockQuantity: Number(item.quantity) || 0 } });
+      await stock.syncWholesaleStatus(item.product);
     }
     order.stockReserved = false;
   }
@@ -225,7 +242,7 @@ class WholesaleService {
     return order;
   }
 
-  /** Pay the supplier: release the held settlement (minus commission). */
+  /** Pay the supplier: release the held settlement (minus commission), then stock the vendor's store. */
   async releaseToSupplier(order, how = "Vendor confirmed receipt") {
     const financial = require("./financial.service");
     let net = Number(order.totalAmount);
@@ -243,7 +260,17 @@ class WholesaleService {
       await order.save({ session });
     });
     notify(order.supplier, { type: "PAYOUT", title: `You were paid for ${order.orderNumber}`, message: `${how}. ${rwf(net)} is now in your balance.`, link: "/supplier/payments" });
-    return { order, net };
+    // The money is settled either way; a stocking failure is for MVEC to fix
+    // (POST /wholesale/admin/orders/:id/restock), not a reason to undo it.
+    let stocked = null;
+    try {
+      stocked = await stock.stockVendorStore(order);
+      if (!stocked.skipped) order.stockedAt = new Date();
+    } catch (error) {
+      console.error(`Stocking ${order.orderNumber} failed:`, error.message);
+      notifications().adminAlert({ title: `Stock ${order.orderNumber} by hand`, message: `The order completed but its goods could not be added to the vendor's store: ${error.message}`, link: "/admin/suppliers?tab=wholesale" }).catch(() => {});
+    }
+    return { order, net, stocked };
   }
 
   /** The vendor confirms the goods arrived. */
@@ -251,8 +278,17 @@ class WholesaleService {
     const order = await WholesaleOrder.findOne({ _id: orderId, ...(vendorUserId ? { vendor: vendorUserId } : {}) });
     if (!order) throw httpError(404, "Wholesale order not found.");
     if (!["ESCROW_HELD", "SHIPPED", "DELIVERED"].includes(order.status)) throw httpError(409, `Cannot confirm an order that is ${order.status.toLowerCase().replaceAll("_", " ")}.`);
-    const { net } = await this.releaseToSupplier(order);
-    return { order, supplierReceived: net };
+    const { net, stocked } = await this.releaseToSupplier(order);
+    return { order, supplierReceived: net, stocked: stocked?.stocked || [] };
+  }
+
+  /** Admin: add a completed order's goods to the vendor's store if that failed. */
+  async restockCompletedOrder(orderId) {
+    const order = await WholesaleOrder.findById(orderId);
+    if (!order) throw httpError(404, "Wholesale order not found.");
+    if (order.status !== "CONFIRMED_RELEASED") throw httpError(409, "Only completed orders are added to the vendor's store.");
+    if (order.stockedAt) throw httpError(409, "These goods are already in the vendor's store.");
+    return stock.stockVendorStore(order);
   }
 
   /** Give the vendor's payment back the way they paid. */

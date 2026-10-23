@@ -27,6 +27,7 @@ exports.listMyWholesaleOrders = async (req, res) => {
       WholesaleOrder.find(filter)
         .populate("vendor", "Fullname companyName email phone")
         .populate("supplier", "Fullname companyName email phone")
+        .populate("store", "storeName isPrimary")
         .sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit),
       WholesaleOrder.countDocuments(filter),
     ]);
@@ -38,7 +39,7 @@ exports.listMyWholesaleOrders = async (req, res) => {
 
 exports.createWholesaleOrder = async (req, res) => {
   try {
-    const order = await wholesaleService.createWholesaleOrder({ vendorId: vendorOwnerOf(req), supplierId: (req.body || {}).supplierId, items: (req.body || {}).items });
+    const order = await wholesaleService.createWholesaleOrder({ vendorId: vendorOwnerOf(req), supplierId: (req.body || {}).supplierId, items: (req.body || {}).items, storeId: (req.body || {}).storeId });
     return res.status(201).json({ success: true, message: "Order placed. Pay within 48 hours to keep the stock reserved.", data: order });
   } catch (error) {
     return fail(res, error);
@@ -58,7 +59,9 @@ exports.holdEscrow = async (req, res) => {
 exports.confirmReceipt = async (req, res) => {
   try {
     const result = await wholesaleService.confirmReceiptAndRelease(req.params.orderId, vendorOwnerOf(req));
-    return res.status(200).json({ success: true, message: "Receipt confirmed. The supplier has been paid.", data: result });
+    const units = (result.stocked || []).reduce((n, s) => n + s.quantity, 0);
+    const message = units ? `Receipt confirmed. The supplier has been paid and ${units} unit${units === 1 ? " was" : "s were"} added to your inventory.` : "Receipt confirmed. The supplier has been paid.";
+    return res.status(200).json({ success: true, message, data: result });
   } catch (error) {
     return fail(res, error);
   }
@@ -103,6 +106,15 @@ exports.adminList = async (req, res) => {
       .populate("vendor", "Fullname companyName email phone").populate("supplier", "Fullname companyName email phone")
       .sort({ updatedAt: -1 }).limit(Math.min(Number(req.query.limit) || 50, 200));
     return res.json({ orders });
+  } catch (error) {
+    return fail(res, error);
+  }
+};
+
+exports.adminRestock = async (req, res) => {
+  try {
+    const result = await wholesaleService.restockCompletedOrder(req.params.orderId);
+    return res.json({ success: true, message: "The goods were added to the vendor's store.", data: result });
   } catch (error) {
     return fail(res, error);
   }
