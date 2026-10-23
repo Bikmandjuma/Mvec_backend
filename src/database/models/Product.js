@@ -12,6 +12,7 @@ module.exports = (sequelize) => {
     vendorId: foreignKey(false),
     storeId: foreignKey(true), // null = vendor's primary store
     supplierId: foreignKey(true),
+    wholesaleProductId: foreignKey(true), // set when bought from a supplier's catalog
     categoryId: foreignKey(false),
     brand: { type: DataTypes.STRING(120), allowNull: true },
     name: { type: DataTypes.STRING(255), allowNull: false },
@@ -97,7 +98,7 @@ module.exports = (sequelize) => {
   // Mongo shape: vendor/store/category refs (or populated), nested media + attributes.
   Product.prototype.toApi = function () {
     const plain = withIds(this);
-    const { vendorId, storeId, supplierId, categoryId, vendor, store, category, mainImage, gallery, thumbnails, videos, ...rest } = plain;
+    const { vendorId, storeId, supplierId, wholesaleProductId, categoryId, vendor, store, category, mainImage, gallery, thumbnails, videos, ...rest } = plain;
     const attributes = Object.fromEntries(ATTRIBUTES.filter((a) => rest[a] !== null && rest[a] !== undefined).map((a) => [a, rest[a]]));
     ATTRIBUTES.forEach((a) => delete rest[a]);
     return {
@@ -106,6 +107,7 @@ module.exports = (sequelize) => {
       vendor: vendor ? this.vendor.toApi() : vendorId,
       store: store ? this.store.toApi() : storeId,
       supplier: supplierId,
+      wholesaleProduct: wholesaleProductId,
       category: category ? this.category.toApi() : categoryId,
       media: { mainImage, gallery: gallery || [], thumbnails: thumbnails || [], videos: videos || [] },
       attributes,

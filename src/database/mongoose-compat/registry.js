@@ -98,7 +98,7 @@ const LEGACY = {
     Model: "Product",
     fields: {
       publicId: F("string"), vendor: F("ref", "vendorId", "User"), store: F("ref", "storeId", "Store"), supplier: F("ref", "supplierId", "Supplier"),
-      category: F("ref", "categoryId", "Category"), brand: F("string"), name: F("string"), slug: F("string"), sku: F("string"),
+      wholesaleProduct: F("ref", "wholesaleProductId", "WholesaleProduct"), category: F("ref", "categoryId", "Category"), brand: F("string"), name: F("string"), slug: F("string"), sku: F("string"),
       description: F("string"), shortDescription: F("string"), price: F("number"), costPrice: F("number"), discountPrice: F("number"),
       discountType: F("string"), discountValue: F("number"), stockQuantity: F("number"), lowStockThreshold: F("number"), status: F("string"),
       affiliateEnabled: F("bool"),

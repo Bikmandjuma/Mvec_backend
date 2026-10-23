@@ -28,6 +28,19 @@ router.get("/me/products", protect, authorize("supplier"), supplier.getMyWholesa
 router.post("/me/products", protect, authorize("supplier"), requireOnboarded, checkSupplierPermission("catalog"), supplier.createWholesaleProduct);
 router.put("/me/products/:productId", protect, authorize("supplier"), requireOnboarded, checkSupplierPermission("catalog"), supplier.updateWholesaleProduct);
 router.delete("/me/products/:productId", protect, authorize("supplier"), requireOnboarded, checkSupplierPermission("catalog"), supplier.deleteWholesaleProduct);
+router.patch("/me/products/:productId/stock", protect, authorize("supplier"), requireOnboarded, checkSupplierPermission("inventory"), supplier.adjustWholesaleStock);
+router.get("/me/stock-movements", protect, authorize("supplier"), supplier.listWholesaleStockMovements);
+router.post("/me/products/:productId/publish", protect, authorize("supplier"), requireOnboarded, checkSupplierPermission("catalog"), supplier.publishToMarketplace);
+router.post("/me/products/:productId/listing-stock", protect, authorize("supplier"), requireOnboarded, checkSupplierPermission("catalog"), supplier.moveListingStock);
+router.post("/me/products/:productId/unpublish", protect, authorize("supplier"), requireOnboarded, checkSupplierPermission("catalog"), supplier.unpublishFromMarketplace);
+router.post("/me/products/move-store", protect, authorize("supplier"), requireOnboarded, checkSupplierPermission("inventory"), supplier.moveProductsToStore);
+
+// Supplier stores (warehouses, depots, branches), managed like vendor stores.
+router.get("/me/stores", protect, authorize("supplier"), supplier.listMyStores);
+router.post("/me/stores", protect, authorize("supplier"), requireOnboarded, checkSupplierPermission("profile"), supplier.createMyStore);
+router.put("/me/stores/:storeId", protect, authorize("supplier"), requireOnboarded, checkSupplierPermission("profile"), supplier.updateMyStore);
+router.patch("/me/stores/:storeId/primary", protect, authorize("supplier"), requireOnboarded, checkSupplierPermission("profile"), supplier.setMyPrimaryStore);
+router.delete("/me/stores/:storeId", protect, authorize("supplier"), requireOnboarded, checkSupplierPermission("profile"), supplier.deleteMyStore);
 
 // Supplier dashboard: finance, analytics, operations, reviews and roster.
 router.get("/me/finance/summary", ...requireSupplier, dashboard.getFinanceSummary);

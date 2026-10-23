@@ -1,7 +1,8 @@
 const orm = require("../database/orm");
 const Product = require("../models/Product");
 const StockMovement = require("../models/StockMovement");
-const { getPrimaryStore, resolveOwnedStore } = require("../utils/vendorStore.util");
+const { resolveOwnedStore } = require("../utils/vendorStore.util");
+const { effectiveStoreId, syncStockStatus } = require("../services/stock.service");
 
 const REASONS = {
   RESTOCK: ["Restock", "Received from supplier", "Customer return", "Other"],
@@ -13,24 +14,6 @@ const MODE_TO_TYPE = { add: "RESTOCK", remove: "REMOVE", set: "COUNT" };
 const ownerIds = (req) => {
   const vendorId = req.vendorId || req.targetVendorId || req.user.id;
   return [...new Set([String(req.user.id), String(vendorId)])];
-};
-
-// The store a product is listed under (null store = vendor's primary store).
-const effectiveStoreId = async (product) => {
-  if (product.store) return product.store;
-  const primary = await getPrimaryStore(product.vendor);
-  return primary?._id || null;
-};
-
-// Keeps OUT_OF_STOCK in step with quantity (atomic updates skip save hooks).
-const syncStockStatus = async (product) => {
-  if (product.stockQuantity <= 0 && product.status !== "OUT_OF_STOCK") {
-    return Product.findByIdAndUpdate(product._id, { $set: { status: "OUT_OF_STOCK", stockQuantity: 0 } }, { new: true });
-  }
-  if (product.stockQuantity > 0 && product.status === "OUT_OF_STOCK") {
-    return Product.findByIdAndUpdate(product._id, { $set: { status: "ACTIVE" } }, { new: true });
-  }
-  return product;
 };
 
 // @desc    Add, remove or set a product's stock, recording the movement.

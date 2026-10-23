@@ -5,8 +5,8 @@ const Supplier = require("../models/Supplier");
 // allowed; these capabilities only guard mutations. The supplier account owner
 // is never restricted (handled below).
 const CAPABILITIES_BY_ROLE = {
-  OPERATIONS: ["catalog", "supply", "analytics"],
-  WAREHOUSE: ["supply"],
+  OPERATIONS: ["catalog", "inventory", "supply", "analytics"],
+  WAREHOUSE: ["inventory", "supply"],
   FULFILMENT: ["supply"],
   FINANCE: ["finance", "analytics"],
   VIEWER: [],

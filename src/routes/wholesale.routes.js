@@ -25,6 +25,7 @@ router.post("/orders/:orderId/ship", ...supplierSide, c.markShipped);
 // Admin: oversight, disputes, and orders paid outside MVEC (all audited).
 router.get("/admin/orders", protect, authorize("super_admin"), c.adminList);
 router.post("/admin/orders/:orderId/resolve", protect, authorize("super_admin"), c.adminResolve);
+router.post("/admin/orders/:orderId/restock", protect, authorize("super_admin"), c.adminRestock);
 router.post("/orders/:orderId/hold-escrow", protect, authorize("super_admin"), c.holdEscrow);
 
 module.exports = router;
