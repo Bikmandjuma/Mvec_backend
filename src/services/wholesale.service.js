@@ -115,7 +115,7 @@ class WholesaleService {
       stockReserved: true,
       store: store?._id || null,
       status: "PENDING_PAYMENT",
-      deliveryOtp: Math.floor(100000 + Math.random() * 900000).toString(),
+      deliveryOtp: require("crypto").randomInt(100000, 1000000).toString(),
     });
     notify(supplier.user, {
       type: "ORDER", title: `New wholesale order ${order.orderNumber}`,
@@ -136,7 +136,7 @@ class WholesaleService {
       totalAmount: Math.round(Number(quote.totalAmount)),
       stockReserved: false,
       status: "PENDING_PAYMENT",
-      deliveryOtp: Math.floor(100000 + Math.random() * 900000).toString(),
+      deliveryOtp: require("crypto").randomInt(100000, 1000000).toString(),
     });
   }
 

@@ -18,7 +18,7 @@ const httpError = (statusCode, message) => Object.assign(new Error(message), { s
 const clean = (value, max = 200) => (typeof value === "string" ? value.trim().slice(0, max) : "");
 
 const generateOrderNumber = () => `ORD-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
-const generateDeliveryOtp = () => Math.floor(100000 + Math.random() * 900000).toString();
+const generateDeliveryOtp = () => require("crypto").randomInt(100000, 1000000).toString();
 
 // Name and phone of the person receiving (or collecting) the order.
 function parseRecipient(recipient = {}, role = "receiving the order") {
