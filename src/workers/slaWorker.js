@@ -17,6 +17,8 @@ const disbursementService = require("../services/disbursement.service");
  */
 const UNPAID_ORDER_TTL_MS = 30 * 60 * 1000;
 const PAYMENT_GRACE_MS = 10 * 60 * 1000;
+const PROVIDER_WAIT_MAX_MS = 24 * 60 * 60 * 1000;
+const paymentService = require("../services/payment.service");
 
 const cancelExpiredUnpaidOrders = async () => {
   const expiredBefore = new Date(Date.now() - UNPAID_ORDER_TTL_MS);
@@ -30,6 +32,22 @@ const cancelExpiredUnpaidOrders = async () => {
     });
 
     for (const order of expiredOrders) {
+      // The buyer may have approved the prompt and closed the page, and the
+      // provider's webhook may never have arrived: ask the provider before
+      // cancelling, so a paid order is recorded instead of cancelled.
+      const pendingPayments = await Payment.find({ parentOrder: order._id, status: "PENDING" });
+      let providerUnreachable = false;
+      for (const payment of pendingPayments) {
+        try {
+          await paymentService.syncWithProvider(payment, { skipSandbox: true });
+        } catch (error) {
+          providerUnreachable = true;
+          console.error(`[Cleanup Worker] Could not check payment ${payment.transactionReference}:`, error.message);
+        }
+      }
+      // Never cancel on a guess: wait for the provider to answer, for up to a day.
+      if (providerUnreachable && order.createdAt > new Date(Date.now() - PROVIDER_WAIT_MAX_MS)) continue;
+
       const inFlight = await Payment.exists({
         parentOrder: order._id,
         status: "PENDING",
@@ -199,6 +217,10 @@ exports.initBackgroundWorkers = () => {
   // Confirm or retry refunds and affiliate withdrawals every 5 minutes.
   cron.schedule("*/5 * * * *", () => {
     disbursementService.processDue().catch((err) => console.error("[Disbursement Worker] failed:", err.message));
+    // Settle payments still pending with the provider (missed or rejected webhooks).
+    paymentService.syncPendingPayments()
+      .then((r) => { if (r.paid || r.failed || r.errors) console.log(`[Payment Sync] paid ${r.paid}, failed ${r.failed}, errors ${r.errors}`); })
+      .catch((err) => console.error("[Payment Sync] failed:", err.message));
   });
 
   // Run 3-Hour SLA audit every 15 minutes: "*/15 * * * *"

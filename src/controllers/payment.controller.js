@@ -390,40 +390,8 @@ exports.checkPaymentStatus = async (req, res) => {
       return res.status(404).json({ message: "Payment not found." });
     }
 
-    if (payment.status === "PENDING" && payment.gateway === "PAYPACK" && payment.gatewayReference) {
-      const result = await paypackService.getTransactionStatus(payment.gatewayReference);
-      await paymentService.settlePaypackPayment({
-        payment,
-        status: result.status,
-        amount: result.amount ?? payment.amount,
-        fee: result.fee || 0,
-        payload: result.raw || {},
-      });
-    }
-
-    if (payment.status === "PENDING" && payment.gateway === "KPAY") {
-      const result = await kpayService.checkStatus(payment.transactionReference);
-      await paymentService.settleGatewayPayment({
-        payment, provider: "KPAY", status: result.status, amount: payment.amount,
-        payload: result.raw || {}, externalTransactionId: result.tid || payment.gatewayReference,
-      });
-    }
-
-    if (payment.status === "PENDING" && payment.gateway === "FLUTTERWAVE") {
-      const result = await flutterwaveService.verifyByReference(payment.transactionReference);
-      if (result.status === "SUCCESSFUL" && result.currency && result.currency !== "RWF") {
-        throw Object.assign(new Error("Card payment in an unexpected currency"), { statusCode: 409 });
-      }
-      await paymentService.settleGatewayPayment({
-        payment,
-        provider: "FLUTTERWAVE",
-        status: result.status,
-        amount: result.amount ?? payment.amount,
-        fee: result.fee || 0,
-        payload: result.raw || {},
-        externalTransactionId: result.id,
-      });
-    }
+    // While pending, ask the provider directly (same path as the background sweep).
+    await paymentService.syncWithProvider(payment);
 
     const fresh = await Payment.findById(payment._id);
     const order = fresh.parentOrder
@@ -474,7 +442,7 @@ exports.confirmPayment = async (req, res) => {
     order.paidAt = new Date();
     order.paymentMethod = method;
     if (!order.deliveryOtp) {
-      order.deliveryOtp = Math.floor(100000 + Math.random() * 900000).toString();
+      order.deliveryOtp = require("crypto").randomInt(100000, 1000000).toString();
     }
     await order.save({ session });
 

@@ -120,4 +120,60 @@ describe("30-Minute Unpaid Order Cancellation Worker", () => {
     const product = await Product.findById(mockProduct._id);
     expect(product.stockQuantity).toBe(8);
   });
+
+  describe("asks the payment provider before cancelling (webhook missed)", () => {
+    const paypack = require("../../src/services/paypack.service");
+    const realStatus = paypack.getTransactionStatus;
+
+    beforeEach(async () => {
+      // Real credentials, so the worker is allowed to ask Paypack.
+      process.env.PAYPACK_CLIENT_ID = "test-id";
+      process.env.PAYPACK_CLIENT_SECRET = "test-secret";
+      mockPayment.gateway = "PAYPACK";
+      mockPayment.gatewayReference = "PP-REF-SLA-1";
+      await mockPayment.save();
+    });
+
+    afterEach(() => {
+      paypack.getTransactionStatus = realStatus;
+      delete process.env.PAYPACK_CLIENT_ID;
+      delete process.env.PAYPACK_CLIENT_SECRET;
+    });
+
+    test("4. A payment the buyer approved is recorded, not cancelled", async () => {
+      paypack.getTransactionStatus = async () => ({ status: "SUCCESSFUL", amount: 30000, fee: 0, raw: {} });
+      jest.advanceTimersByTime(45 * 60 * 1000);
+
+      await cancelExpiredUnpaidOrders();
+
+      const order = await Order.findById(mockOrder._id);
+      expect(order.paymentStatus).toBe("PAID");
+      expect(order.orderStatus).not.toBe("CANCELLED");
+      const product = await Product.findById(mockProduct._id);
+      expect(product.stockQuantity).toBe(8);
+    });
+
+    test("5. Does not cancel while the provider cannot be reached", async () => {
+      paypack.getTransactionStatus = async () => { throw new Error("network down"); };
+      jest.advanceTimersByTime(45 * 60 * 1000);
+
+      await cancelExpiredUnpaidOrders();
+
+      const order = await Order.findById(mockOrder._id);
+      expect(order.orderStatus).toBe("PENDING");
+      expect(order.paymentStatus).toBe("PENDING");
+    });
+
+    test("6. A payment the provider reports failed is cancelled as usual", async () => {
+      paypack.getTransactionStatus = async () => ({ status: "FAILED", raw: {} });
+      jest.advanceTimersByTime(45 * 60 * 1000);
+
+      await cancelExpiredUnpaidOrders();
+
+      const order = await Order.findById(mockOrder._id);
+      expect(order.orderStatus).toBe("CANCELLED");
+      const product = await Product.findById(mockProduct._id);
+      expect(product.stockQuantity).toBe(10);
+    });
+  });
 });

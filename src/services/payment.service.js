@@ -76,7 +76,7 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
     if (paymentMethod) order.paymentMethod = paymentMethod;
     order.paidAt = new Date();
     if (!order.deliveryOtp) {
-      order.deliveryOtp = Math.floor(100000 + Math.random() * 900000).toString();
+      order.deliveryOtp = require("crypto").randomInt(100000, 1000000).toString();
     }
     await order.save({ session });
 
@@ -255,3 +255,80 @@ exports.fulfilStandalonePayment = async (payment) => {
 };
 
 exports.settlePaypackPayment = (args) => exports.settleGatewayPayment({ ...args, provider: "PAYPACK" });
+
+// The gateway client for a payment, or null when it cannot be asked for a status.
+function gatewayFor(payment) {
+  if (payment.gateway === "PAYPACK" && payment.gatewayReference) return require("./paypack.service");
+  if (payment.gateway === "KPAY") return require("./kpay.service");
+  if (payment.gateway === "FLUTTERWAVE") return require("./flutterwave.service");
+  return null;
+}
+
+/**
+ * Ask the payment provider what happened to a PENDING payment and apply the
+ * answer (paid → escrow / fulfilment, failed → failed). This is what the
+ * payment page does while the buyer waits, and what the background sweep does
+ * when nobody is waiting, so a missed or rejected webhook never leaves a paid
+ * payment unrecorded. Returns the provider status, or null when nothing was asked.
+ *
+ * skipSandbox: a gateway without credentials answers "SUCCESSFUL" to every
+ * lookup, so background jobs must not ask it.
+ */
+exports.syncWithProvider = async (payment, { skipSandbox = false } = {}) => {
+  if (!payment || payment.status !== "PENDING") return null;
+  const gateway = gatewayFor(payment);
+  if (!gateway || (skipSandbox && gateway.isSandbox())) return null;
+
+  if (payment.gateway === "PAYPACK") {
+    const result = await gateway.getTransactionStatus(payment.gatewayReference);
+    await exports.settlePaypackPayment({
+      payment, status: result.status, amount: result.amount ?? payment.amount, fee: result.fee || 0, payload: result.raw || {},
+    });
+    return result.status;
+  }
+  if (payment.gateway === "KPAY") {
+    const result = await gateway.checkStatus(payment.transactionReference);
+    await exports.settleGatewayPayment({
+      payment, provider: "KPAY", status: result.status, amount: payment.amount,
+      payload: result.raw || {}, externalTransactionId: result.tid || payment.gatewayReference,
+    });
+    return result.status;
+  }
+  const result = await gateway.verifyByReference(payment.transactionReference);
+  if (result.status === "SUCCESSFUL" && result.currency && result.currency !== "RWF") {
+    throw Object.assign(new Error("Card payment in an unexpected currency"), { statusCode: 409 });
+  }
+  await exports.settleGatewayPayment({
+    payment, provider: "FLUTTERWAVE", status: result.status, amount: result.amount ?? payment.amount,
+    fee: result.fee || 0, payload: result.raw || {}, externalTransactionId: result.id,
+  });
+  return result.status;
+};
+
+/**
+ * Background sweep: settle payments still PENDING a few minutes after they
+ * started, for orders, wholesale orders and subscriptions alike. Runs only
+ * against gateways with real credentials.
+ */
+exports.syncPendingPayments = async ({ olderThanMs = 2 * 60 * 1000, withinMs = 72 * 60 * 60 * 1000, limit = 50 } = {}) => {
+  const now = Date.now();
+  const pending = await Payment.find({
+    status: "PENDING",
+    gateway: { $in: ["PAYPACK", "KPAY", "FLUTTERWAVE"] },
+    createdAt: { $lte: new Date(now - olderThanMs), $gte: new Date(now - withinMs) },
+  }).sort({ createdAt: 1 }).limit(limit);
+  const done = { checked: 0, paid: 0, failed: 0, errors: 0 };
+  for (const payment of pending) {
+    try {
+      const status = await exports.syncWithProvider(payment, { skipSandbox: true });
+      if (status === null) continue;
+      done.checked += 1;
+      if (status === "SUCCESSFUL") done.paid += 1;
+      if (status === "FAILED") done.failed += 1;
+    } catch (error) {
+      done.errors += 1;
+      console.error(`[Payment Sync] ${payment.transactionReference}: ${error.message}`);
+    }
+  }
+  return done;
+};
