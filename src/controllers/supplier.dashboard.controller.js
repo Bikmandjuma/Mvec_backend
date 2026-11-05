@@ -554,6 +554,7 @@ exports.adminUpdatePayout = async (req, res) => {
           { $inc: { totalWithdrawn: payout.amount } },
           { session },
         );
+        await require("../services/ledger.service").payoutSent({ fromType: "VENDOR_PAYABLE", ownerId: payout.vendor, amount: payout.amount, reference: payout.payoutNumber, description: `Supplier payout sent (${payout.payoutNumber})`, session });
         payout.processedAt = new Date();
       } else if (status === "REJECTED" || status === "FAILED") {
         await VendorWallet.updateOne(

@@ -4,6 +4,7 @@
 // Flutterwave, K-Pay) to the company bank, then records the withdrawal here
 // so the books match.
 const orm = require("../database/orm");
+const ledger = require("../services/ledger.service");
 const User = require("../models/User");
 const AdminWallet = require("../models/AdminWallet");
 const AdminPayout = require("../models/AdminPayout");
@@ -54,6 +55,7 @@ exports.requestAdminPayout = async (req, res) => {
       accountDetails: { accountName: req.user.Fullname || "MVEC", accountNumber: destination, bankName: note || "Recorded withdrawal" },
       status: "PAID", processedAt: new Date(),
     }], { session });
+    await ledger.payoutSent({ fromType: "PLATFORM_REVENUE", amount, reference: payout.payoutNumber, description: `MVEC withdrawal to ${destination}`, session });
     await session.commitTransaction();
     return res.status(201).json({
       message: `Recorded: ${amount.toLocaleString("en-RW")} RWF moved to ${destination}.`, payout, wallet,

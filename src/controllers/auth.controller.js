@@ -11,7 +11,6 @@ const {
   normalizePhone,
   phoneVariants,
   generateOtpCode,
-  sendOtpSms,
   describePhoneIssue,
 } = require("../utils/sms.util");
 const vendorStaffInvitation = require("../services/vendorStaffInvitation.service");
@@ -538,15 +537,11 @@ exports.loginUser = async (req, res) => {
         : normalizedEmail
         ? { email: normalizedEmail }
         : { phone: { $in: phoneVariantsList } }
-    );
+    ).select("+isVendorStaff");
 
     if (!user) {
       return res.status(400).json({ message: "Invalid email/phone or password" });
     }
-    if (user.status !== "ACTIVE") {
-      return res.status(403).json({ message: "This account is suspended. Contact the store owner or support." });
-    }
-
     // Check if user is a Google-only account without password
     if (!user.password && user.googleId) {
       return res.status(400).json({
@@ -559,6 +554,15 @@ exports.loginUser = async (req, res) => {
     const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) {
       return res.status(400).json({ message: "Invalid email/phone or password" });
+    }
+    // Checked after the password, so a wrong guess can't learn that the account exists.
+    if (user.status !== "ACTIVE") {
+      return res.status(403).json({
+        message: user.isVendorStaff
+          ? "This account is suspended. Contact the store owner or MVEC support."
+          : "This account is blocked or suspended. Contact MVEC support.",
+        code: "ACCOUNT_BLOCKED",
+      });
     }
 
     if (staffInviteToken) {
@@ -857,6 +861,52 @@ const RESET_MAX_ATTEMPTS = 5;
 const sha256 = (value) => crypto.createHash("sha256").update(String(value)).digest("hex");
 const messaging = require("../services/messaging.service");
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const maskEmail = (email) => {
+  const [name, domain] = String(email).split("@");
+  return `${name.slice(0, 2)}•••@${domain}`;
+};
+const maskPhone = (phone) => {
+  const digits = String(phone).replace(/\D/g, "");
+  return `•••${digits.slice(-3)}`;
+};
+
+// Sends a one-time code by every real channel available: a text message when
+// an SMS gateway is set up, and an email when there is an address. Codes are
+// never returned to the screen. Only when neither works on a development
+// server is the text written to the server log instead.
+// Returns { sms, email, log, message } or null when nothing could be sent.
+async function deliverCode({ phone, email, sms, subject, text }) {
+  const sent = { sms: false, email: null, log: false };
+  const provider = messaging.smsProvider();
+  if (phone && provider && provider !== "log") {
+    try {
+      await messaging.sendSms(phone, sms);
+      sent.sms = true;
+    } catch (err) {
+      console.error("Code SMS failed:", err.message);
+    }
+  }
+  if (email && messaging.emailConfigured()) {
+    try {
+      await messaging.sendEmail({ to: email, subject, text });
+      sent.email = maskEmail(email);
+    } catch (err) {
+      console.error("Code email failed:", err.message);
+    }
+  }
+  if (!sent.sms && !sent.email && phone && provider === "log") {
+    await messaging.sendSms(phone, sms);
+    sent.log = true;
+  }
+  if (sent.sms && sent.email) sent.message = `We sent a 6-digit code to your phone (${maskPhone(phone)}) and to ${sent.email}.`;
+  else if (sent.email) sent.message = `We emailed a 6-digit code to ${sent.email}. Check your inbox and spam folder.`;
+  else if (sent.sms) sent.message = `We texted a 6-digit code to ${maskPhone(phone)}.`;
+  else if (sent.log) sent.message = "Text messages are not set up on this server yet, so the code was written to the server log.";
+  else return null;
+  return sent;
+}
+
 async function findResetUser({ email, phone }) {
   if (email && typeof email === "string" && email.trim()) {
     return User.findOne({ email: email.trim().toLowerCase() })
@@ -875,14 +925,11 @@ exports.forgotPassword = async (req, res) => {
     if (!byEmail && !normalizePhone(phone)) {
       return res.status(400).json({ message: "Enter the email or phone number on your account." });
     }
-    if (!byEmail && !messaging.smsAvailable()) {
-      return res.status(503).json({ message: "Text messages are not available right now. Use your email address instead." });
-    }
 
     const genericResponse = {
       message: byEmail
         ? "If an account uses that email, we sent it a 6-digit code."
-        : "If an account uses that phone number, we sent it a 6-digit code.",
+        : "If an account uses that phone number, we sent a 6-digit code by text message or to the email on the account.",
     };
 
     const user = await findResetUser({ email, phone });
@@ -899,29 +946,36 @@ exports.forgotPassword = async (req, res) => {
     user.resetPasswordExpires = undefined;
     await user.save({ validateBeforeSave: false });
 
+    const emailText = `Your password reset code is ${code}.\nIt expires in 15 minutes.\nIf you did not ask to reset your password, you can ignore this email.`;
+    let delivered = false;
     try {
       if (byEmail) {
-        await messaging.sendEmail({
-          to: user.email,
-          subject: "Your MVEC password reset code",
-          text: `Your password reset code is ${code}.\nIt expires in 15 minutes.\nIf you did not ask to reset your password, you can ignore this email.`,
-        });
+        await messaging.sendEmail({ to: user.email, subject: "Your MVEC password reset code", text: emailText });
+        delivered = true;
       } else {
-        await messaging.sendSms(user.phone, `Your MVEC password reset code is ${code}. It expires in 15 minutes.`);
+        // By phone: a text message when SMS is set up, and the account's own
+        // email too, so the code still arrives without an SMS gateway.
+        delivered = Boolean(await deliverCode({
+          phone: user.phone,
+          email: user.email,
+          sms: `Your MVEC password reset code is ${code}. It expires in 15 minutes.`,
+          subject: "Your MVEC password reset code",
+          text: emailText,
+        }));
       }
     } catch (sendError) {
       console.error("Password reset delivery failed:", sendError.message);
+    }
+    if (!delivered) {
       user.resetPasswordCode = undefined;
       user.resetPasswordCodeExpires = undefined;
       await user.save({ validateBeforeSave: false });
-      return res.status(502).json({ message: "We could not send the code. Please try again in a few minutes." });
+      return byEmail
+        ? res.status(502).json({ message: "We could not send the code. Please try again in a few minutes." })
+        : res.status(503).json({ message: "Text messages are not available right now. Use your email address instead." });
     }
 
-    return res.status(200).json({
-      ...genericResponse,
-      // Local development only, when no real provider is configured.
-      ...(process.env.NODE_ENV === "development" && !byEmail && messaging.smsProvider() === "log" && { devCode: code }),
-    });
+    return res.status(200).json(genericResponse);
   } catch (error) {
     console.error("Forgot Password Error:", error);
     return res.status(500).json({ message: "Failed to process request" });
@@ -1250,20 +1304,35 @@ exports.sendOtp = async (req, res) => {
       consumed: false,
     });
 
-    // 5. Deliver the code through the SMS provider (printed to the log in
-    //    development). Tell the user honestly when SMS is unavailable.
+    // 5. Deliver the code by text message and email. An existing account's
+    //    code only ever goes to that account's own email, never to an address
+    //    typed into the form, so knowing someone's phone number is not enough
+    //    to sign in as them.
+    const account = await User.findOne({ phone: { $in: phoneVariants(normalizedPhone) } });
+    const typedEmail = typeof email === "string" && EMAIL_RE.test(email.trim()) ? email.trim().toLowerCase() : null;
+    let sent = null;
     try {
-      await sendOtpSms(normalizedPhone, code, { purpose });
-    } catch (smsError) {
-      console.error("OTP SMS failed:", smsError.message);
-      return res.status(503).json({ message: "We could not send a text message right now. Try again in a few minutes or use your email." });
+      sent = await deliverCode({
+        phone: normalizedPhone,
+        email: account ? account.email : typedEmail,
+        sms: `Your MVEC verification code is ${code}. It expires in ${Math.round(otpTtlSeconds / 60)} minutes. Never share it.`,
+        subject: "Your MVEC verification code",
+        text: `Your MVEC verification code is ${code}.\nIt expires in ${Math.round(otpTtlSeconds / 60)} minutes.\nNever share this code with anyone. If you did not ask for it, you can ignore this email.`,
+      });
+    } catch (sendError) {
+      console.error("OTP delivery failed:", sendError.message);
+    }
+    if (!sent) {
+      await Otp.updateMany({ phone: normalizedPhone, purpose, consumed: false }, { $set: { consumed: true } });
+      return res.status(503).json({
+        message: account && !account.email
+          ? "We could not send a text message right now. Try again in a few minutes."
+          : "Text messages are not available right now. Add your email address and we will send the code there.",
+        code: "CODE_NOT_SENT",
+      });
     }
 
-    return res.status(200).json({
-      message: `Verification code sent to ${normalizedPhone}`,
-      // In development the code is exposed so flows can be tested end-to-end.
-      ...(process.env.NODE_ENV === "development" && { devCode: code }),
-    });
+    return res.status(200).json({ message: sent.message, sentTo: { sms: sent.sms, email: sent.email } });
   } catch (error) {
     console.error("Error sending OTP:", error);
     return res.status(500).json({ message: "Failed to send verification code" });
@@ -1460,7 +1529,7 @@ async function guestAccountFor(normalizedPhone) {
   return User.findOne({ phone: { $in: phoneVariants(normalizedPhone) } });
 }
 
-// @route POST /api/auth/guest/send-code   { phone }
+// @route POST /api/auth/guest/send-code   { phone, email? }
 exports.guestSendCode = async (req, res) => {
   const normalizedPhone = normalizePhone(req.body?.phone);
   if (!normalizedPhone) {
@@ -1472,7 +1541,7 @@ exports.guestSendCode = async (req, res) => {
   if (existing && existing.role !== "buyer") {
     return res.status(409).json({ message: "This number belongs to a business account. Log in to buy with it, or use another number." });
   }
-  req.body = { phone: normalizedPhone, purpose: "login" };
+  req.body = { phone: normalizedPhone, purpose: "login", email: req.body?.email };
   return exports.sendOtp(req, res);
 };
 

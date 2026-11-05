@@ -100,6 +100,11 @@ exports.adminUpdateUser = async (req, res) => {
 
     const { role, status, Fullname, email, phone, gender } = req.body;
 
+    // Roles are never switched on an existing account (see ROLE RULES below).
+    if (role !== undefined && role !== user.role) {
+      return res.status(400).json({ message: ROLE_LOCKED_MESSAGE });
+    }
+
     if (status !== undefined) {
       const normalizedStatus = normalizeStatus(status);
       if (!USER_STATUS_VALUES.includes(normalizedStatus)) {
@@ -108,20 +113,21 @@ exports.adminUpdateUser = async (req, res) => {
           allowed: USER_STATUS_VALUES,
         });
       }
+      if (normalizedStatus !== (user.status || "ACTIVE")) {
+        if (String(user._id) === String(req.user._id || req.user.id)) {
+          return res.status(400).json({ message: "You cannot block or suspend your own account." });
+        }
+        if (user.role === "super_admin") {
+          return res.status(400).json({ message: "Use “Remove admin access” or “Restore admin access” for admins." });
+        }
+        if (user.role === "delivery" && normalizedStatus !== "ACTIVE") {
+          const active = await activeDeliveriesOf(user._id);
+          if (active) {
+            return res.status(409).json({ message: `This courier has ${active} delivery${active === 1 ? "" : "s"} in progress. Assign ${active === 1 ? "it" : "them"} to another courier on Deliveries first.` });
+          }
+        }
+      }
       user.status = normalizedStatus;
-    }
-
-    if (role !== undefined && role !== user.role) {
-      // Admins can make an account a courier or an admin (or back to buyer).
-      // Sellers, suppliers and affiliates keep their role: it owns their store/wallet.
-      const ASSIGNABLE = ["buyer", "delivery", "super_admin"];
-      if (String(user._id) === String(req.user._id || req.user.id)) {
-        return res.status(400).json({ message: "You cannot change your own role. Ask another admin." });
-      }
-      if (!ASSIGNABLE.includes(role) || !ASSIGNABLE.includes(user.role)) {
-        return res.status(400).json({ message: "Only buyers, couriers and admins can be switched between those roles. Sellers, suppliers and affiliates keep theirs." });
-      }
-      user.role = role;
     }
     if (Fullname !== undefined) user.Fullname = Fullname;
     if (email !== undefined) user.email = email;
@@ -146,6 +152,153 @@ exports.adminUpdateUser = async (req, res) => {
       return res.status(400).json({ message: "Invalid user id format" });
     }
     return res.status(500).json({ message: "Internal Server Error", error: error.message });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// ROLE RULES — who gets which role, and how:
+//   buyer      anyone, by signing up or checking out as a guest
+//   seller     signs up as a seller; MVEC verifies the business (Sellers page)
+//   supplier   signs up as a supplier; MVEC verifies the business (Suppliers page)
+//   affiliate  signs up as an affiliate
+//   courier    added by an admin with "Add courier": a new account for the
+//              delivery partner, never a shopper's account (a courier must not
+//              carry their own orders, and a buyer's orders and payments stay
+//              with the buyer)
+//   admin      added by an admin with "Add admin", confirmed with that admin's
+//              own password; removed or restored the same way
+// No account ever switches role: the role owns the account's store, wallet,
+// orders or deliveries.
+// ---------------------------------------------------------------------------
+const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
+const messaging = require("../services/messaging.service");
+const { normalizePhone, phoneVariants } = require("../utils/sms.util");
+
+const ROLE_LOCKED_MESSAGE = "Roles can't be switched on an existing account. Add couriers with “Add courier” and admins with “Add admin”. Sellers, suppliers and affiliates choose their role when they sign up.";
+const OPEN_DELIVERY = ["DELIVERED", "COMPLETED", "CANCELLED", "RETURNED", "REFUNDED", "FAILED"];
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const activeDeliveriesOf = (courierId) => Order.countDocuments({ courier: courierId, orderStatus: { $nin: OPEN_DELIVERY } });
+const actorId = (req) => String(req.user._id || req.user.id);
+
+// Checks the name, email and phone for a new team account.
+async function newAccountProblem({ name, email, phone }) {
+  if (name.length < 2) return "Enter their full name.";
+  if (!EMAIL_RE.test(email)) return "Enter a valid email address. We send their sign-in instructions there.";
+  if (!phone) return "Enter a valid Rwandan phone number (e.g. 0788123456).";
+  if (await User.exists({ email })) return "An account already uses this email. Couriers and admins get their own new account.";
+  if (phone && (await User.exists({ phone: { $in: phoneVariants(phone) } }))) return "An account already uses this phone number. Couriers and admins get their own new account.";
+  return null;
+}
+
+// Creates the account with an unusable random password: the person sets their
+// own with "Forgot password", so no admin ever knows it.
+async function createTeamAccount({ name, email, phone, role }) {
+  const user = new User({
+    Fullname: name,
+    email,
+    phone: phone ? `0${phone.slice(4)}` : undefined,
+    role,
+    isOnboarded: true,
+    email_verified: true,
+    password: await bcrypt.hash(crypto.randomBytes(32).toString("hex"), 10),
+  });
+  await user.save();
+  return user;
+}
+
+async function sendWelcome(user, what) {
+  try {
+    await messaging.sendEmail({
+      to: user.email,
+      subject: `You were added to MVEC as ${what}`,
+      text: `Hello ${user.Fullname},\n\nMVEC added you as ${what}.\n\nTo start:\n1. Open the MVEC app or website and choose “Log in”.\n2. Tap “Forgot password?” and enter ${user.email}.\n3. Enter the code we email you and choose your password.\n\nIf you were not expecting this, you can ignore this email.`,
+    });
+    return true;
+  } catch (err) {
+    console.error("Welcome email failed:", err.message);
+    return false;
+  }
+}
+
+const createdMessage = (user, emailed) => (emailed
+  ? `${user.Fullname} was added. We emailed ${user.email} how to set a password and sign in.`
+  : `${user.Fullname} was added, but the welcome email could not be sent. Ask them to open MVEC, tap “Forgot password?” and enter ${user.email}.`);
+
+const readTeamInput = (body) => ({
+  name: String(body.fullName || body.Fullname || body.name || "").trim().slice(0, 120),
+  email: String(body.email || "").trim().toLowerCase(),
+  phone: body.phone ? normalizePhone(body.phone) : null,
+});
+
+// @desc    Add a courier (delivery partner) as a new account
+// @route   POST /api/users/couriers   { fullName, email, phone }
+// @access  Private (super_admin)
+exports.createCourier = async (req, res) => {
+  try {
+    const input = readTeamInput(req.body);
+    if (req.body.phone && !input.phone) return res.status(400).json({ message: "Enter a valid Rwandan phone number (e.g. 0788123456)." });
+    const problem = await newAccountProblem(input);
+    if (problem) return res.status(400).json({ message: problem });
+    const user = await createTeamAccount({ ...input, role: "delivery" });
+    const emailed = await sendWelcome(user, "a courier");
+    return res.status(201).json({ message: createdMessage(user, emailed), user: mapUser(user), emailed });
+  } catch (error) {
+    console.error("Adding courier failed:", error);
+    if (error.code === 11000) return res.status(409).json({ message: "Email or phone already in use" });
+    return res.status(500).json({ message: "Could not add the courier. Please try again." });
+  }
+};
+
+// Admin changes to the admin team need the acting admin's own password.
+async function confirmActor(req) {
+  const me = await User.findById(actorId(req));
+  const password = req.body.currentPassword;
+  return Boolean(me && me.password && typeof password === "string" && (await bcrypt.compare(password, me.password)));
+}
+
+// @desc    Add an admin as a new account
+// @route   POST /api/users/admins   { fullName, email, phone, currentPassword }
+// @access  Private (super_admin)
+exports.createAdmin = async (req, res) => {
+  try {
+    if (!(await confirmActor(req))) return res.status(403).json({ message: "Enter your own password to add an admin.", code: "PASSWORD_REQUIRED" });
+    const input = readTeamInput(req.body);
+    if (req.body.phone && !input.phone) return res.status(400).json({ message: "Enter a valid Rwandan phone number (e.g. 0788123456)." });
+    const problem = await newAccountProblem(input);
+    if (problem) return res.status(400).json({ message: problem });
+    const user = await createTeamAccount({ ...input, role: "super_admin" });
+    const emailed = await sendWelcome(user, "an administrator");
+    return res.status(201).json({ message: createdMessage(user, emailed), user: mapUser(user), emailed });
+  } catch (error) {
+    console.error("Adding admin failed:", error);
+    if (error.code === 11000) return res.status(409).json({ message: "Email or phone already in use" });
+    return res.status(500).json({ message: "Could not add the admin. Please try again." });
+  }
+};
+
+// @desc    Remove or restore an admin's access. Removing blocks the account,
+//          so it can no longer sign in; past actions stay in the audit log.
+// @route   POST /api/users/:id/admin-access   { active: boolean, currentPassword }
+// @access  Private (super_admin)
+exports.setAdminAccess = async (req, res) => {
+  try {
+    const active = req.body.active === true;
+    const user = await User.findById(req.params.id);
+    if (!user || user.role !== "super_admin") return res.status(404).json({ message: "Admin not found." });
+    if (String(user._id) === actorId(req)) return res.status(400).json({ message: "You cannot change your own admin access. Ask another admin." });
+    if (!(await confirmActor(req))) return res.status(403).json({ message: `Enter your own password to ${active ? "restore" : "remove"} admin access.`, code: "PASSWORD_REQUIRED" });
+    if (!active) {
+      const others = await User.countDocuments({ role: "super_admin", status: "ACTIVE", _id: { $ne: user._id } });
+      if (!others) return res.status(400).json({ message: "MVEC needs at least one active admin." });
+    }
+    user.status = active ? "ACTIVE" : "BLOCK";
+    await user.save();
+    return res.status(200).json({ message: active ? `${user.Fullname} has admin access again.` : `${user.Fullname} no longer has admin access.`, user: mapUser(user) });
+  } catch (error) {
+    console.error("Changing admin access failed:", error);
+    return res.status(500).json({ message: "Could not change admin access. Please try again." });
   }
 };
 

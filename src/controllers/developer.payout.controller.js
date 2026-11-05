@@ -1,4 +1,5 @@
 const orm = require("../database/orm");
+const ledger = require("../services/ledger.service");
 const DeveloperWallet = require("../models/DeveloperWallet");
 const DeveloperPayout = require("../models/DeveloperPayout");
 const { formatRwandanPhone } = require("../utils/momo.util");
@@ -86,6 +87,7 @@ exports.requestDeveloperPayout = async (req, res) => {
 
     wallet.totalWithdrawn = (wallet.totalWithdrawn || 0) + amount;
     await wallet.save({ session });
+    await ledger.payoutSent({ fromType: "DEVELOPER_REVENUE", amount, reference: payout[0].payoutNumber, description: "Developer withdrawal", session });
 
     await session.commitTransaction();
     session.endSession();

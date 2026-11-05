@@ -142,6 +142,14 @@ exports.getVendorProducts = async (req, res) => {
 exports.createProduct = async (req, res) => {
   try {
     const vendorId = req.vendorId || req.targetVendorId || req.user.id;
+    // Free plan listing limit (only while the subscription program is on).
+    if (req.user.role !== "super_admin") {
+      try {
+        await require("../services/plans.service").assertCanList(vendorId, () => Product.countDocuments({ vendor: vendorId }));
+      } catch (limitError) {
+        return res.status(limitError.statusCode || 403).json({ message: limitError.message, code: limitError.code });
+      }
+    }
     const payload = normalizeProductPayload(req.body, req);
     if (!orm.Types.ObjectId.isValid(payload.category)) {
       return res.status(400).json({ message: "Select a valid category from the category list." });
@@ -390,3 +398,31 @@ exports.getRecommendations = async (req, res) => {
 };
 
 exports.normalizeProductPayload = normalizeProductPayload;
+
+// @desc    Bulk product upload: up to 200 products in one request (the seller's
+//          spreadsheet, read in the browser). Every row goes through exactly
+//          the same rules as adding one product by hand.
+// @route   POST /api/products/bulk   { products: [ {...}, ... ] }
+// @access  Private (Vendor / staff with product permission)
+exports.bulkCreateProducts = async (req, res) => {
+  const rows = Array.isArray(req.body?.products) ? req.body.products : [];
+  if (!rows.length) return res.status(400).json({ message: "Add at least one product row." });
+  if (rows.length > 200) return res.status(400).json({ message: "Upload up to 200 products at a time." });
+  const results = [];
+  for (const [i, row] of rows.entries()) {
+    const outcome = await new Promise((resolve) => {
+      const fakeRes = {
+        statusCode: 200,
+        status(code) { this.statusCode = code; return this; },
+        json(body) { resolve({ status: this.statusCode, body }); return this; },
+      };
+      exports.createProduct({ ...req, body: row }, fakeRes).catch((e) => resolve({ status: 500, body: { message: e.message } }));
+    });
+    const ok = outcome.status < 300;
+    results.push({ row: i + 1, name: row?.name || "", ok, message: ok ? "Created" : outcome.body?.message || "Not created", id: ok ? outcome.body?.product?._id || outcome.body?.product?.id : undefined });
+    // Stop early once the Free plan limit is reached: the rest would fail the same way.
+    if (!ok && outcome.body?.code === "PREMIUM_REQUIRED") break;
+  }
+  const created = results.filter((r) => r.ok).length;
+  return res.status(created ? 201 : 400).json({ message: `${created} of ${rows.length} product${rows.length === 1 ? "" : "s"} created.`, created, results });
+};

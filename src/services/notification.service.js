@@ -166,12 +166,17 @@ module.exports = {
       OUT_FOR_DELIVERY: ["is out for delivery", true],
     };
     const pickupReady = order.shippingMethod === "PICKUP" && order.orderStatus === "READY_FOR_SHIPMENT";
+    const releaseDays = Number((await require("./platformSettings.service").get()).autoReleaseDays) || 0;
+    const autoRelease = order.shippingMethod !== "PICKUP" && ["SHIPPED", "OUT_FOR_DELIVERY"].includes(order.orderStatus) ? releaseDays : 0;
     const [text, sms] = pickupReady ? ["is ready for pickup", true] : labels[order.orderStatus] || [];
     if (!text) return;
     await notify(order.user, {
       type: "DELIVERY",
       title: `Order ${order.orderNumber} ${text}`,
-      message: order.orderStatus === "OUT_FOR_DELIVERY" || pickupReady ? "Have your delivery code ready. Only give it once you have your items." : "",
+      message: [
+        order.orderStatus === "OUT_FOR_DELIVERY" || pickupReady ? "Have your delivery code ready. Only give it once you have your items." : "",
+        autoRelease ? `If you don't confirm delivery or report a problem within ${autoRelease} day${autoRelease === 1 ? "" : "s"}, the seller is paid automatically.` : "",
+      ].filter(Boolean).join(" "),
       reference: order.orderNumber,
       link: orderLink(order),
       sms: sms ? { phone: order.recipient?.phone, text: `MVEC: order ${order.orderNumber} ${text}.` } : undefined,
@@ -189,12 +194,12 @@ module.exports = {
     });
   },
 
-  async orderDelivered(order, { complete, vendorIds = [] } = {}) {
+  async orderDelivered(order, { complete, vendorIds = [], automatic = false } = {}) {
     for (const vendorId of vendorIds) {
       await notify(vendorId, {
         type: "PAYOUT",
         title: `Payment released for ${order.orderNumber}`,
-        message: "The buyer confirmed delivery. Your earnings are now available.",
+        message: automatic ? "No problem was reported in time, so the order counts as delivered. Your earnings are now available." : "The buyer confirmed delivery. Your earnings are now available.",
         reference: order.orderNumber,
         link: "/vendor/payouts",
       });
@@ -212,7 +217,7 @@ module.exports = {
       await notify(order.user, {
         type: "DELIVERY",
         title: `Order ${order.orderNumber} delivered`,
-        message: "Thanks for shopping on MVEC. You can now review the products.",
+        message: automatic ? "No problem was reported in time, so the seller has been paid. If something is wrong, contact MVEC support." : "Thanks for shopping on MVEC. You can now review the products.",
         reference: order.orderNumber,
         link: orderLink(order),
       });
@@ -274,7 +279,7 @@ module.exports = {
         title: `Problem reported on ${order.orderNumber}`,
         message: `The buyer reported: ${reason}. Payment is on hold. Respond with your side so MVEC can resolve it.`,
         reference,
-        link: "/vendor/refunds",
+        link: `/vendor/refunds?case=${dispute._id}`,
       });
     }
     for (const id of await adminIds()) {
@@ -283,7 +288,7 @@ module.exports = {
         title: `Problem reported on ${order.orderNumber}`,
         message: `${reason}. Payment is on hold until MVEC reviews it.`,
         reference,
-        link: "/admin/disputes",
+        link: `/admin/disputes?case=${dispute._id}`,
       });
     }
     if (order.user) {
@@ -297,6 +302,16 @@ module.exports = {
     }
   },
 
+  // A step in a problem-report case. messages: { buyer, seller, admin } each
+  // { title, message } or absent; each person gets a link to their own view.
+  async disputeUpdate(order, dispute, messages = {}) {
+    const reference = dispute.disputeNumber || order.orderNumber;
+    const caseId = String(dispute._id);
+    if (messages.buyer && order.user) await notify(order.user, { type: "ORDER", ...messages.buyer, reference, link: orderLink(order) });
+    if (messages.seller) for (const id of vendorIdsOf(order)) await notify(id, { type: "ORDER", ...messages.seller, reference, link: `/vendor/refunds?case=${caseId}` });
+    if (messages.admin) for (const id of await adminIds()) await notify(id, { type: "ADMIN", ...messages.admin, reference, link: `/admin/disputes?case=${caseId}` });
+  },
+
   // A new message on a dispute goes to everyone else involved.
   async disputeReply(order, dispute, { fromUserId, fromRole }) {
     const reference = dispute.disputeNumber || order.orderNumber;
@@ -305,10 +320,10 @@ module.exports = {
     const message = `New message on the problem reported for ${order.orderNumber}.`;
     const skip = String(fromUserId);
     for (const id of vendorIdsOf(order)) {
-      if (id !== skip) await notify(id, { type: "ORDER", title, message, reference, link: "/vendor/refunds" });
+      if (id !== skip) await notify(id, { type: "ORDER", title, message, reference, link: `/vendor/refunds?case=${dispute._id}` });
     }
     if (fromRole !== "super_admin") {
-      for (const id of await adminIds()) await notify(id, { type: "ADMIN", title, message, reference, link: "/admin/disputes" });
+      for (const id of await adminIds()) await notify(id, { type: "ADMIN", title, message, reference, link: `/admin/disputes?case=${dispute._id}` });
     }
     const buyer = order.user ? idOf(order.user) : null;
     if (buyer && buyer !== skip) await notify(buyer, { type: "ORDER", title, message, reference, link: orderLink(order) });

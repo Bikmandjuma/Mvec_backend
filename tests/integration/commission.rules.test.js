@@ -51,12 +51,12 @@ describe("Commission rules: per category, seller overrides, configurable shares"
   const as = (who) => ({ Authorization: `Bearer ${tokens[who]}` });
   const rate = (vendorId, categoryId) => commission.resolveRate({ vendorId, categoryId }).then((r) => r.percent);
 
-  test("defaults reproduce the original split: 5% commission, 1% developer, 0.5% affiliate", () => {
+  test("defaults: 5% commission, 0.5% affiliate, and the platform keeps the developer share", () => {
     const s = computeRevenueSplit({ grossTotal: 100000, hasAffiliate: true, gatewayFee: 500 });
     expect(s.totalPlatformFee).toBe(5000);
-    expect(s.developerShare).toBe(1000);
+    expect(s.developerShare).toBe(0);
     expect(s.platformAffiliateShare).toBe(500);
-    expect(s.adminShare).toBe(3000); // 5000 − 1000 − 500 − 500 provider fee
+    expect(s.adminShare).toBe(4000); // 5000 − 500 affiliate − 500 provider fee
     expect(s.vendorNet).toBe(95000);
   });
 

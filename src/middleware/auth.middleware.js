@@ -95,7 +95,7 @@ exports.protect = async (req, res, next) => {
       }
       // Any other non-active status (e.g. a suspended staff account) is also refused.
       if (req.user.status && req.user.status !== "ACTIVE") {
-        return res.status(403).json({ message: "This account is suspended. Contact the store owner or support.", code: "ACCOUNT_BLOCKED" });
+        return res.status(403).json({ message: req.user.isVendorStaff ? "This account is suspended. Contact the store owner or MVEC support." : "This account is suspended. Contact MVEC support.", code: "ACCOUNT_BLOCKED" });
       }
 
       // Sessions created before the latest password change are revoked.

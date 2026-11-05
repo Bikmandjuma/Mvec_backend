@@ -1,4 +1,4 @@
-// Vendor Premium billing: the monthly fee is paid from the seller's available
+// Seller Premium billing: the monthly fee is paid from the seller's available
 // balance (sales earnings). Cancelling stops auto-renew; Premium stays active
 // until the paid period ends. renewDueSubscriptions() runs hourly (slaWorker).
 const Subscription = require("../models/Subscription");
@@ -7,7 +7,10 @@ const VendorWallet = require("../models/VendorWallet");
 const sellerFinance = require("./sellerFinance.service");
 const { notify } = sellerFinance;
 
-const PREMIUM_PRICE = 15000;
+const settings = require("./platformSettings.service");
+// Premium price is set by an admin (Admin → Subscriptions).
+const premiumPrice = async () => Number((await settings.get()).sellerPremiumPrice) || 5000;
+const closedError = () => Object.assign(new Error("Seller Premium isn't open yet. Every tool is free while MVEC grows; we'll let you know when plans start."), { status: 403 });
 const PERIOD_DAYS = 30;
 const addDays = (d, n) => new Date(new Date(d).getTime() + n * 86400000);
 const fmt = (n) => `${Number(n || 0).toLocaleString("en-RW")} RWF`;
@@ -19,6 +22,8 @@ const isActivePremium = (sub) => sub && sub.plan === "PREMIUM" && sub.status ===
 
 // Start (or restart) Premium, paid from the balance.
 async function startPremium(vendorId) {
+  if (!(await settings.get()).subscriptionsEnabled) throw closedError();
+  const PREMIUM_PRICE = await premiumPrice();
   let sub = await Subscription.findOne({ vendor: vendorId });
   if (isActivePremium(sub)) {
     if (!sub.autoRenew) { sub.autoRenew = true; await sub.save(); return { sub, message: "Auto-renew is back on. Premium continues after this period." }; }
@@ -27,7 +32,7 @@ async function startPremium(vendorId) {
   const balance = await VendorWallet.findOne({ vendor: vendorId });
   const now = new Date();
   const ref = `SUB-${now.getTime()}`;
-  const charged = await chargeBalance(vendorId, PREMIUM_PRICE, ref, `Vendor Premium · ${now.toLocaleDateString("en-GB")} – ${addDays(now, PERIOD_DAYS).toLocaleDateString("en-GB")}`);
+  const charged = await chargeBalance(vendorId, PREMIUM_PRICE, ref, `Seller Premium · ${now.toLocaleDateString("en-GB")} – ${addDays(now, PERIOD_DAYS).toLocaleDateString("en-GB")}`);
   if (!charged) {
     const error = new Error(`Premium costs ${fmt(PREMIUM_PRICE)} a month and is paid from your available balance (${fmt(balance?.availableBalance)}). It becomes available once enough sales are released to you.`);
     error.status = 402;
@@ -42,7 +47,7 @@ async function startPremium(vendorId) {
   sub.startDate = now;
   sub.renewalDate = addDays(now, PERIOD_DAYS);
   await sub.save();
-  return { sub, message: `Vendor Premium activated. ${fmt(PREMIUM_PRICE)} was paid from your balance; next renewal ${sub.renewalDate.toLocaleDateString("en-GB")}.` };
+  return { sub, message: `Seller Premium activated. ${fmt(PREMIUM_PRICE)} was paid from your balance; next renewal ${sub.renewalDate.toLocaleDateString("en-GB")}.` };
 }
 
 // Stop auto-renew; Premium stays until the paid period ends.
@@ -69,12 +74,15 @@ async function downgrade(sub) {
 
 // Renew or end Premium subscriptions whose period is over.
 async function renewDueSubscriptions(now = new Date()) {
+  // Program switched off: nothing is charged or ended until it is back on.
+  if (!(await settings.get()).subscriptionsEnabled) return { renewed: 0, ended: 0, paused: true };
+  const PREMIUM_PRICE = await premiumPrice();
   const due = await Subscription.find({ plan: "PREMIUM", status: "ACTIVE", renewalDate: { $lte: now } });
   const result = { renewed: 0, ended: 0 };
   for (const sub of due) {
     if (sub.autoRenew) {
       const from = new Date(sub.renewalDate);
-      const charged = await chargeBalance(sub.vendor, sub.price || PREMIUM_PRICE, `SUB-${now.getTime()}-${String(sub._id).slice(-4)}`, `Vendor Premium renewal · ${from.toLocaleDateString("en-GB")} – ${addDays(from, PERIOD_DAYS).toLocaleDateString("en-GB")}`);
+      const charged = await chargeBalance(sub.vendor, sub.price || PREMIUM_PRICE, `SUB-${now.getTime()}-${String(sub._id).slice(-4)}`, `Seller Premium renewal · ${from.toLocaleDateString("en-GB")} – ${addDays(from, PERIOD_DAYS).toLocaleDateString("en-GB")}`);
       if (charged) {
         sub.renewalDate = addDays(from > now ? from : now, PERIOD_DAYS);
         await sub.save();
@@ -92,4 +100,4 @@ async function renewDueSubscriptions(now = new Date()) {
   return result;
 }
 
-module.exports = { PREMIUM_PRICE, startPremium, cancelPremium, renewDueSubscriptions, isActivePremium };
+module.exports = { premiumPrice, startPremium, cancelPremium, renewDueSubscriptions, isActivePremium };

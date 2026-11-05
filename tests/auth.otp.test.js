@@ -83,32 +83,95 @@ describe("Phone OTP Unit Tests (send-otp / verify-otp)", () => {
       assert.match(res.jsonData.message, /valid Rwandan phone number/);
     });
 
-    it("should normalize the phone, store a hashed code and expose devCode in development", async () => {
+    it("should normalize the phone, store a hashed code and never return the code", async () => {
       let capturedPayload = null;
       Otp.create = async (payload) => {
         capturedPayload = payload;
         return payload;
       };
+      // No SMS gateway in development: the text goes to the server log.
+      const messaging = require("../src/services/messaging.service");
+      const originalSend = messaging.sendSms;
+      let texted = "";
+      messaging.sendSms = async (_phone, text) => { texted = text; };
+      try {
+        const { req, res } = createMockReqRes({
+          body: { phone: "0788123456", purpose: "login" },
+        });
+        await authController.sendOtp(req, res);
 
+        assert.equal(res.statusCode, 200);
+        assert.equal(res.jsonData.devCode, undefined, "codes are never returned to the screen");
+        assert.match(res.jsonData.message, /server log/);
+        const code = texted.match(/\b(\d{6})\b/)[1];
+
+        assert.equal(capturedPayload.phone, "+250788123456");
+        assert.equal(capturedPayload.purpose, "login");
+        assert.equal(
+          capturedPayload.codeHash,
+          sha256(code),
+          "stored codeHash must equal sha256 of the delivered code",
+        );
+        assert.ok(capturedPayload.expiresAt > new Date());
+        assert.equal(capturedPayload.attempts, 0);
+        assert.equal(capturedPayload.consumed, false);
+      } finally {
+        messaging.sendSms = originalSend;
+      }
+    });
+
+    it("should email the code to an existing account's own address, never to a typed one", async () => {
+      const messaging = require("../src/services/messaging.service");
+      const originals = { sendEmail: messaging.sendEmail, emailConfigured: messaging.emailConfigured };
+      const emailed = [];
+      messaging.emailConfigured = () => true;
+      messaging.sendEmail = async ({ to }) => { emailed.push(to); };
+      User.findOne = async () => ({ email: "owner@example.com", phone: "0788123456" });
+      try {
+        const { req, res } = createMockReqRes({
+          body: { phone: "0788123456", purpose: "login", email: "attacker@example.com" },
+        });
+        await authController.sendOtp(req, res);
+        assert.equal(res.statusCode, 200);
+        assert.deepEqual(emailed, ["owner@example.com"]);
+        assert.match(res.jsonData.message, /ow•••@example\.com/);
+        assert.equal(res.jsonData.devCode, undefined);
+      } finally {
+        Object.assign(messaging, originals);
+      }
+    });
+
+    it("should email a new guest at the address they typed", async () => {
+      const messaging = require("../src/services/messaging.service");
+      const originals = { sendEmail: messaging.sendEmail, emailConfigured: messaging.emailConfigured };
+      const emailed = [];
+      messaging.emailConfigured = () => true;
+      messaging.sendEmail = async ({ to }) => { emailed.push(to); };
+      try {
+        const { req, res } = createMockReqRes({
+          body: { phone: "0788123456", purpose: "login", email: "New.Guest@Example.com" },
+        });
+        await authController.sendOtp(req, res);
+        assert.equal(res.statusCode, 200);
+        assert.deepEqual(emailed, ["new.guest@example.com"]);
+        assert.deepEqual(res.jsonData.sentTo, { sms: false, email: "ne•••@example.com" });
+      } finally {
+        Object.assign(messaging, originals);
+      }
+    });
+
+    it("should say so and void the code when nothing can deliver it", async () => {
+      process.env.NODE_ENV = "production";
+      delete process.env.SMS_PROVIDER;
+      let voided = false;
+      Otp.updateMany = async (_q, update) => { if (update.$set?.consumed) voided = true; return {}; };
       const { req, res } = createMockReqRes({
         body: { phone: "0788123456", purpose: "login" },
       });
       await authController.sendOtp(req, res);
-
-      assert.equal(res.statusCode, 200);
-      assert.ok(res.jsonData.devCode, "devCode must be present in development");
-      assert.match(res.jsonData.devCode, /^\d{6}$/);
-
-      assert.equal(capturedPayload.phone, "+250788123456");
-      assert.equal(capturedPayload.purpose, "login");
-      assert.equal(
-        capturedPayload.codeHash,
-        sha256(res.jsonData.devCode),
-        "stored codeHash must equal sha256 of the delivered code",
-      );
-      assert.ok(capturedPayload.expiresAt > new Date());
-      assert.equal(capturedPayload.attempts, 0);
-      assert.equal(capturedPayload.consumed, false);
+      assert.equal(res.statusCode, 503);
+      assert.match(res.jsonData.message, /Add your email/);
+      assert.ok(voided);
     });
 
     it("should respect the resend cooldown (429)", async () => {

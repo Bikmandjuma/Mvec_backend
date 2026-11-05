@@ -25,7 +25,7 @@ class DisputeService {
     const amount = Number(disputedAmount);
     const safeAmount = Number.isFinite(amount) && amount > 0 ? Math.min(amount, order.totalAmount) : order.totalAmount;
 
-    const existing = await Dispute.findOne({ order: orderId, status: { $ne: "REJECTED" } });
+    const existing = await Dispute.findOne({ order: orderId, status: { $nin: ["REJECTED", "WITHDRAWN", "RESOLVED_BUYER_REFUNDED", "RESOLVED_VENDOR_RELEASED", "RESOLVED_SPLIT"] } });
     if (existing) {
       throw new Error(`Active dispute already exists for this order (${existing.disputeNumber}).`);
     }
@@ -41,7 +41,10 @@ class DisputeService {
       description: description.trim().slice(0, 2000),
       disputedAmount: safeAmount,
       status: "OPEN",
+      // The seller's deadline to respond before MVEC steps in (admin setting).
+      respondBy: new Date(Date.now() + (Number((await require("./platformSettings.service").get()).disputeResponseDays) || 3) * 24 * 60 * 60 * 1000),
     });
+    await DisputeEvidence.create({ dispute: dispute._id, submittedBy: raisedById, senderRole: "system", message: "The buyer reported a problem. The payment is on hold until it's resolved.", attachments: [] });
 
     // Freeze order payment status to DISPUTED
     order.paymentStatus = "DISPUTED";
@@ -76,7 +79,8 @@ class DisputeService {
       attachments: attachments || [],
     });
 
-    if (dispute.status === "OPEN") {
+    // The seller has responded once they reply (a buyer adding detail doesn't count).
+    if (dispute.status === "OPEN" && userRole !== "buyer" && String(userId) !== String(dispute.raisedBy)) {
       dispute.status = "EVIDENCE_SUBMITTED";
       await dispute.save();
     }
@@ -100,8 +104,8 @@ class DisputeService {
       const dispute = await Dispute.findById(disputeId).session(session);
       if (!dispute) throw new Error("Dispute not found.");
 
-      if (dispute.status.startsWith("RESOLVED")) {
-        throw new Error("Dispute has already been resolved.");
+      if (dispute.status.startsWith("RESOLVED") || ["WITHDRAWN", "REJECTED"].includes(dispute.status)) {
+        throw new Error("This case is already closed.");
       }
 
       const order = await Order.findById(dispute.order).session(session);
@@ -109,8 +113,8 @@ class DisputeService {
       if (!["REFUND_BUYER", "RELEASE_TO_VENDOR", "SPLIT_SETTLEMENT"].includes(decision)) {
         throw new Error("decision must be REFUND_BUYER, RELEASE_TO_VENDOR or SPLIT_SETTLEMENT.");
       }
-      if (decision === "SPLIT_SETTLEMENT" && (Number(buyerRefundAmount) || 0) + (Number(vendorReleaseAmount) || 0) > Number(dispute.disputedAmount)) {
-        throw new Error("Refund and release amounts can't exceed the disputed amount.");
+      if (decision === "SPLIT_SETTLEMENT" && (Number(buyerRefundAmount) || 0) + (Number(vendorReleaseAmount) || 0) > Number(order.totalAmount)) {
+        throw new Error("The refund and release together cannot exceed the order total.");
       }
 
       if (!["REFUND_BUYER", "RELEASE_TO_VENDOR", "SPLIT_SETTLEMENT"].includes(decision)) {
@@ -148,14 +152,13 @@ class DisputeService {
         refundPayment = await Payment.findOne({ parentOrder: order._id, status: "SUCCESS" }).sort({ createdAt: -1 }).session(session);
         refundAmount = buyerRefundAmount;
         status = "RESOLVED_SPLIT";
-        if (vendorReleaseAmount > 0) {
-          let wallet = await VendorWallet.findOne({ vendor: dispute.vendor }).session(session);
-          if (wallet) {
-            wallet.availableBalance += vendorReleaseAmount;
-            wallet.totalEarned += vendorReleaseAmount;
-            await wallet.save({ session });
-          }
-        }
+        // Refund part, release part, MVEC keeps any remainder; the held
+        // settlements close so delivery can never release them again.
+        await financialService.splitHeldEscrowForOrder({
+          orderId: order._id, buyerRefund: buyerRefundAmount, sellerRelease: vendorReleaseAmount, session, adminUserId: adminId,
+        });
+        order.paymentStatus = buyerRefundAmount > 0 ? "REFUNDED" : "PAID";
+        order.orderStatus = "COMPLETED"; // the case is closed and the money has moved
       }
 
       dispute.status = status;

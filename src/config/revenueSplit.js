@@ -7,7 +7,7 @@
 // 5% commission, of which 20% (= 1% of the sale) to the developer and 10%
 // (= 0.5% of the sale) to an affiliate when the sale came from their link.
 const DEFAULT_COMMISSION_PERCENT = 5;
-const DEFAULT_DEVELOPER_SHARE = 20; // % of the commission
+const DEFAULT_DEVELOPER_SHARE = 0; // % of the commission; the platform keeps the developer share
 const DEFAULT_AFFILIATE_SHARE = 10; // % of the commission
 const GATEWAY_FEE_PAYERS = ["MVEC", "SELLER"];
 

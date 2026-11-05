@@ -67,7 +67,9 @@ async function sendSms(phone, text) {
   const provider = smsProvider();
   if (!provider) throw new Error("SMS is not configured.");
   const sender = process.env.SMS_FROM_NAME || "MVEC";
-  const to = String(phone).startsWith("+") ? phone : `+${phone}`;
+  // Accounts store local numbers (0788…); gateways need +250788….
+  const to = require("../utils/sms.util").normalizePhone(phone);
+  if (!to) throw new Error(`Not a valid Rwandan phone number: ${phone}`);
 
   if (provider === "log") {
     console.log(`[SMS:log] to ${to}: ${text}`);

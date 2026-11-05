@@ -121,7 +121,7 @@ const enforceFulfillmentSLA = async () => {
 /**
  * Initialize Background Jobs
  */
-// 3. Vendor Premium renewals / expiry (hourly).
+// 3. Seller Premium renewals / expiry (hourly).
 const renewSubscriptions = async () => {
   try {
     const { renewDueSubscriptions } = require("../services/subscriptionBilling.service");
@@ -176,6 +176,20 @@ exports.sendPaymentReminders = sendPaymentReminders;
 exports.initBackgroundWorkers = () => {
   cron.schedule("7 * * * *", renewSubscriptions);
   cron.schedule("17 * * * *", endExpiredCampaigns);
+  // Problem reports: MVEC steps in when the seller misses the response
+  // deadline or the buyer doesn't answer an offer (every 30 minutes).
+  cron.schedule("*/30 * * * *", () => {
+    require("../services/disputeCase.service").escalateOverdue()
+      .then((r) => { if (r.escalated) console.log(`[Disputes] ${r.escalated} case(s) passed to MVEC.`); })
+      .catch((e) => console.error("[Disputes] escalation failed:", e.message));
+  });
+  // Pay sellers for shipped orders the buyer neither confirmed nor disputed
+  // within the admin-set number of days (every 15 minutes).
+  cron.schedule("*/15 * * * *", () => {
+    require("../controllers/order.controller").autoReleaseDueDeliveries()
+      .then((r) => { if (r.released) console.log(`[Auto release] ${r.released} order(s) delivered automatically.`); })
+      .catch((e) => console.error("[Auto release] failed:", e.message));
+  });
   // Run 30-min expiration check every minute: "* * * * *"
   cron.schedule("* * * * *", () => {
     cancelExpiredUnpaidOrders();

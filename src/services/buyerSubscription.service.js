@@ -19,12 +19,18 @@ async function activatePremium({ userId, paymentId }) {
   const from = stillActive ? new Date(sub.renewalDate) : now;
   sub.plan = "PREMIUM";
   sub.status = "ACTIVE";
-  sub.price = PREMIUM.price;
+  sub.price = Number((await require("./platformSettings.service").get()).buyerPremiumPrice) || PREMIUM.price;
   sub.billingCycle = "MONTHLY";
   if (!stillActive) sub.startDate = now;
   sub.renewalDate = new Date(from.getTime() + PREMIUM.days * DAY);
   sub.lastPaymentId = String(paymentId);
   await sub.save();
+
+  // The Premium fee is MVEC revenue.
+  await require("./ledger.service").mvecEarned({
+    from: ["BUYER_PAYMENTS"], amount: sub.price, entryType: "SUBSCRIPTION_FEE",
+    reference: String(paymentId), description: "Buyer Premium (ad-free) payment",
+  }).catch((e) => console.error("Premium revenue not recorded:", e.message));
 
   await notifications.premiumActivated(userId, sub.renewalDate).catch(() => {});
   return sub;

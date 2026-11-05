@@ -159,9 +159,16 @@ exports.getEarnings = async (req, res) => {
       if (["REFUNDED", "CANCELLED"].includes(s.status)) continue;
       t.gross += num(s.grossAmount); t.platformFee += num(s.commissionAmount); t.developer += num(s.developerShare);
       t.affiliates += num(s.affiliateShare); t.affiliatesPaidBySellers += num(s.vendorAffiliateShare);
-      t.gatewayFees += num(s.gatewayFee); t.mvecNet += num(s.adminShare); t.sellers += num(s.netAmount);
-      if (s.status === "RELEASED") t.released += num(s.adminShare); else t.held += num(s.adminShare);
+      // MVEC keeps the admin share and the developer share (the platform's).
+      const keeps = num(s.adminShare) + num(s.developerShare);
+      t.gatewayFees += num(s.gatewayFee); t.mvecNet += keeps; t.sellers += num(s.netAmount);
+      if (s.status === "RELEASED") t.released += keeps; else t.held += keeps;
     }
+    // Other MVEC income in the period: sponsored clicks and subscription fees.
+    const LedgerEntry = require("../models/LedgerEntry");
+    const extra = await LedgerEntry.find({ entryType: { $in: ["AD_CLICK_REVENUE", "SUBSCRIPTION_FEE"] }, createdAt: { $gte: new Date(Date.now() - days * DAY) } }).select("entryType amount").lean();
+    t.adRevenue = extra.filter((e) => e.entryType === "AD_CLICK_REVENUE").reduce((n, e) => n + num(e.amount), 0);
+    t.subscriptionRevenue = extra.filter((e) => e.entryType === "SUBSCRIPTION_FEE").reduce((n, e) => n + num(e.amount), 0);
     Object.keys(t).forEach((k) => { t[k] = round(t[k]); });
     return res.json({
       data: rows.map((s) => ({
@@ -169,7 +176,7 @@ exports.getEarnings = async (req, res) => {
         order: orderOf.get(idOf(s.order)) || null,
         seller: nameOf(s.vendor), gross: num(s.grossAmount), platformFee: num(s.commissionAmount), rate: s.commissionRate ?? null, gatewayFeePayer: s.gatewayFeePayer,
         developer: num(s.developerShare), affiliate: num(s.affiliateShare), affiliatePaidBySeller: num(s.vendorAffiliateShare),
-        gatewayFee: num(s.gatewayFee), mvecNet: num(s.adminShare), sellerNet: num(s.netAmount),
+        gatewayFee: num(s.gatewayFee), mvecNet: num(s.adminShare) + num(s.developerShare), sellerNet: num(s.netAmount),
         status: s.status, createdAt: s.createdAt, releasedAt: s.releasedAt,
       })),
       meta: { page: p, pageSize, total },
@@ -181,6 +188,7 @@ exports.getEarnings = async (req, res) => {
 };
 
 // ─── Analytics ─────────────────────────────────────────────────────────────
+const RECEIVED = ["PAID", "CONFIRMED", "DISPUTED"];
 exports.getAnalytics = async (req, res) => {
   try {
     const days = Math.min(365, Math.max(7, num(req.query.days || 30)));
@@ -188,14 +196,17 @@ exports.getAnalytics = async (req, res) => {
     const prevSince = new Date(since.getTime() - days * DAY);
     const [orders, prevOrders, snapshots, settlements, users, payments, disputes] = await Promise.all([
       Order.find({ createdAt: { $gte: since } }).select("totalAmount paymentStatus orderStatus createdAt paymentMethod").limit(50000).lean(),
-      Order.find({ createdAt: { $gte: prevSince, $lt: since }, paymentStatus: { $in: ["PAID", "CONFIRMED"] } }).select("totalAmount").limit(50000).lean(),
+      Order.find({ createdAt: { $gte: prevSince, $lt: since }, paymentStatus: { $in: RECEIVED } }).select("totalAmount").limit(50000).lean(),
       PricingSnapshot.find({ createdAt: { $gte: since } }).select("product vendor grossTotal quantity order").limit(50000).lean(),
       Settlement.find({ createdAt: { $gte: since }, status: { $nin: ["REFUNDED", "CANCELLED"] } }).select("vendor grossAmount adminShare").limit(50000).lean(),
       User.find({ createdAt: { $gte: since } }).select("role createdAt").limit(50000).lean(),
       Payment.find({ createdAt: { $gte: since }, status: "SUCCESS" }).select("gateway method amount").limit(50000).lean(),
       Dispute.countDocuments({ createdAt: { $gte: since } }),
     ]);
-    const paid = orders.filter((o) => ["PAID", "CONFIRMED", "REFUNDED"].includes(o.paymentStatus));
+    // Money was received for these orders. A disputed order was paid (MVEC is
+    // holding the money), so it counts as a sale until it is refunded; the
+    // seller breakdown, payment mix and MVEC Earnings use the same rule.
+    const paid = orders.filter((o) => [...RECEIVED, "REFUNDED"].includes(o.paymentStatus));
     const kept = paid.filter((o) => o.paymentStatus !== "REFUNDED");
     const gmv = kept.reduce((s, o) => s + num(o.totalAmount), 0);
     const prevGmv = prevOrders.reduce((s, o) => s + num(o.totalAmount), 0);
@@ -283,6 +294,14 @@ exports.getRisk = async (_req, res) => {
       Order.find({ paymentStatus: "PAID", orderStatus: { $in: ["CONFIRMED", "PROCESSING", "READY_FOR_SHIPMENT"] }, paidAt: { $lte: new Date(Date.now() - 3 * DAY) } }).select("items.vendor").lean(),
       Disbursement.find({ channel: "MANUAL", status: { $in: ["QUEUED", "FAILED"] }, createdAt: { $lte: new Date(Date.now() - 2 * DAY) } }).select("_id").lean(),
     ]);
+    const [agingDisputes, uncollected, slaBreached, waitingOnBuyer, ops] = await Promise.all([
+      Dispute.find({ status: { $in: ["OPEN", "EVIDENCE_SUBMITTED", "UNDER_REVIEW"] }, createdAt: { $lte: new Date(Date.now() - 3 * DAY) } }).select("vendor disputeNumber createdAt").lean(),
+      Order.find({ paymentStatus: "PAID", shippingMethod: "PICKUP", orderStatus: "READY_FOR_SHIPMENT", updatedAt: { $lte: new Date(Date.now() - 7 * DAY) } }).select("items.vendor").lean(),
+      Order.find({ paymentStatus: "PAID", orderStatus: { $in: ["CONFIRMED", "PROCESSING"] }, slaBreached: true }).select("items.vendor").lean(),
+      Order.find({ paymentStatus: "PAID", orderStatus: { $in: ["SHIPPED", "OUT_FOR_DELIVERY"] }, updatedAt: { $lte: new Date(Date.now() - 3 * DAY) } }).select("_id").lean(),
+      require("../services/platformSettings.service").get(),
+    ]);
+    const autoReleaseOn = Number(ops.autoReleaseDays) > 0;
     const count = (list, pick) => {
       const m = new Map();
       for (const x of list) for (const id of [].concat(pick(x))) if (id) m.set(id, (m.get(id) || 0) + 1);
@@ -298,6 +317,17 @@ exports.getRisk = async (_req, res) => {
     for (const [id, n] of count(stale, (o) => [...new Set((o.items || []).map((i) => idOf(i.vendor)))])) add({ area: "Seller", partyId: id, signal: `${n} paid order${n === 1 ? "" : "s"} not shipped after 3 days`, level: n >= 3 ? "High" : "Low", link: "/admin/deliveries" });
     for (const [id, n] of count(reversals, (x) => idOf(x.affiliateUser))) if (n >= 3) add({ area: "Affiliate", partyId: id, signal: `${n} commissions reversed in 30 days (refunded sales)`, level: n >= 6 ? "High" : "Medium", link: "/admin/affiliates" });
     for (const r of abuse) add({ area: "Abuse report", partyId: idOf(r.targetUser), partyName: nameOf(r.targetUser), signal: `${String(r.reasonCategory || "").toLowerCase().replaceAll("_", " ")}: ${String(r.description || "").slice(0, 120)}`, level: r.reasonCategory === "FRAUDULENT_ACTIVITY" ? "High" : "Medium", link: "", reportId: idOf(r), reportStatus: r.status });
+    // Disputes waiting too long for a decision (the money is frozen meanwhile).
+    for (const d of agingDisputes) {
+      const days = Math.floor((Date.now() - new Date(d.createdAt).getTime()) / DAY);
+      add({ area: "Dispute", partyId: idOf(d.vendor), signal: `Problem report ${d.disputeNumber} open for ${days} days`, level: days >= 7 ? "High" : "Medium", link: "/admin/disputes" });
+    }
+    // Pickup orders ready for a week but never collected.
+    for (const [id, n] of count(uncollected, (o) => [...new Set((o.items || []).map((i) => idOf(i.vendor)))])) add({ area: "Seller", partyId: id, signal: `${n} pickup order${n === 1 ? "" : "s"} ready for over 7 days, not collected`, level: "Low", link: "/admin/deliveries" });
+    // The 3-hour shipping promise was missed (flagged by the SLA job).
+    for (const [id, n] of count(slaBreached, (o) => [...new Set((o.items || []).map((i) => idOf(i.vendor)))])) add({ area: "Seller", partyId: id, signal: `${n} paid order${n === 1 ? "" : "s"} missed the 3-hour dispatch promise`, level: n >= 3 ? "High" : "Low", link: "/admin/orders" });
+    // Shipped orders waiting on the buyer while automatic release is switched off.
+    if (!autoReleaseOn && waitingOnBuyer.length) add({ area: "Payments", signal: `${waitingOnBuyer.length} shipped order${waitingOnBuyer.length === 1 ? "" : "s"} waiting over 3 days for the buyer's code (automatic release is off)`, level: "Medium", link: "/admin/deliveries" });
     if (manual.length) add({ area: "Refunds", signal: `${manual.length} manual refund${manual.length === 1 ? "" : "s"} waiting more than 2 days`, level: "High", link: "/admin/transfers" });
     if (held) add({ area: "Payments", signal: `${held} seller payment${held === 1 ? "" : "s"} on hold by an admin`, level: "Low", link: "/admin/ledger" });
 
@@ -325,9 +355,17 @@ exports.getTrust = async (_req, res) => {
       Settlement.find({ createdAt: { $gte: since } }).select("vendor order status").lean(),
       Dispute.find({ createdAt: { $gte: since } }).select("vendor order").lean(),
     ]);
+    // A buyer cancelling (their right within 30 minutes of paying) is not the
+    // seller's fault, so those orders don't count at all.
+    const refundedIds = [...new Set(settlements.filter((x) => ["REFUNDED", "CANCELLED"].includes(x.status)).map((x) => idOf(x.order)))];
+    const buyerCancelled = new Set(refundedIds.length
+      ? (await Order.find({ _id: { $in: refundedIds } }).select("cancellationReason").lean())
+        .filter((o) => /^Buyer cancelled/i.test(String(o.cancellationReason || ""))).map(idOf)
+      : []);
     const stats = new Map();
     const get = (id) => { if (!stats.has(id)) stats.set(id, { orders: new Set(), released: new Set(), refunded: new Set(), disputed: new Set() }); return stats.get(id); };
     for (const s of settlements) {
+      if (buyerCancelled.has(idOf(s.order))) continue;
       const v = get(idOf(s.vendor)); const o = idOf(s.order);
       v.orders.add(o);
       if (s.status === "RELEASED") v.released.add(o);
@@ -365,6 +403,7 @@ exports.getPlatform = async (_req, res) => {
     const flutterwave = require("../services/flutterwave.service");
     const paypack = require("../services/paypack.service");
     const CommissionRule = require("../models/CommissionRule");
+    const ops = await require("../services/platformSettings.service").get();
     const [queued, failed, activeRules, cfg] = await Promise.all([
       Disbursement.countDocuments({ status: { $in: ["QUEUED", "SENT"] } }),
       Disbursement.countDocuments({ status: "FAILED" }),
@@ -375,7 +414,6 @@ exports.getPlatform = async (_req, res) => {
     return res.json({
       fees: [
         { label: "Default MVEC commission", value: `${cfg.defaultCommissionPercent}%`, detail: `Used when no category or seller rule matches. ${activeRules} active rule${activeRules === 1 ? "" : "s"}.` },
-        { label: "Developer share", value: `${cfg.developerSharePercent}% of the commission`, detail: "Paid on every sale." },
         { label: "Affiliate share paid by MVEC", value: `${cfg.affiliateSharePercent}% of the commission`, detail: "Only on sales from an affiliate link." },
         { label: "Affiliate rate a seller can add", value: `0–${MAX_VENDOR_RATE}% of the sale`, detail: "Paid by the seller on top, only if they joined the affiliate program." },
         { label: "Payment provider fees paid by", value: cfg.gatewayFeePayer === "SELLER" ? "The seller" : "MVEC", detail: cfg.gatewayFeePayer === "SELLER" ? "Deducted from the seller's share of each sale." : "Deducted from MVEC's commission." },
@@ -383,7 +421,8 @@ exports.getPlatform = async (_req, res) => {
       rules: [
         { label: "Time to pay before an order is cancelled", value: "30 minutes" },
         { label: "Buyer can cancel for a full refund", value: "30 minutes after paying, before shipping" },
-        { label: "Seller is paid", value: "When the buyer gives the 6-digit delivery code" },
+        { label: "Seller is paid", value: ops.autoReleaseDays > 0 ? `When the buyer gives the delivery code, or automatically ${ops.autoReleaseDays} day${ops.autoReleaseDays === 1 ? "" : "s"} after shipping if no problem is reported` : "When the buyer gives the 6-digit delivery code (automatic release is off)" },
+        { label: "Subscription plans", value: ops.subscriptionsEnabled ? `On · Seller Premium ${Number(ops.sellerPremiumPrice).toLocaleString("en-RW")} RWF/month` : "Off · every tool is free for now" },
         { label: "Affiliate link remembers a visitor for", value: "30 days (last link clicked wins)" },
         { label: "Affiliate withdrawals sent automatically", value: `Mobile money up to ${num(process.env.AFFILIATE_AUTO_PAYOUT_MAX || 100000).toLocaleString("en-RW")} RWF; larger or bank: admin approval` },
         { label: "Minimum withdrawal", value: "Affiliates 10,000 RWF · Suppliers 50,000 RWF · Sellers 1,000 RWF" },
@@ -400,6 +439,10 @@ exports.getPlatform = async (_req, res) => {
         { label: "Cancel unpaid orders", schedule: "Every minute" },
         { label: "Send and confirm refunds and withdrawals", schedule: "Every 5 minutes", detail: `${queued} in progress, ${failed} failed` },
         { label: "Delivery deadline checks", schedule: "Every 15 minutes" },
+        { label: "Pay sellers when the buyer stays silent", schedule: "Every 15 minutes", detail: ops.autoReleaseDays > 0 ? `${ops.autoReleaseDays} day${ops.autoReleaseDays === 1 ? "" : "s"} after shipping` : "Off" },
+        { label: "Pass unanswered problem reports to MVEC", schedule: "Every 30 minutes", detail: `After ${ops.disputeResponseDays} day${ops.disputeResponseDays === 1 ? "" : "s"} without an answer from the seller` },
+        { label: "Premium renewals", schedule: "Hourly", detail: ops.subscriptionsEnabled ? "Plans on" : "Paused: plans are off" },
+        { label: "End expired ad campaigns", schedule: "Hourly" },
       ],
       environment: process.env.NODE_ENV || "development",
       commissionRules: { active: activeRules, applied: true, note: "Manage rates under Money → Commission rules." },

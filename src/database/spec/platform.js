@@ -277,8 +277,16 @@ module.exports = [
       vendor: ref("users", { required: true, fk: false, index: true }),
       reason: en(["ITEM_NOT_RECEIVED", "DAMAGED_GOODS", "WRONG_ITEM", "INCOMPLETE_ORDER", "SLA_BREACH", "OTHER"], { required: true }),
       description: text({ required: true }),
-      status: en(["OPEN", "UNDER_REVIEW", "EVIDENCE_SUBMITTED", "RESOLVED_BUYER_REFUNDED", "RESOLVED_VENDOR_RELEASED", "RESOLVED_SPLIT", "REJECTED"], { default: "OPEN", required: true, index: true }),
+      status: en(["OPEN", "UNDER_REVIEW", "EVIDENCE_SUBMITTED", "RESOLVED_BUYER_REFUNDED", "RESOLVED_VENDOR_RELEASED", "RESOLVED_SPLIT", "REJECTED", "WITHDRAWN"], { default: "OPEN", required: true, index: true }),
       disputedAmount: money({ required: true }),
+      respondBy: date(), // the seller's deadline to respond before MVEC steps in
+      offerAmount: money(),
+      offerNote: text(),
+      offerStatus: en(["PENDING", "ACCEPTED", "DECLINED"]),
+      offeredAt: date(),
+      escalatedAt: date(),
+      escalationReason: str({ len: 300 }),
+      closedAt: date(),
       "arbitrationDecision.decision": en(["REFUND_BUYER", "RELEASE_TO_VENDOR", "SPLIT_SETTLEMENT"]),
       "arbitrationDecision.buyerRefundAmount": money({ default: 0 }),
       "arbitrationDecision.vendorReleaseAmount": money({ default: 0 }),
@@ -292,7 +300,7 @@ module.exports = [
     fields: {
       dispute: ref("disputes", { required: true, index: true, onDelete: "CASCADE" }),
       submittedBy: ref("users", { required: true, fk: false }),
-      senderRole: en(["buyer", "vendor", "super_admin"], { required: true }),
+      senderRole: en(["buyer", "vendor", "super_admin", "system"], { required: true }),
       message: text(),
       attachments: json([]), // [{ fileUrl, fileType, fileName }]
     },

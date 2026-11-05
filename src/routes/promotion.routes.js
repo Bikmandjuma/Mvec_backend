@@ -10,7 +10,7 @@ router.use(protect);
 // Any signed-in buyer can check a code against their basket.
 router.post("/validate", promotion.validateCoupon);
 router.get("/", promotion.listPromotions);
-router.post("/", authorize("vendor", "super_admin"), checkStaffPermission("canManageProducts"), promotion.createPromotion);
+router.post("/", authorize("vendor", "super_admin"), checkStaffPermission("canManageProducts"), require("../services/plans.service").requireFeature("promotions"), promotion.createPromotion);
 router.patch("/:id", checkStaffPermission("canManageProducts"), promotion.updatePromotion);
 router.delete("/:id", checkStaffPermission("canManageProducts"), promotion.deletePromotion);
 
