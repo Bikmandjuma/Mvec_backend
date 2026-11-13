@@ -19,7 +19,7 @@ const normalizePhone = (phone) => {
   return digits || null;
 };
 
-// Existing MVEC buyer account matching the customer's phone or email.
+// Existing Ikiguzi buyer account matching the customer's phone or email.
 const findCustomerAccount = async ({ phone, email }) => {
   const norm = normalizePhone(phone);
   const or = [];
@@ -124,7 +124,7 @@ exports.createManualOrder = async (req, res) => {
     // 4. Customer account (needed for a payment link)
     const account = await findCustomerAccount({ phone, email: customer.email });
     if (payment === "LINK" && !account) {
-      return res.status(400).json({ message: "No MVEC account matches this phone or email, so a payment link can't be sent. Use cash on delivery or record a payment you already received." });
+      return res.status(400).json({ message: "No Ikiguzi account matches this phone or email, so a payment link can't be sent. Use cash on delivery or record a payment you already received." });
     }
 
     // 5. Reserve stock atomically

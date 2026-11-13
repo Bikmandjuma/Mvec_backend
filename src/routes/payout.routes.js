@@ -14,7 +14,7 @@ const { checkStaffPermission } = require("../middleware/staff.middleware");
 // Require authentication for all payout endpoints
 router.use(protect);
 
-// Vendor financial endpoints. Requests are paid out by MVEC finance (admin).
+// Vendor financial endpoints. Requests are paid out by Ikiguzi finance (admin).
 router.get("/balance", authorize("vendor"), getVendorBalance);
 router.post("/request", authorize("vendor"), checkStaffPermission("canManagePayouts"), requestPayout);
 router.get("/history", authorize("vendor"), getPayoutHistory);

@@ -158,17 +158,11 @@ test("a vendor confirms its own delivery with the buyer's code; wrong codes lock
   assert.equal(await Settlement.countDocuments({ order: order._id, status: "HELD" }), 0);
 });
 
-test("couriers only confirm deliveries assigned to them", async () => {
+test("riders can't use the sellers' delivery confirmation (they confirm their own parcel jobs)", async () => {
   const order = await paidOrder();
-  const deliver = () => request(app).patch(`/api/orders/${order._id}/deliver`).set(auth(courier)).send({ deliveryOtp: order.deliveryOtp });
-  assert.equal((await deliver()).status, 403);
-  assert.equal((await request(app).patch(`/api/orders/${order._id}/courier`).set(auth(admin)).send({ courierId: String(buyer._id) })).status, 400);
-  assert.equal((await request(app).patch(`/api/orders/${order._id}/courier`).set(auth(admin)).send({ courierId: String(courier._id) })).status, 200);
-  const list = await request(app).get("/api/orders/deliverable").set(auth(courier));
-  assert.equal(list.body.orders.length, 1);
-  assert.equal(list.body.orders[0].deliveryOtp, undefined);
-  assert.equal((await deliver()).status, 200);
-  assert.ok(sentSms.some((s) => /assigned to you/.test(s.text)), "courier gets an SMS");
+  const res = await request(app).patch(`/api/orders/${order._id}/deliver`).set(auth(courier)).send({ deliveryOtp: order.deliveryOtp });
+  assert.equal(res.status, 403);
+  assert.equal((await request(app).get("/api/orders/deliverable").set(auth(courier))).status, 403);
 });
 
 test("payment sends the buyer the delivery code and tells the vendor", async () => {

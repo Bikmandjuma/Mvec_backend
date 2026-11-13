@@ -13,6 +13,11 @@ router.get("/trust", ops.getTrust);
 router.get("/platform", ops.getPlatform);
 router.get("/audit-logs", ops.getAuditLogs);
 
+// Ikiguzi riders waiting for approval, approved, rejected or suspended.
+const rider = require("../controllers/rider.controller");
+router.get("/riders", rider.adminList);
+router.patch("/riders/:id", rider.adminReview);
+
 // Operational settings: automatic release days, subscription program & prices.
 const settings = require("../services/platformSettings.service");
 router.get("/operations-settings", async (req, res) => {

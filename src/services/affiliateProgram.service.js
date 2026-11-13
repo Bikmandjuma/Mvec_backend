@@ -3,7 +3,7 @@
 // A product can be promoted by affiliates only when its seller has switched the
 // program on, and (when the seller picked "selected products") the product is
 // one of the chosen ones. The affiliate then earns:
-//   MVEC's share (a set % of MVEC's commission on that product, see commission.service)
+//   Ikiguzi's share (a set % of Ikiguzi's commission on that product, see commission.service)
 // + the seller's rate (affiliateRate, paid out of the seller's earnings).
 // The seller's rate is frozen on the order item at checkout, so changing it
 // later never alters orders already placed.
@@ -18,7 +18,7 @@ const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const httpError = (status, message) => Object.assign(new Error(message), { statusCode: status });
 const idOf = (v) => String(v?._id || v || "");
 
-/** Program settings in API shape. platformPercent: MVEC's part on the seller's default rate. */
+/** Program settings in API shape. platformPercent: Ikiguzi's part on the seller's default rate. */
 const settingsOf = (vendor, platformPercent = 0) => ({
   enabled: Boolean(vendor?.affiliateEnabled),
   ratePercent: Number(vendor?.affiliateRate) || 0,

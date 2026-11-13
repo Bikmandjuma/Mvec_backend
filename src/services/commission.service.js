@@ -11,7 +11,7 @@
 //   defaultCommissionPercent  rate when no rule matches
 //   developerSharePercent     % of the commission paid to the developer
 //   affiliateSharePercent     % of the commission paid to the affiliate
-//   gatewayFeePayer           MVEC (out of the commission) or SELLER (out of the seller's share)
+//   gatewayFeePayer           Ikiguzi (out of the commission) or SELLER (out of the seller's share)
 //   defaultWholesaleCommissionPercent  rate on supplier → vendor orders when no wholesale rule matches
 //
 // Rules have a scope: RETAIL (buyer orders; targetVendor = seller) or
@@ -62,7 +62,7 @@ async function updateSettings(patch = {}, adminId = null) {
   num("developerSharePercent", 100);
   num("affiliateSharePercent", 100);
   if (patch.gatewayFeePayer !== undefined) {
-    if (!GATEWAY_FEE_PAYERS.includes(patch.gatewayFeePayer)) throw httpError(400, "Choose who pays payment provider fees: MVEC or the seller.");
+    if (!GATEWAY_FEE_PAYERS.includes(patch.gatewayFeePayer)) throw httpError(400, "Choose who pays payment provider fees: Ikiguzi or the seller.");
     next.gatewayFeePayer = patch.gatewayFeePayer;
   }
   if (next.developerSharePercent + next.affiliateSharePercent > 100) {

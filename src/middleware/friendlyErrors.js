@@ -19,7 +19,7 @@ const crypto = require("crypto");
  * sentences) pass through unchanged.
  */
 
-const OUR_SIDE = "Something went wrong on our side, not yours. Please try again in a moment. If it keeps happening, contact MVEC support";
+const OUR_SIDE = "Something went wrong on our side, not yours. Please try again in a moment. If it keeps happening, contact Ikiguzi support";
 const DB_DOWN = "Our database is not responding right now. This is on our side; please try again in a minute.";
 
 const TECHNICAL = /cast to|objectid|bson|validation failed|e11000|duplicate key|mongo|sequelize|ER_[A-Z_]+|transaction numbers|replica set|topology|buffering timed out|econn|etimedout|socket hang up|cannot read prop|cannot set prop|is not a function|is not defined|is not iterable|undefined|unexpected token|syntaxerror|typeerror|referenceerror|stack|\bnull\b/i;

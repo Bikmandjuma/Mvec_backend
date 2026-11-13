@@ -1,3 +1,4 @@
+const deliveryService = require("../services/delivery.service");
 const User = require("../models/User");
 const Order = require("../models/Order");
 const Product = require("../models/Product");
@@ -123,7 +124,7 @@ exports.adminUpdateUser = async (req, res) => {
         if (user.role === "delivery" && normalizedStatus !== "ACTIVE") {
           const active = await activeDeliveriesOf(user._id);
           if (active) {
-            return res.status(409).json({ message: `This courier has ${active} delivery${active === 1 ? "" : "s"} in progress. Assign ${active === 1 ? "it" : "them"} to another courier on Deliveries first.` });
+            return res.status(409).json({ message: `This rider has ${active} delivery${active === 1 ? "" : "s"} in progress. Wait until ${active === 1 ? "it is" : "they are"} delivered, or ask the rider to go offline before pickup.` });
           }
         }
       }
@@ -158,8 +159,8 @@ exports.adminUpdateUser = async (req, res) => {
 // ---------------------------------------------------------------------------
 // ROLE RULES — who gets which role, and how:
 //   buyer      anyone, by signing up or checking out as a guest
-//   seller     signs up as a seller; MVEC verifies the business (Sellers page)
-//   supplier   signs up as a supplier; MVEC verifies the business (Suppliers page)
+//   seller     signs up as a seller; Ikiguzi verifies the business (Sellers page)
+//   supplier   signs up as a supplier; Ikiguzi verifies the business (Suppliers page)
 //   affiliate  signs up as an affiliate
 //   courier    added by an admin with "Add courier": a new account for the
 //              delivery partner, never a shopper's account (a courier must not
@@ -176,10 +177,10 @@ const messaging = require("../services/messaging.service");
 const { normalizePhone, phoneVariants } = require("../utils/sms.util");
 
 const ROLE_LOCKED_MESSAGE = "Roles can't be switched on an existing account. Add couriers with “Add courier” and admins with “Add admin”. Sellers, suppliers and affiliates choose their role when they sign up.";
-const OPEN_DELIVERY = ["DELIVERED", "COMPLETED", "CANCELLED", "RETURNED", "REFUNDED", "FAILED"];
+const { ACTIVE: ACTIVE_DELIVERY } = require("../config/delivery");
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-const activeDeliveriesOf = (courierId) => Order.countDocuments({ courier: courierId, orderStatus: { $nin: OPEN_DELIVERY } });
+const activeDeliveriesOf = (riderId) => require("../models/Delivery").countDocuments({ rider: riderId, status: { $in: ACTIVE_DELIVERY } });
 const actorId = (req) => String(req.user._id || req.user.id);
 
 // Checks the name, email and phone for a new team account.
@@ -212,8 +213,8 @@ async function sendWelcome(user, what) {
   try {
     await messaging.sendEmail({
       to: user.email,
-      subject: `You were added to MVEC as ${what}`,
-      text: `Hello ${user.Fullname},\n\nMVEC added you as ${what}.\n\nTo start:\n1. Open the MVEC app or website and choose “Log in”.\n2. Tap “Forgot password?” and enter ${user.email}.\n3. Enter the code we email you and choose your password.\n\nIf you were not expecting this, you can ignore this email.`,
+      subject: `You were added to Ikiguzi as ${what}`,
+      text: `Hello ${user.Fullname},\n\nIkiguzi added you as ${what}.\n\nTo start:\n1. Open the Ikiguzi app or website and choose “Log in”.\n2. Tap “Forgot password?” and enter ${user.email}.\n3. Enter the code we email you and choose your password.\n\nIf you were not expecting this, you can ignore this email.`,
     });
     return true;
   } catch (err) {
@@ -224,7 +225,7 @@ async function sendWelcome(user, what) {
 
 const createdMessage = (user, emailed) => (emailed
   ? `${user.Fullname} was added. We emailed ${user.email} how to set a password and sign in.`
-  : `${user.Fullname} was added, but the welcome email could not be sent. Ask them to open MVEC, tap “Forgot password?” and enter ${user.email}.`);
+  : `${user.Fullname} was added, but the welcome email could not be sent. Ask them to open Ikiguzi, tap “Forgot password?” and enter ${user.email}.`);
 
 const readTeamInput = (body) => ({
   name: String(body.fullName || body.Fullname || body.name || "").trim().slice(0, 120),
@@ -242,6 +243,7 @@ exports.createCourier = async (req, res) => {
     const problem = await newAccountProblem(input);
     if (problem) return res.status(400).json({ message: problem });
     const user = await createTeamAccount({ ...input, role: "delivery" });
+    await deliveryService.register(user, { ...req.body, approved: true });
     const emailed = await sendWelcome(user, "a courier");
     return res.status(201).json({ message: createdMessage(user, emailed), user: mapUser(user), emailed });
   } catch (error) {
@@ -291,7 +293,7 @@ exports.setAdminAccess = async (req, res) => {
     if (!(await confirmActor(req))) return res.status(403).json({ message: `Enter your own password to ${active ? "restore" : "remove"} admin access.`, code: "PASSWORD_REQUIRED" });
     if (!active) {
       const others = await User.countDocuments({ role: "super_admin", status: "ACTIVE", _id: { $ne: user._id } });
-      if (!others) return res.status(400).json({ message: "MVEC needs at least one active admin." });
+      if (!others) return res.status(400).json({ message: "Ikiguzi needs at least one active admin." });
     }
     user.status = active ? "ACTIVE" : "BLOCK";
     await user.save();

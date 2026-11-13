@@ -62,7 +62,7 @@ exports.addToCart = async (req, res) => {
       return res.status(400).json({ message: "A product is required" });
     }
 
-    // Accept old guest carts that stored the public MVEC product code, while
+    // Accept old guest carts that stored the public Ikiguzi product code, while
     // keeping Mongo ObjectIds as the canonical cart reference.
     const product = orm.isValidObjectId(productId)
       ? await Product.findById(productId)

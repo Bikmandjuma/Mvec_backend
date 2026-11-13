@@ -7,7 +7,7 @@ const MAX_ROWS = 5000;
 const STORED_PROVIDER = { MTN: "MTN_MOMO", MOMO: "MTN_MOMO", MTN_MOMO: "MTN_MOMO", AIRTEL: "AIRTEL_MONEY", AIRTEL_MONEY: "AIRTEL_MONEY" };
 const round = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
-// What MVEC recorded for one provider transaction id: the processed webhook
+// What Ikiguzi recorded for one provider transaction id: the processed webhook
 // (order payments) or the successful payment itself (polled or standalone).
 async function recordedAmount(id) {
   const log = await PaymentWebhookLog.findOne({ externalTransactionId: id, status: "PROCESSED" }).lean();
@@ -19,13 +19,13 @@ async function recordedAmount(id) {
   return payment ? Number(payment.amount) : null;
 }
 
-// @desc    Compare a payment provider's statement with what MVEC recorded
+// @desc    Compare a payment provider's statement with what Ikiguzi recorded
 // @route   POST /api/admin/reconcile
 //          { statements: [{ provider, externalTransactionId, amount, transactionDate }], from?, to? }
 // @access  Private (Super Admin)
 // Every statement row is MATCHED, MISMATCHED (different amount) or
-// MISSING_IN_LEDGER (the provider has money MVEC never recorded). With a
-// from/to period, MVEC payments in that period that are not on the statement
+// MISSING_IN_LEDGER (the provider has money Ikiguzi never recorded). With a
+// from/to period, Ikiguzi payments in that period that are not on the statement
 // are listed as missingInStatement (recorded as paid, but no money arrived).
 exports.runReconciliation = async (req, res) => {
   try {
@@ -84,7 +84,7 @@ exports.runReconciliation = async (req, res) => {
       success: true,
       message: results.mismatched || results.missingInLedger || missingInStatement?.length
         ? "Reconciliation found differences. Review the rows listed."
-        : "Everything on the statement matches MVEC's records.",
+        : "Everything on the statement matches Ikiguzi's records.",
       results: { ...results, missingInStatement },
     });
   } catch (error) {

@@ -11,6 +11,7 @@ const User = require("../../src/models/User");
 const Product = require("../../src/models/Product");
 const Category = require("../../src/models/Category");
 const Order = require("../../src/models/Order");
+const Delivery = require("../../src/models/Delivery");
 const Store = require("../../src/models/Store");
 const Review = require("../../src/models/Review");
 const Promotion = require("../../src/models/Promotion");
@@ -339,10 +340,10 @@ describe("Operations: Reviews, Users, Promotions, Shipping, Notifications, Repor
     test("A courier with a delivery in progress can't be blocked", async () => {
       const courier = await User.create({ Fullname: "Eric Moto", email: "eric@mvec.rw", password: "x", phone: "0788555222", role: "delivery" });
       const order = await makeDeliveredOrder();
-      await Order.updateOne({ _id: order._id }, { $set: { orderStatus: "OUT_FOR_DELIVERY", courier: courier._id } });
+      const job = await Delivery.create({ order: order._id, vendor: vendorUser._id, rider: courier._id, status: "OUT_FOR_DELIVERY", pickupLat: -1.95, pickupLng: 30.09, pickupName: "Store", dropLat: -1.96, dropLng: 30.11 });
       const res = await request(app).patch(`/api/users/${courier._id}`).set("Authorization", `Bearer ${superAdminToken}`).send({ status: "BLOCK" });
       expect(res.status).toBe(409);
-      await Order.updateOne({ _id: order._id }, { $set: { orderStatus: "DELIVERED" } });
+      await Delivery.updateOne({ _id: job._id }, { $set: { status: "DELIVERED" } });
       const ok = await request(app).patch(`/api/users/${courier._id}`).set("Authorization", `Bearer ${superAdminToken}`).send({ status: "BLOCK" });
       expect(ok.status).toBe(200);
     });

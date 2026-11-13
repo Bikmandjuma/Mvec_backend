@@ -4,18 +4,19 @@
 // For each store the most specific ACTIVE zone covering the buyer's address
 // is used: a district match beats a province match, which beats a nationwide
 // zone (no provinces or districts listed). Zone lookup order:
-//   1. the store's zones  2. the seller's other zones  3. MVEC platform zones
-//   (vendor: null)  4. built-in MVEC defaults below.
+//   1. the store's zones  2. the seller's other zones  3. Ikiguzi platform zones
+//   (vendor: null)  4. built-in Ikiguzi defaults below.
 // A seller who has zones, none of which cover the address, does not deliver there.
+const deliveryConfig = require("../config/delivery");
 const ShippingZone = require("../models/ShippingZone");
 const Store = require("../models/Store");
 const { getPrimaryStore } = require("../utils/vendorStore.util");
 const { provinceOfDistrict } = require("../config/rwandaLocations");
 
-// Used only when neither the seller nor MVEC has configured any zone.
+// Used only when neither the seller nor Ikiguzi has configured any zone.
 const DEFAULT_ZONES = [
-  { _id: null, name: "Kigali City (MVEC standard)", provinces: ["Kigali City"], districts: [], fee: 0, expressFee: 10000, freeOverAmount: 0, eta: "Same day – 1 day", methods: ["STANDARD", "EXPRESS"] },
-  { _id: null, name: "Rest of Rwanda (MVEC standard)", provinces: [], districts: [], fee: 5000, expressFee: 10000, freeOverAmount: 0, eta: "1–3 days", methods: ["STANDARD", "EXPRESS"] },
+  { _id: null, name: "Kigali City (Ikiguzi standard)", provinces: ["Kigali City"], districts: [], fee: 0, expressFee: 10000, freeOverAmount: 0, eta: "Same day – 1 day", methods: ["STANDARD", "EXPRESS"] },
+  { _id: null, name: "Rest of Rwanda (Ikiguzi standard)", provinces: [], districts: [], fee: 5000, expressFee: 10000, freeOverAmount: 0, eta: "1–3 days", methods: ["STANDARD", "EXPRESS"] },
 ];
 
 const METHODS = ["STANDARD", "EXPRESS", "PICKUP"];
@@ -122,8 +123,10 @@ exports.quoteShipping = async ({ lines, address, method = "STANDARD" }) => {
   }
 
   const storeIds = [...groupsByKey.values()].map((g) => g.store).filter(Boolean);
-  const stores = await Store.find({ _id: { $in: storeIds } }).select("storeName").lean();
+  const stores = await Store.find({ _id: { $in: storeIds } }).select("storeName pickupLat pickupLng riderDelivery").lean();
   const storeNames = Object.fromEntries(stores.map((s) => [String(s._id), s.storeName]));
+  const storeById = new Map(stores.map((s) => [String(s._id), s]));
+  const drop = address?.lat != null && address?.lng != null ? { lat: Number(address.lat), lng: Number(address.lng) } : null;
 
   // The buyer collects the order from each store: no delivery fee, and the
   // buyer's address doesn't matter.
@@ -139,6 +142,18 @@ exports.quoteShipping = async ({ lines, address, method = "STANDARD" }) => {
 
   const groups = [];
   for (const group of groupsByKey.values()) {
+    // A store using Ikiguzi riders: priced by distance from its pin to the buyer's.
+    const store = storeById.get(group.store);
+    if (store?.riderDelivery && store.pickupLat != null && drop) {
+      const trip = deliveryConfig.quote({ lat: store.pickupLat, lng: store.pickupLng }, drop);
+      if (trip.withinRange) {
+        groups.push({
+          ...group, storeName: store.storeName, deliverable: true, fee: trip.fee, method: "RIDER", eta: "Today, by an Ikiguzi rider",
+          zone: null, zoneName: "Ikiguzi rider", source: "rider", distanceKm: trip.km, message: null,
+        });
+        continue;
+      }
+    }
     const { zones, source } = await zonesForStore(group.vendor, group.store, zoneCache);
     const zone = bestZone(zones, where);
     const storeName = storeNames[group.store] || "Seller";

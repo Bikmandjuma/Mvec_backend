@@ -1,3 +1,4 @@
+const { isLive } = require("../config/env");
 const orm = require("../database/orm");
 const User = require("../models/User");
 const Subscription = require("../models/Subscription");
@@ -365,7 +366,7 @@ exports.buyerPremiumCheckout = async (req, res) => {
     }
     if (method !== "card") return res.status(400).json({ message: "Choose mobile money or card." });
 
-    if (flutterwave.isSandbox() && process.env.NODE_ENV === "production") {
+    if (flutterwave.isSandbox() && isLive()) {
       return res.status(503).json({ message: "Card payments are temporarily unavailable. Please pay with mobile money." });
     }
     const txRef = `PREM-${userId}-${Date.now()}`;
@@ -384,7 +385,7 @@ exports.buyerPremiumCheckout = async (req, res) => {
       txRef, amount: PREMIUM.price,
       customer: { email: buyer?.email, phone: buyer?.phone, name: buyer?.Fullname },
       redirectUrl: `${frontend}/buyer/subscription?paymentId=${payment._id}`,
-      description: "MVEC Premium (30 days)",
+      description: "Ikiguzi Premium (30 days)",
     });
     return res.status(200).json({ message: "Opening the secure card page…", paymentId: payment._id, status: "PENDING", checkoutUrl: checkout.link });
   } catch (error) {
@@ -507,7 +508,7 @@ exports.createAdvertisement = async (req, res) => {
       budget,
       startDate: start,
       endDate: endDate || null,
-      status: "PENDING", // awaits MVEC admin approval
+      status: "PENDING", // awaits Ikiguzi admin approval
     });
     await ad.validate();
     // Make sure the publicId exists before charging against it.
@@ -561,24 +562,24 @@ exports.updateMyAdvertisementStatus = async (req, res) => {
     const ad = await findOwnAd(req);
     if (!ad) return res.status(404).json({ message: "Advertisement campaign not found" });
 
-    // Only approved campaigns can be paused or resumed; review stays with MVEC.
+    // Only approved campaigns can be paused or resumed; review stays with Ikiguzi.
     const from = status === "PAUSED" ? "ACTIVE" : "PAUSED";
     if (ad.status === status) {
       return res.status(400).json({ message: status === "ACTIVE" ? "This campaign is already live." : "This campaign is already paused." });
     }
     if (ad.status !== from) {
-      // Approving a campaign is MVEC's decision, so a pending one is forbidden (403).
+      // Approving a campaign is Ikiguzi's decision, so a pending one is forbidden (403).
       return res.status(ad.status === "PENDING" ? 403 : 400).json({
-        message: ad.status === "PENDING" ? "This campaign is still being reviewed by MVEC." : `A ${AD_STATUS_LABEL[ad.status].toLowerCase()} campaign can't be ${status === "PAUSED" ? "paused" : "resumed"}.`,
+        message: ad.status === "PENDING" ? "This campaign is still being reviewed by Ikiguzi." : `A ${AD_STATUS_LABEL[ad.status].toLowerCase()} campaign can't be ${status === "PAUSED" ? "paused" : "resumed"}.`,
       });
     }
     if (status === "ACTIVE" && ad.endDate && new Date(ad.endDate) < new Date(new Date().toDateString())) {
       return res.status(400).json({ message: "This campaign's end date has passed." });
     }
     // Vendors can pause and resume approved campaigns only. A pending or
-    // rejected campaign goes live only after MVEC admin approval.
+    // rejected campaign goes live only after Ikiguzi admin approval.
     if (!["ACTIVE", "PAUSED"].includes(ad.status)) {
-      return res.status(403).json({ message: "This campaign is waiting for MVEC approval." });
+      return res.status(403).json({ message: "This campaign is waiting for Ikiguzi approval." });
     }
 
     ad.status = status;

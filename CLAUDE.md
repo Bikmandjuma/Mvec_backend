@@ -1,0 +1,70 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+The Ikiguzi (MVEC) marketplace API: Express 5 on MySQL/MariaDB. The website (`../Mvec_frontend`) and the Flutter app (`../Mvec_Mobile`) call it under `/api`. People see the name **Ikiguzi**; "MVEC" survives only in code, folder names and stored values (for example `gatewayFeePayer: "MVEC"`, `MVEC-PRD-…` ids). Never rename stored values.
+
+## Commands
+
+```bash
+npm run dev                 # nodemon on :4000 (refuses to start without a reachable, migrated database)
+npm run db:migrate          # create/update every table
+npm run db:seed             # demo admin, sellers, buyer, catalog (refused on a live server)
+npm test                    # every test, one file at a time, against DB_DATABASE + "_test"
+node --require ./tests/helpers/env.js --test tests/integration/rider.delivery.test.js   # one file
+npm run test:e2e            # flows against a running server
+```
+
+Tests need MySQL. `tests/helpers/mysql.js` creates and migrates the `_test` database and empties it between tests. Run files one at a time, because they share one database. `tests/financial.controller.test.js` has a 50 ms benchmark that fails on a busy machine.
+
+## Development or live (`src/config/env.js`)
+
+- `isLive()` is the only switch. Only `NODE_ENV=development` or `test` is a development server. Anything else, including no `NODE_ENV`, is live. Never compare `NODE_ENV` to `"production"`.
+- On a live server, `startupReport()` refuses to start with unsafe settings: a weak `JWT_SECRET`, no database password, a localhost `FRONTEND_URL`, example webhook secrets or admin password, or no SMS gateway. A development server only warns.
+- A live server never simulates payments, never prints SMS codes, and never accepts unsigned webhooks.
+- Requiring `src/config/env.js` loads `.env`, so `server.js` requires it first.
+
+## Data layer
+
+- Models in `src/models/*` are Mongoose-style wrappers (`src/database/mongoose-compat`) over Sequelize.
+- Users, stores, products and similar tables are hand-written in `src/database/models/`. Every other table is a spec in `src/database/spec/` (`commerce.js`, `platform.js`, `delivery.js`).
+- A new field needs a migration in `src/database/migrations/` plus the spec. Hand-written models also need their `mongoose-compat/registry.js` entry.
+- `updateOne` / `findOneAndUpdate` re-check the filter inside the UPDATE. Use a conditional update for anything two people can race on, as in "first rider to accept wins" and the code-attempt counters.
+- Ids are 24-character hex strings.
+
+## Money
+
+- The buyer pays Ikiguzi, and the money sits in escrow. `services/payment.service.js` locks one settlement per order item, plus one commission-free settlement per parcel's delivery fee.
+- `services/handover.service.js` is the only place a seller's money is released after delivery. Sellers, admins (`PATCH /orders/:id/deliver`) and riders all go through it, each with the buyer's 6-digit `deliveryOtp`, which locks after 5 wrong tries.
+- An order becomes DELIVERED once every seller in it has handed over.
+- When a rider carried a parcel, its fee settlement moves to the rider's wallet (`VendorWallet` keyed by user id) before it is released.
+- `financial.service.js` keeps the double-entry ledger. Never update wallets or settlements anywhere else.
+
+## Ikiguzi riders (`services/delivery.service.js`, `config/delivery.js`)
+
+This is KitchenLink's delivery-worker model, with one job per seller parcel.
+
+**Setup**
+- A store sets a pickup pin and `riderDelivery`. Buyers send `shippingAddress.lat/lng`.
+- `shipping.service.quoteShipping` prices that store's parcel by distance, with `method: "RIDER"`. Without pins, or beyond 30 km, the seller's own zones apply.
+- Free-delivery coupons never cover rider parcels.
+
+**A job's life**
+- When a seller marks its part READY_FOR_SHIPMENT, `createForOrder` creates a `Delivery` for each rider parcel and offers it.
+- Offers go to approved, online riders with a fresh position within the radius, nearest first.
+- First to accept wins. A decline is never offered to that rider again, and unanswered offers re-dispatch every minute (`workers/slaWorker.js`).
+- Steps are ASSIGNED → PICKED_UP → OUT_FOR_DELIVERY, then `confirm` with the buyer's code.
+- Sellers can't move a rider parcel to shipped or out for delivery. The order follows the rider.
+- Going offline hands parcels not yet picked up back to the pool.
+
+**Accounts**
+- Riders sign up with a phone code: `POST /auth/send-otp` → `POST /auth/verify-otp` with `role: "delivery"` → `POST /api/rider/register`.
+- Self sign-ups wait for admin approval (`/api/admin/riders`). An admin's "Add courier" creates an approved rider.
+- Before accepting, a rider sees only the pickup area and fee. The buyer's name, phone and pin appear once the job is theirs.
+
+## Conventions
+
+- Errors are `{ message }` in plain words people can act on (`middleware/friendlyErrors.js` adds a support reference to 5xx errors).
+- Throw `Object.assign(new Error(msg), { statusCode })` from services. Controllers send `error.statusCode || 500`.
+- Uploads (`routes/upload.routes.js`) go through multer. Each file's first bytes must match its declared image type, and `utils/imageMetadata.js` strips its EXIF data, GPS included, before saving.
+- Admin changes are written to the audit log by `middleware/adminAudit.js`. Add a line there for each new admin endpoint.

@@ -27,7 +27,7 @@ async function ensureShop(supplier) {
   if (existing) return existing;
   const from = await supplierStores.primaryStore(supplier);
   const base = from.storeName || supplier.businessName;
-  // Store names are unique across MVEC.
+  // Store names are unique across Ikiguzi.
   let storeName = base;
   for (const candidate of [base, `${base} Shop`, `${base} Shop ${Date.now().toString(36).slice(-4)}`]) {
     storeName = candidate;
@@ -93,7 +93,7 @@ async function record({ supplier, wholesale, listing, units, toMarketplace, perf
  * `units` from wholesale stock onto it. { price, units }
  */
 async function publish(supplier, productId, { price, units: rawUnits, performedBy } = {}) {
-  if (supplier.status !== "ACTIVE" || supplier.verificationStatus !== "VERIFIED") throw httpError(403, "MVEC must verify your supplier profile before you sell to buyers.");
+  if (supplier.status !== "ACTIVE" || supplier.verificationStatus !== "VERIFIED") throw httpError(403, "Ikiguzi must verify your supplier profile before you sell to buyers.");
   const wholesale = await ownedProduct(supplier, productId);
   if (wholesale.status === "ARCHIVED") throw httpError(400, "Restore this product before publishing it.");
   const buyerPrice = Math.round(Number(price));
@@ -114,7 +114,7 @@ async function publish(supplier, productId, { price, units: rawUnits, performedB
       }, { new: true });
     } else {
       const category = await stock.categoryFor([wholesale.category]);
-      if (!category) throw httpError(400, "No product category exists yet; ask MVEC to add one.");
+      if (!category) throw httpError(400, "No product category exists yet; ask Ikiguzi to add one.");
       listing = await Product.create({
         vendor: supplier.user,
         store: shop._id,

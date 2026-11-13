@@ -1,6 +1,7 @@
 // Wholesale orders: vendors buy from suppliers. All rules live in
 // services/wholesale.service.js; this file resolves who is acting (owners or
 // their team members) and turns results into responses.
+const { isLive } = require("../config/env");
 const wholesaleService = require("../services/wholesale.service");
 const WholesaleOrder = require("../models/WholesaleOrder");
 const { supplierOwnerOf, vendorOwnerOf } = require("../utils/accountOwner.util");
@@ -46,7 +47,7 @@ exports.createWholesaleOrder = async (req, res) => {
   }
 };
 
-// Admin: mark an order paid that was paid outside MVEC (audited).
+// Admin: mark an order paid that was paid outside Ikiguzi (audited).
 exports.holdEscrow = async (req, res) => {
   try {
     const order = await wholesaleService.holdWholesaleEscrow(req.params.orderId);
@@ -88,11 +89,11 @@ exports.cancelOrder = async (req, res) => {
   }
 };
 
-// Vendor reports a problem; the money stays held until MVEC decides.
+// Vendor reports a problem; the money stays held until Ikiguzi decides.
 exports.reportProblem = async (req, res) => {
   try {
     const order = await wholesaleService.openDispute(req.params.orderId, vendorOwnerOf(req), (req.body || {}).reason);
-    return res.status(200).json({ success: true, message: "Problem reported. MVEC will review it; the payment stays on hold.", data: order });
+    return res.status(200).json({ success: true, message: "Problem reported. Ikiguzi will review it; the payment stays on hold.", data: order });
   } catch (error) {
     return fail(res, error);
   }
@@ -153,7 +154,7 @@ exports.payWholesaleOrder = async (req, res) => {
       return res.status(200).json(result);
     }
     if (method !== "card") return res.status(400).json({ message: "Choose mobile money or card." });
-    if (flutterwave.isSandbox() && process.env.NODE_ENV === "production") {
+    if (flutterwave.isSandbox() && isLive()) {
       return res.status(503).json({ message: "Card payments are temporarily unavailable. Please pay with mobile money." });
     }
     const payment = await Payment.create({
@@ -170,7 +171,7 @@ exports.payWholesaleOrder = async (req, res) => {
       txRef: reference, amount,
       customer: { email: req.user.email, phone: req.user.phone, name: req.user.Fullname },
       redirectUrl: `${frontend}/vendor/purchases?paymentId=${payment._id}`,
-      description: `MVEC wholesale order ${order.orderNumber}`,
+      description: `Ikiguzi wholesale order ${order.orderNumber}`,
     });
     return res.status(200).json({ message: "Opening the secure card page…", paymentId: payment._id, status: "PENDING", checkoutUrl: checkout.link });
   } catch (error) {

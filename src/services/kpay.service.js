@@ -43,11 +43,11 @@ async function pay({ refid, amount, method, msisdn, email, name, customerRef, de
     action: "pay",
     msisdn: String(msisdn || "").replace(/^\+/, ""),
     email: email || "buyer@mvec.rw",
-    details: String(details || "MVEC payment").slice(0, 120),
+    details: String(details || "Ikiguzi payment").slice(0, 120),
     refid,
     amount: Math.round(Number(amount)),
     currency: "RWF",
-    cname: String(name || "MVEC buyer").slice(0, 80),
+    cname: String(name || "Ikiguzi buyer").slice(0, 80),
     cnumber: String(customerRef || refid),
     pmethod,
     retailerid: process.env.KPAY_RETAILER_ID,
@@ -72,7 +72,7 @@ const statusOf = (id) => ({ "01": "SUCCESSFUL", "1": "SUCCESSFUL", "02": "FAILED
 
 function friendlyReply(reply) {
   const r = String(reply || "").toUpperCase();
-  if (r.includes("AUTHORIZATION")) return "K-Pay rejected MVEC's credentials. This is on our side; please pay another way for now.";
+  if (r.includes("AUTHORIZATION")) return "K-Pay rejected Ikiguzi's credentials. This is on our side; please pay another way for now.";
   if (r.includes("MSISDN") || r.includes("PHONE")) return "K-Pay could not use that phone number. Check it and try again.";
   return "K-Pay could not start the payment. No money was taken; please try again or choose another way to pay.";
 }

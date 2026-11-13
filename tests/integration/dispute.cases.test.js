@@ -21,7 +21,7 @@ const balanceOf = async (type) => (await LedgerAccount.find({ accountType: type 
 const booksTotal = async () => Math.round((await LedgerAccount.find({})).reduce((n, a) => n + Number(a.balance), 0) * 100) / 100;
 const fails = async (fn) => { try { await fn(); return ""; } catch (e) { return e.message || "error"; } };
 
-describe("Problem reports: buyer, seller and MVEC resolve a case", () => {
+describe("Problem reports: buyer, seller and Ikiguzi resolve a case", () => {
   let admin, seller, buyer, stranger, category, product;
   const as = (u) => ({ id: String(u._id), _id: u._id, role: u.role });
 
@@ -39,7 +39,7 @@ describe("Problem reports: buyer, seller and MVEC resolve a case", () => {
     await settings.update({ disputeResponseDays: 3, autoReleaseDays: 1 });
   });
 
-  // A paid 10,000 RWF order (seller share 9,500, MVEC 500) with a problem reported.
+  // A paid 10,000 RWF order (seller share 9,500, Ikiguzi 500) with a problem reported.
   const reported = async () => {
     const order = await Order.create({
       user: buyer._id, orderNumber: `ORD-${Math.random().toString(36).slice(2, 8)}`,
@@ -112,7 +112,7 @@ describe("Problem reports: buyer, seller and MVEC resolve a case", () => {
     expect(await fails(() => cases.sellerFullRefund(dispute._id, as(seller)))).toMatch(/closed/);
   });
 
-  test("buyer declines the offer, MVEC reviews and decides to pay the seller", async () => {
+  test("buyer declines the offer, Ikiguzi reviews and decides to pay the seller", async () => {
     const { dispute } = await reported();
     await cases.sellerOffer(dispute._id, as(seller), { amount: 1000 });
     await cases.buyerRespondOffer(dispute._id, as(buyer), false);
@@ -126,7 +126,7 @@ describe("Problem reports: buyer, seller and MVEC resolve a case", () => {
     expect(await balanceOf("VENDOR_PAYABLE")).toBe(9500);
     expect(await booksTotal()).toBe(0);
     const timeline = (await cases.getCase(dispute._id, as(buyer))).timeline.map((e) => e.message).join(" | ");
-    expect(timeline).toMatch(/MVEC decided to pay the seller/);
+    expect(timeline).toMatch(/Ikiguzi decided to pay the seller/);
   });
 
   test("buyer withdraws once the problem is solved: the order carries on as normal", async () => {
@@ -138,7 +138,7 @@ describe("Problem reports: buyer, seller and MVEC resolve a case", () => {
     expect(await fails(() => cases.withdraw(dispute._id, as(seller)))).toMatch(/Only the buyer/);
   });
 
-  test("MVEC steps in automatically when the seller doesn't respond in time", async () => {
+  test("Ikiguzi steps in automatically when the seller doesn't respond in time", async () => {
     const { dispute } = await reported();
     expect((await cases.escalateOverdue()).escalated).toBe(0);
     await Dispute.updateOne({ _id: dispute._id }, { $set: { respondBy: new Date(Date.now() - 1000) } });

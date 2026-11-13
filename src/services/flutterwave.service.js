@@ -1,5 +1,5 @@
 // Card payments through Flutterwave's hosted checkout (Visa/Mastercard in RWF).
-// The buyer types card details on Flutterwave's page, never on MVEC, and every
+// The buyer types card details on Flutterwave's page, never on Ikiguzi, and every
 // result is verified with Flutterwave's API before an order is marked paid.
 //
 // Env: FLW_SECRET_KEY (live or test key), FLW_WEBHOOK_HASH (the "secret hash"
@@ -37,9 +37,9 @@ async function createCheckout({ txRef, amount, customer = {}, redirectUrl, descr
     customer: {
       email: customer.email || "buyer@mvec.rw",
       phonenumber: customer.phone || undefined,
-      name: customer.name || "MVEC buyer",
+      name: customer.name || "Ikiguzi buyer",
     },
-    customizations: { title: "MVEC", description: description || "MVEC order payment" },
+    customizations: { title: "Ikiguzi", description: description || "Ikiguzi order payment" },
   });
   return { link: data.link };
 }

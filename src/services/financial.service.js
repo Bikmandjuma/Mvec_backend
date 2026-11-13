@@ -37,13 +37,13 @@ exports.lockPaymentInEscrow = async ({
   const vendorAffShare = split ? Number(split.vendorAffiliateShare) || 0 : 0;
   const gwFee = split ? split.gatewayFee : 0;
 
-  // The buyer's money is now held by MVEC until delivery.
+  // The buyer's money is now held by Ikiguzi until delivery.
   await ledger.post({
     from: ["BUYER_PAYMENTS"], to: ["ESCROW_HOLDING"], amount: grossAmount, entryType: "PAYMENT_RECEIVED",
     order: orderId, description: `Buyer payment held until delivery (order ${orderId})`, session,
   });
 
-  // MVEC's share includes the developer share: it belongs to the platform.
+  // Ikiguzi's share includes the developer share: it belongs to the platform.
   const platformShare = (Number(adminShare) || 0) + (Number(devShare) || 0);
   const adminUserId = platformShare > 0 ? await findDefaultAdmin(session) : null;
   const settlement = await Settlement.create(
@@ -154,18 +154,18 @@ exports.releaseEscrowToVendor = async ({ settlementId, session, adminUserId = nu
   const net = Number(settlement.netAmount) || 0;
   const affiliates = Number(settlement.affiliateShare) || 0; // MVEC-paid + seller-paid
   const gwFee = Number(settlement.gatewayFee) || 0;
-  // What MVEC keeps: everything that is not the seller's, the affiliates' or the provider's.
+  // What Ikiguzi keeps: everything that is not the seller's, the affiliates' or the provider's.
   const platformShare = Math.round((gross - net - affiliates - gwFee) * 100) / 100;
   const ref = settlement.settlementReference;
   const common = { order: settlement.order, session };
 
-  // The held money leaves MVEC holding to its rightful owners; holding returns to zero.
+  // The held money leaves Ikiguzi holding to its rightful owners; holding returns to zero.
   await ledger.post({ ...common, from: ["ESCROW_HOLDING"], to: ["VENDOR_PAYABLE", settlement.vendor], amount: net, entryType: "ESCROW_RELEASE_VENDOR", description: `Seller's share released (${ref})` });
-  await ledger.post({ ...common, from: ["ESCROW_HOLDING"], to: ["PLATFORM_REVENUE"], amount: platformShare, entryType: "PLATFORM_COMMISSION_DEDUCTION", description: `MVEC commission (${ref})` });
+  await ledger.post({ ...common, from: ["ESCROW_HOLDING"], to: ["PLATFORM_REVENUE"], amount: platformShare, entryType: "PLATFORM_COMMISSION_DEDUCTION", description: `Ikiguzi commission (${ref})` });
   await ledger.post({ ...common, from: ["ESCROW_HOLDING"], to: ["AFFILIATE_COMMISSION"], amount: affiliates, entryType: "AFFILIATE_COMMISSION", description: `Affiliate commission (${ref})` });
   await ledger.post({ ...common, from: ["ESCROW_HOLDING"], to: ["GATEWAY_FEES"], amount: gwFee, entryType: "GATEWAY_FEE", description: `Payment provider fee (${ref})` });
 
-  // MVEC's wallet: its share (developer share included) becomes available.
+  // Ikiguzi's wallet: its share (developer share included) becomes available.
   const walletShare = (Number(settlement.adminShare) || 0) + (Number(settlement.developerShare) || 0);
   const targetAdminId = walletShare > 0 ? adminUserId || (await findDefaultAdmin(session)) : null;
   if (targetAdminId) {
@@ -243,7 +243,7 @@ exports.refundHeldEscrowForOrder = async ({ orderId, session }) => {
 
 /**
  * Dispute decided with a split: part of the held money goes back to the
- * buyer, part to the seller, and anything left stays with MVEC. Each held
+ * buyer, part to the seller, and anything left stays with Ikiguzi. Each held
  * settlement of the order takes its proportional part, is updated to what
  * really happened and closed, so it can never be released again on delivery.
  */
@@ -271,7 +271,7 @@ exports.splitHeldEscrowForOrder = async ({ orderId, buyerRefund = 0, sellerRelea
 
     await ledger.post({ ...common, from: ["ESCROW_HOLDING"], to: ["BUYER_REFUND_HOLD"], amount: refund, entryType: "BUYER_REFUND", description: `Dispute split: refunded to the buyer (${ref})` });
     await ledger.post({ ...common, from: ["ESCROW_HOLDING"], to: ["VENDOR_PAYABLE", settlement.vendor], amount: release, entryType: "ESCROW_RELEASE_VENDOR", description: `Dispute split: released to the seller (${ref})` });
-    await ledger.post({ ...common, from: ["ESCROW_HOLDING"], to: ["PLATFORM_REVENUE"], amount: keep, entryType: "PLATFORM_COMMISSION_DEDUCTION", description: `Dispute split: kept by MVEC (${ref})` });
+    await ledger.post({ ...common, from: ["ESCROW_HOLDING"], to: ["PLATFORM_REVENUE"], amount: keep, entryType: "PLATFORM_COMMISSION_DEDUCTION", description: `Dispute split: kept by Ikiguzi (${ref})` });
 
     // Wallets: remove what was pending, add what was actually paid.
     await VendorWallet.updateOne(

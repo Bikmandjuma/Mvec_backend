@@ -29,6 +29,10 @@ module.exports = (sequelize) => {
     marketplaceLive: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
     socialLinks: { type: DataTypes.JSON, allowNull: true },
     status: { type: DataTypes.ENUM("PENDING", "ACTIVE", "SUSPENDED", "REJECTED", "CLOSED"), allowNull: false, defaultValue: "PENDING" },
+    // Where riders collect parcels, and whether this store uses Ikiguzi riders.
+    pickupLat: { type: DataTypes.DOUBLE, allowNull: true, get() { const v = this.getDataValue("pickupLat"); return v == null ? v : Number(v); } },
+    pickupLng: { type: DataTypes.DOUBLE, allowNull: true, get() { const v = this.getDataValue("pickupLng"); return v == null ? v : Number(v); } },
+    riderDelivery: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
   }, { tableName: "stores", timestamps: true });
 
   Store.associate = (m) => {

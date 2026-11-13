@@ -96,5 +96,5 @@ exports.sendOtpSms = async (phone, code) => {
   // or printed to the log in development). Throws when SMS is unavailable so
   // callers can tell the user instead of pretending the code was sent.
   const { sendSms } = require("../services/messaging.service");
-  await sendSms(phone, `Your MVEC verification code is ${code}. It expires in 5 minutes. Never share it.`);
+  await sendSms(phone, `Your Ikiguzi verification code is ${code}. It expires in 5 minutes. Never share it.`);
 };

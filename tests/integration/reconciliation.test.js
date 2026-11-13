@@ -10,7 +10,7 @@ const PaymentWebhookLog = require("../../src/models/PaymentWebhookLog");
 
 jest.setTimeout(60000);
 
-describe("Admin reconciliation: provider statement vs MVEC records", () => {
+describe("Admin reconciliation: provider statement vs Ikiguzi records", () => {
   let app;
   const tokens = {};
   const secret = "reconcile_test_secret";
@@ -40,11 +40,11 @@ describe("Admin reconciliation: provider statement vs MVEC records", () => {
     await PaymentWebhookLog.create({ provider: "PAYPACK", externalTransactionId: "PP-1", status: "PROCESSED", amount: 10000, internalOrderId: new orm.Types.ObjectId(), rawPayload: {} });
     // A payment confirmed by polling (no webhook log).
     await Payment.create({ transactionReference: "PAY-2", gatewayReference: "PP-2", gateway: "PAYPACK", method: "MOMO", provider: "MTN", amount: 5000, status: "SUCCESS", paidAt, user: buyer._id });
-    // Recorded as paid by MVEC but absent from the statement.
+    // Recorded as paid by Ikiguzi but absent from the statement.
     await Payment.create({ transactionReference: "PAY-3", gatewayReference: "PP-3", gateway: "PAYPACK", method: "MOMO", provider: "MTN", amount: 7000, status: "SUCCESS", paidAt, user: buyer._id });
   });
 
-  test("classifies every statement row and lists MVEC payments missing from the statement", async () => {
+  test("classifies every statement row and lists Ikiguzi payments missing from the statement", async () => {
     const res = await request(app).post("/api/admin/reconcile").set(as("admin")).send({
       from: "2026-11-01T00:00:00Z",
       to: "2026-11-02T00:00:00Z",

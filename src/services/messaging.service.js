@@ -6,14 +6,13 @@
 //   pindo           PINDO_API_TOKEN, SMS_FROM_NAME          https://pindo.io
 //   africastalking  AT_USERNAME, AT_API_KEY, SMS_FROM_NAME  https://africastalking.com
 //   log             prints the message (development only)
+const { isLive, isTest } = require("../config/env");
 const axios = require("axios");
 const nodemailer = require("nodemailer");
 
-const isProduction = () => process.env.NODE_ENV === "production";
-
 // Tests never send real email (they stub the transport when they need it).
 function emailConfigured() {
-  if (process.env.NODE_ENV === "test") return false;
+  if (isTest()) return false;
   return Boolean(process.env.EMAIL_USER && process.env.EMAIL_PASS);
 }
 
@@ -21,7 +20,7 @@ function smsProvider() {
   const provider = (process.env.SMS_PROVIDER || "").trim().toLowerCase();
   if (provider === "pindo" && process.env.PINDO_API_TOKEN) return "pindo";
   if (provider === "africastalking" && process.env.AT_USERNAME && process.env.AT_API_KEY) return "africastalking";
-  if (!isProduction() && (provider === "log" || !provider)) return "log";
+  if (!isLive() && (provider === "log" || !provider)) return "log";
   return null;
 }
 
@@ -50,12 +49,12 @@ async function sendEmail({ to, subject, text, action }) {
   if (!emailConfigured()) throw new Error("Email is not configured.");
   const from = process.env.EMAIL_FROM || process.env.EMAIL_USER;
   const html = `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;color:#16252d;line-height:1.55">
-    <h2 style="color:#168db8;margin:0 0 12px">MVEC</h2>
+    <h2 style="color:#168db8;margin:0 0 12px">Ikiguzi</h2>
     ${text.split("\n").map((line) => `<p style="margin:0 0 10px">${escapeHtml(line)}</p>`).join("")}
     ${action ? `<p><a href="${escapeHtml(action.url)}" style="background:#25addb;color:#fff;padding:11px 20px;border-radius:8px;text-decoration:none;display:inline-block;font-weight:bold">${escapeHtml(action.label)}</a></p>` : ""}
-    <p style="color:#71808a;font-size:12px;margin-top:24px">MVEC marketplace · Rwanda</p>
+    <p style="color:#71808a;font-size:12px;margin-top:24px">Ikiguzi marketplace · Rwanda</p>
   </div>`;
-  await getTransporter().sendMail({ from: `"MVEC" <${from}>`, to, subject, text, html });
+  await getTransporter().sendMail({ from: `"Ikiguzi" <${from}>`, to, subject, text, html });
 }
 
 /**

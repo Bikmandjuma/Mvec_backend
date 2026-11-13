@@ -23,7 +23,7 @@ const notifications = () => require("./notification.service");
 const MODE_TO_TYPE = { add: "RESTOCK", remove: "REMOVE", set: "COUNT" };
 const WHOLESALE_REASONS = {
   RESTOCK: ["Restock", "Produced or harvested", "Vendor return", "Other"],
-  REMOVE: ["Damaged", "Lost or stolen", "Expired", "Sold outside MVEC", "Other"],
+  REMOVE: ["Damaged", "Lost or stolen", "Expired", "Sold outside Ikiguzi", "Other"],
   COUNT: ["Stock count correction", "Other"],
 };
 

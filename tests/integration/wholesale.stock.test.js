@@ -176,7 +176,7 @@ describe("Wholesale stock: purchases land in the vendor's store; suppliers manag
     const history = await request(app).get("/api/suppliers/me/stock-movements").set(as("warehouse"));
     expect(history.status).toBe(200);
     expect(history.body.movements.map((m) => [m.type, m.quantity])).toEqual([["COUNT", 16], ["RESTOCK", 4], ["COUNT", -15], ["RESTOCK", 5]]);
-    expect(history.body.reasons.REMOVE).toContain("Sold outside MVEC");
+    expect(history.body.reasons.REMOVE).toContain("Sold outside Ikiguzi");
   });
 
   test("selling out a supplier product marks it out of stock; cancelling brings it back", async () => {

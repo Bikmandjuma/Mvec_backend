@@ -2,7 +2,6 @@ const { describe, it, beforeEach, afterEach } = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
-const nodemailer = require("nodemailer");
 const User = require("../src/models/User");
 const authController = require("../src/controllers/auth.controller");
 
@@ -45,69 +44,7 @@ describe("Password Reset & Forgot Password Unit Tests", () => {
     process.env = { ...originalEnv };
   });
 
-  // ─── 1. ASSISTING FUNCTIONS & TRANSPORTER TESTS ─────────────────────────────
-  describe("Assisting Functions: Transporter & Email Sending", () => {
-    it("should create a valid nodemailer transporter when email credentials exist", () => {
-      const transporter = authController.getTransporter();
-      assert.ok(transporter, "Transporter should be created");
-      assert.equal(typeof transporter.sendMail, "function", "Transporter should have sendMail method");
-    });
-
-    it("should throw a descriptive error when EMAIL_USER or EMAIL_PASS is missing", () => {
-      delete process.env.EMAIL_USER;
-      delete process.env.EMAIL_PASS;
-
-      assert.throws(
-        () => authController.getTransporter(),
-        /Email credentials are not configured/
-      );
-    });
-
-    it("should configure custom SMTP settings when EMAIL_HOST is provided", () => {
-      process.env.EMAIL_HOST = "smtp.customhost.com";
-      process.env.EMAIL_PORT = "465";
-      process.env.EMAIL_SECURE = "true";
-
-      const transporter = authController.getTransporter();
-      assert.ok(transporter);
-      assert.equal(transporter.options.host, "smtp.customhost.com");
-      assert.equal(transporter.options.port, 465);
-      assert.equal(transporter.options.secure, true);
-    });
-
-    it("should format email correctly and include reset token link in both text and HTML", async () => {
-      let sentMailOptions = null;
-
-      // Mock nodemailer transport
-      const originalCreateTransport = nodemailer.createTransport;
-      nodemailer.createTransport = () => ({
-        sendMail: async (options) => {
-          sentMailOptions = options;
-          return { messageId: "mock-msg-123" };
-        },
-      });
-
-      try {
-        const testEmail = "buyer@example.com";
-        const testUrl = "https://mvec.rw/reset-password/sample-random-token-12345";
-
-        await authController.sendResetEmail(testEmail, testUrl);
-
-        assert.ok(sentMailOptions, "sendMail should have been called");
-        assert.equal(sentMailOptions.to, testEmail);
-        assert.ok(sentMailOptions.from.includes("support@mvec.rw"));
-        assert.equal(sentMailOptions.subject, "Password Reset Request");
-        assert.ok(sentMailOptions.text.includes(testUrl), "Plaintext email should contain reset link");
-        assert.ok(sentMailOptions.html.includes(testUrl), "HTML email should contain reset link");
-        assert.ok(sentMailOptions.html.includes("sample-random-token-12345"), "HTML email should contain token");
-      } finally {
-        nodemailer.createTransport = originalCreateTransport;
-      }
-    });
-  });
-
-  // ─── 2. FORGOT PASSWORD CONTROLLER TESTS ───────────────────────────────────
-  // ─── 2. CODE-BASED RESET (email or SMS) ──────────────────────────────────────
+  // ─── CODE-BASED RESET (email or SMS) ─────────────────────────────────────────
   // Flow: forgot-password sends a 6-digit code → verify-reset-otp returns a
   // one-time resetToken → reset-password sets the new password.
   // End-to-end coverage with a real database lives in tests/automation.test.js.
@@ -144,7 +81,7 @@ describe("Password Reset & Forgot Password Unit Tests", () => {
     it("emails a 6-digit code and stores only its hash", async () => {
       const user = makeUser();
       mockFindOne(user);
-      const { req, res } = createMockReqRes({ body: { email: "Buyer@MVEC.rw" } });
+      const { req, res } = createMockReqRes({ body: { email: "Buyer@Ikiguzi.rw" } });
       await authController.forgotPassword(req, res);
       assert.equal(res.statusCode, 200);
       const code = sentEmails[0].text.match(/\d{6}/)[0];

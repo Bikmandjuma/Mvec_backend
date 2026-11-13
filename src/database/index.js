@@ -1,6 +1,7 @@
 // Sequelize instance + models. MySQL is the application's only database.
+const { isLive, isTest } = require("../config/env");
 const { Sequelize } = require("sequelize");
-const env = process.env.NODE_ENV === "production" ? "production" : process.env.NODE_ENV === "test" ? "test" : "development";
+const env = isLive() ? "production" : isTest() ? "test" : "development";
 const config = require("./config")[env];
 
 const sequelize = new Sequelize(config.database, config.username, config.password, config);
@@ -25,7 +26,7 @@ const models = {
 
 // Phase 3–4 tables are declared as specs (see spec/define.js).
 const { defineModel, associate } = require("./spec/define");
-const specs = [...require("./spec/commerce"), ...require("./spec/platform")];
+const specs = [...require("./spec/commerce"), ...require("./spec/platform"), ...require("./spec/delivery")];
 for (const spec of specs) {
   const Model = defineModel(sequelize, spec);
   models[spec.model] = Model;

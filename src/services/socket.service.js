@@ -71,17 +71,17 @@ class SocketService {
       }
 
       // Order and dispute rooms are only for the people involved: the buyer,
-      // the sellers on the order, its courier and admins (dispute: buyer,
+      // the sellers on the order and admins (dispute: buyer,
       // seller, admins). Anyone else's join is ignored.
       const isAdmin = ["super_admin", "admin"].includes(socket.user?.role);
       const realUser = userId && !String(userId).startsWith("guest_");
       const canSeeOrder = async (orderId) => {
         if (!realUser || !/^[a-f0-9]{24}$/i.test(String(orderId || ""))) return false;
         if (isAdmin) return true;
-        const order = await require("../models/Order").findById(orderId).select("user courier items.vendor").lean();
+        const order = await require("../models/Order").findById(orderId).select("user items.vendor").lean();
         if (!order) return false;
         const me = String(userId);
-        return String(order.user) === me || String(order.courier || "") === me || (order.items || []).some((i) => String(i.vendor) === me);
+        return String(order.user) === me || (order.items || []).some((i) => String(i.vendor) === me);
       };
       const joinOrder = async (orderId) => {
         try { if (await canSeeOrder(orderId)) socket.join(`order:${orderId}`); } catch { /* ignore bad ids */ }
@@ -95,17 +95,6 @@ class SocketService {
           const dispute = await require("../models/Dispute").findById(disputeId).select("raisedBy vendor").lean();
           if (dispute && (isAdmin || [String(dispute.raisedBy), String(dispute.vendor)].includes(String(userId)))) socket.join(`dispute:${disputeId}`);
         } catch { /* ignore bad ids */ }
-      });
-
-      // Only the courier assigned to the order (or an admin) can share its location.
-      socket.on("update_courier_location", async ({ orderId, latitude, longitude } = {}) => {
-        try {
-          const lat = Number(latitude); const lng = Number(longitude);
-          if (!realUser || !Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return;
-          const order = /^[a-f0-9]{24}$/i.test(String(orderId || "")) ? await require("../models/Order").findById(orderId).select("courier").lean() : null;
-          if (!order || !(isAdmin || String(order.courier || "") === String(userId))) return;
-          this.io.to(`order:${orderId}`).emit("courier_location_updated", { orderId, coords: { latitude: lat, longitude: lng }, timestamp: new Date() });
-        } catch { /* ignore */ }
       });
 
       socket.on("disconnect", () => {

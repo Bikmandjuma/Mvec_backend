@@ -188,7 +188,7 @@ exports.addCaseComment = async (req, res) => {
       attachments: attachments || [],
     });
 
-    // Re-open case if customer replies to a resolved case; MVEC answering an open case means it is in progress.
+    // Re-open case if customer replies to a resolved case; Ikiguzi answering an open case means it is in progress.
     if (isOwner && supportCase.status === "RESOLVED") {
       supportCase.status = "IN_PROGRESS";
     }
@@ -200,8 +200,8 @@ exports.addCaseComment = async (req, res) => {
     await supportCase.save();
     if (isAdmin && !isOwner) {
       notifications.notify(supportCase.openedBy, {
-        type: "ADMIN", title: `MVEC replied to ${supportCase.ticketNumber}`, message: String(message).slice(0, 200), link: await supportPageFor(supportCase.openedBy),
-        sms: `MVEC replied to your support request ${supportCase.ticketNumber}. Open MVEC to read it.`,
+        type: "ADMIN", title: `Ikiguzi replied to ${supportCase.ticketNumber}`, message: String(message).slice(0, 200), link: await supportPageFor(supportCase.openedBy),
+        sms: `Ikiguzi replied to your support request ${supportCase.ticketNumber}. Open Ikiguzi to read it.`,
       }).catch(() => {});
     } else {
       const to = supportCase.assignedTo ? [supportCase.assignedTo] : null;

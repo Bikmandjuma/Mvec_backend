@@ -1,4 +1,4 @@
-// MVEC finance: review and pay out seller withdrawal requests.
+// Ikiguzi finance: review and pay out seller withdrawal requests.
 // PENDING -> PROCESSING (approved) -> PAID (transfer reference recorded)
 // PENDING/PROCESSING -> REJECTED (amount returned to the seller's balance)
 const orm = require("../database/orm");

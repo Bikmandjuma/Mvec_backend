@@ -1,10 +1,11 @@
+const { isLive } = require("../config/env");
 const crypto = require("crypto");
 
 // Payment callbacks mark orders as paid, so they are only trusted when signed.
 // Unsigned callbacks are accepted only outside production, and only when
 // ALLOW_UNSIGNED_WEBHOOKS=true is set on purpose (local sandbox testing).
 const unsignedAllowed = () =>
-  process.env.NODE_ENV !== "production" && process.env.ALLOW_UNSIGNED_WEBHOOKS === "true";
+  !isLive() && process.env.ALLOW_UNSIGNED_WEBHOOKS === "true";
 
 // HMAC-SHA256 (hex) over the exact bytes the provider sent.
 function hmacMatches(req, signature, secret) {

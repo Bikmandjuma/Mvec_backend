@@ -4,16 +4,16 @@
 // simple story:
 //
 //   BUYER_PAYMENTS     money buyers paid in (goes negative: total received)
-//   ESCROW_HOLDING     money MVEC is holding until delivery
+//   ESCROW_HOLDING     money Ikiguzi is holding until delivery
 //   VENDOR_PAYABLE     a seller's / supplier's earned balance (one per owner)
-//   PLATFORM_REVENUE   what MVEC earned (commission, ad clicks, subscriptions)
+//   PLATFORM_REVENUE   what Ikiguzi earned (commission, ad clicks, subscriptions)
 //   AFFILIATE_COMMISSION  affiliate commissions
 //   GATEWAY_FEES       payment provider fees
 //   AD_BUDGETS         ad budgets reserved from seller balances, not yet spent
 //   BUYER_REFUND_HOLD  money refunded to buyers
-//   PAID_OUT           money sent out to sellers, suppliers, affiliates or MVEC
+//   PAID_OUT           money sent out to sellers, suppliers, affiliates or Ikiguzi
 //
-// The real money sits in MVEC's payment provider account; this ledger says
+// The real money sits in Ikiguzi's payment provider account; this ledger says
 // whose it is. BUYER_PAYMENTS minus refunds and payouts equals what that
 // account should hold, so it can be checked against the provider's statement.
 const LedgerAccount = require("../models/LedgerAccount");
@@ -21,12 +21,12 @@ const LedgerEntry = require("../models/LedgerEntry");
 
 const LABELS = {
   BUYER_PAYMENTS: "Buyer payments",
-  ESCROW_HOLDING: "MVEC holding",
+  ESCROW_HOLDING: "Ikiguzi holding",
   VENDOR_PAYABLE: "Seller balance",
   SUPPLIER_PAYABLE: "Supplier balance",
-  PLATFORM_REVENUE: "MVEC revenue",
-  ADMIN_REVENUE: "MVEC revenue",
-  DEVELOPER_REVENUE: "MVEC revenue",
+  PLATFORM_REVENUE: "Ikiguzi revenue",
+  ADMIN_REVENUE: "Ikiguzi revenue",
+  DEVELOPER_REVENUE: "Ikiguzi revenue",
   AFFILIATE_COMMISSION: "Affiliate commission",
   GATEWAY_FEES: "Payment provider fees",
   AD_BUDGETS: "Ad budgets",
@@ -68,7 +68,7 @@ async function post({ from, to, amount, entryType, order = null, reference, desc
   return entry;
 }
 
-// Money sent out to its owner (withdrawal paid, MVEC withdrawal recorded).
+// Money sent out to its owner (withdrawal paid, Ikiguzi withdrawal recorded).
 const payoutSent = ({ fromType, ownerId = null, amount, reference, description, session = null }) =>
   post({ from: [fromType, ownerId], to: ["PAID_OUT"], amount, entryType: "PAYOUT_SENT", reference, description, session });
 
@@ -76,8 +76,8 @@ const payoutSent = ({ fromType, ownerId = null, amount, reference, description, 
 const payoutReturned = ({ toType, ownerId = null, amount, reference, description, session = null }) =>
   post({ from: ["PAID_OUT"], to: [toType, ownerId], amount, entryType: "ADMIN_MANUAL_ADJUSTMENT", reference, description, session });
 
-// Money MVEC earns outside order commission (ad clicks, subscriptions): it
-// becomes MVEC revenue in the ledger and is available in MVEC's wallet.
+// Money Ikiguzi earns outside order commission (ad clicks, subscriptions): it
+// becomes Ikiguzi revenue in the ledger and is available in Ikiguzi's wallet.
 async function mvecEarned({ from, amount, entryType, reference, description, session = null }) {
   const value = Math.round(Number(amount) * 100) / 100;
   if (!(value > 0)) return null;

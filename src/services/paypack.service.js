@@ -9,6 +9,7 @@
 // Required env: PAYPACK_CLIENT_ID, PAYPACK_CLIENT_SECRET
 // Optional env: PAYPACK_BASE_URL, PAYPACK_WEBHOOK_SECRET, PAYPACK_WEBHOOK_MODE
 
+const { isLive } = require("../config/env");
 const crypto = require("crypto");
 const axios = require("axios");
 const NodeCache = require("node-cache");
@@ -19,7 +20,7 @@ const BASE_URL = () => process.env.PAYPACK_BASE_URL || "https://payments.paypack
 
 // Paypack sends webhooks only to the URL registered for the matching mode.
 const WEBHOOK_MODE = () =>
-  process.env.PAYPACK_WEBHOOK_MODE || (process.env.NODE_ENV === "production" ? "production" : "development");
+  process.env.PAYPACK_WEBHOOK_MODE || (isLive() ? "production" : "development");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -171,7 +172,7 @@ function verifyWebhookSignature(rawBody, signatureHeader, secret = process.env.P
  * Send money to a mobile money number (Paypack "cashout"), used for seller payouts.
  *
  * POST ${PAYPACK_BASE_URL}/transactions/cashout  { amount, number }
- * Only called when PAYOUT_AUTO_DISBURSE=true; otherwise MVEC finance pays out
+ * Only called when PAYOUT_AUTO_DISBURSE=true; otherwise Ikiguzi finance pays out
  * manually and records the transfer reference.
  */
 async function cashout({ amount, phone }) {

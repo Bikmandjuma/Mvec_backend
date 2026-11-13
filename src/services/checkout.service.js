@@ -1,3 +1,4 @@
+const { readPin } = require("../config/delivery");
 const orm = require("../database/orm");
 const Order = require("../models/Order");
 const Product = require("../models/Product");
@@ -74,6 +75,7 @@ function parseDelivery({ shippingAddress = {}, recipient = {}, deliveryMethod, s
       state: province,
       country: "Rwanda",
       postalCode: clean(shippingAddress.postalCode, 20) || undefined,
+      ...(readPin(shippingAddress, { label: "delivery pin" }) || {}),
     },
     recipient: contact,
     deliveryMethod: method,

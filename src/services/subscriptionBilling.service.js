@@ -10,7 +10,7 @@ const { notify } = sellerFinance;
 const settings = require("./platformSettings.service");
 // Premium price is set by an admin (Admin → Subscriptions).
 const premiumPrice = async () => Number((await settings.get()).sellerPremiumPrice) || 5000;
-const closedError = () => Object.assign(new Error("Seller Premium isn't open yet. Every tool is free while MVEC grows; we'll let you know when plans start."), { status: 403 });
+const closedError = () => Object.assign(new Error("Seller Premium isn't open yet. Every tool is free while Ikiguzi grows; we'll let you know when plans start."), { status: 403 });
 const PERIOD_DAYS = 30;
 const addDays = (d, n) => new Date(new Date(d).getTime() + n * 86400000);
 const fmt = (n) => `${Number(n || 0).toLocaleString("en-RW")} RWF`;

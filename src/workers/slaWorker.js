@@ -193,12 +193,16 @@ exports.sendPaymentReminders = sendPaymentReminders;
 
 exports.initBackgroundWorkers = () => {
   cron.schedule("7 * * * *", renewSubscriptions);
+  // Rider offers nobody answered go to the next nearest riders.
+  cron.schedule("* * * * *", () => {
+    require("../services/delivery.service").expireStaleOffers().catch((error) => console.error("[Delivery dispatch] failed:", error.message));
+  });
   cron.schedule("17 * * * *", endExpiredCampaigns);
-  // Problem reports: MVEC steps in when the seller misses the response
+  // Problem reports: Ikiguzi steps in when the seller misses the response
   // deadline or the buyer doesn't answer an offer (every 30 minutes).
   cron.schedule("*/30 * * * *", () => {
     require("../services/disputeCase.service").escalateOverdue()
-      .then((r) => { if (r.escalated) console.log(`[Disputes] ${r.escalated} case(s) passed to MVEC.`); })
+      .then((r) => { if (r.escalated) console.log(`[Disputes] ${r.escalated} case(s) passed to Ikiguzi.`); })
       .catch((e) => console.error("[Disputes] escalation failed:", e.message));
   });
   // Pay sellers for shipped orders the buyer neither confirmed nor disputed

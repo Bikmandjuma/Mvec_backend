@@ -7,6 +7,7 @@
 // To connect to the live MTN MoMo OpenAPI set:
 //   MOMO_BASE_URL, MOMO_API_USER, MOMO_API_KEY, MOMO_PRIMARY_KEY, MOMO_TARGET_ENV
 
+const { isLive } = require("../config/env");
 const crypto = require("crypto");
 const axios = require("axios");
 const NodeCache = require("node-cache");
@@ -18,7 +19,7 @@ const tokenCache = new NodeCache({ stdTTL: 3300 });
 // ---------------------------------------------------------------------------
 
 function isSandbox() {
-  return process.env.NODE_ENV !== "production" || !process.env.MOMO_BASE_URL;
+  return !isLive() || !process.env.MOMO_BASE_URL;
 }
 
 function generateExternalId() {
@@ -91,8 +92,8 @@ const initiateMomoPayment = async ({ phoneNumber, amount, reference }) => {
       partyIdType: "MSISDN",
       partyId: phoneNumber,
     },
-    payerMessage: `MVEC payment of RWF ${amount}`,
-    payeeNote: "MVEC Marketplace",
+    payerMessage: `Ikiguzi payment of RWF ${amount}`,
+    payeeNote: "Ikiguzi Marketplace",
   };
 
   const response = await axios.post(
@@ -129,8 +130,8 @@ function buildCollectionPayload({ amount, currency, msisdn, externalId, payerMes
       partyIdType: "MSISDN",
       partyId: String(msisdn),
     },
-    payer_message: payerMessage || `MVEC payment of RWF ${amount}`,
-    payee_note: payeeNote || "MVEC Marketplace",
+    payer_message: payerMessage || `Ikiguzi payment of RWF ${amount}`,
+    payee_note: payeeNote || "Ikiguzi Marketplace",
   };
 }
 

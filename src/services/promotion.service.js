@@ -36,6 +36,12 @@ const lineMatches = (promo, product) => {
  * Returns { promotion, code, type, lineDiscounts: Map(index -> amount),
  *           itemDiscount, shippingDiscount, discount, message }.
  */
+// A free-delivery coupon covers the seller's own delivery, never an Ikiguzi
+// rider's fee (the rider is paid from it).
+const freeable = (parcel, promo) =>
+  parcel.method !== "RIDER" &&
+  String(parcel.vendor) === String(promo.vendor) && (!promo.store || !parcel.store || String(parcel.store) === String(promo.store));
+
 async function quote(code, { lines, parcels = [], userId = null }) {
   const clean = String(code || "").trim().toUpperCase();
   if (!clean) throw fail("Enter a coupon code.");
@@ -63,7 +69,7 @@ async function quote(code, { lines, parcels = [], userId = null }) {
   let shippingDiscount = 0;
   if (promo.type === "FREE_SHIPPING") {
     shippingDiscount = parcels
-      .filter((p) => String(p.vendor) === String(promo.vendor) && (!promo.store || !p.store || String(p.store) === String(promo.store)))
+      .filter((p) => freeable(p, promo))
       .reduce((t, p) => t + Number(p.fee || 0), 0);
     if (!shippingDiscount) throw fail("Delivery from this seller is already free.");
   } else {
@@ -94,8 +100,7 @@ function applyToOrder(q, items, shipping) {
   items.forEach((item, i) => { item.discount = q.lineDiscounts.get(i) || 0; });
   if (q.shippingDiscount) {
     shipping.shippingBreakdown = shipping.shippingBreakdown.map((p) => (
-      String(p.vendor) === String(q.promotion.vendor) && (!q.promotion.store || !p.store || String(p.store) === String(q.promotion.store))
-        ? { ...p, originalFee: p.fee, fee: 0 } : p
+      freeable(p, q.promotion) ? { ...p, originalFee: p.fee, fee: 0 } : p
     ));
     shipping.shippingFee = shipping.shippingBreakdown.reduce((t, p) => t + Number(p.fee || 0), 0);
   }

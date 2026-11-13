@@ -1,7 +1,8 @@
 // Admin operations built on the marketplace's own records: the "needs your
-// attention" queue, payments, MVEC earnings, analytics, risk signals, seller
+// attention" queue, payments, Ikiguzi earnings, analytics, risk signals, seller
 // trust scores, live platform settings and the audit log. Nothing here keeps
 // its own copy of the data; every number is read from the source tables.
+const { isLive } = require("../config/env");
 const User = require("../models/User");
 const Vendor = require("../models/Vendor");
 const Supplier = require("../models/Supplier");
@@ -134,7 +135,7 @@ exports.getPayments = async (req, res) => {
   }
 };
 
-// ─── MVEC earnings (per order line) ────────────────────────────────────────
+// ─── Ikiguzi earnings (per order line) ────────────────────────────────────────
 exports.getEarnings = async (req, res) => {
   try {
     const { page: p, pageSize, skip } = page(req.query);
@@ -159,12 +160,12 @@ exports.getEarnings = async (req, res) => {
       if (["REFUNDED", "CANCELLED"].includes(s.status)) continue;
       t.gross += num(s.grossAmount); t.platformFee += num(s.commissionAmount); t.developer += num(s.developerShare);
       t.affiliates += num(s.affiliateShare); t.affiliatesPaidBySellers += num(s.vendorAffiliateShare);
-      // MVEC keeps the admin share and the developer share (the platform's).
+      // Ikiguzi keeps the admin share and the developer share (the platform's).
       const keeps = num(s.adminShare) + num(s.developerShare);
       t.gatewayFees += num(s.gatewayFee); t.mvecNet += keeps; t.sellers += num(s.netAmount);
       if (s.status === "RELEASED") t.released += keeps; else t.held += keeps;
     }
-    // Other MVEC income in the period: sponsored clicks and subscription fees.
+    // Other Ikiguzi income in the period: sponsored clicks and subscription fees.
     const LedgerEntry = require("../models/LedgerEntry");
     const extra = await LedgerEntry.find({ entryType: { $in: ["AD_CLICK_REVENUE", "SUBSCRIPTION_FEE"] }, createdAt: { $gte: new Date(Date.now() - days * DAY) } }).select("entryType amount").lean();
     t.adRevenue = extra.filter((e) => e.entryType === "AD_CLICK_REVENUE").reduce((n, e) => n + num(e.amount), 0);
@@ -203,9 +204,9 @@ exports.getAnalytics = async (req, res) => {
       Payment.find({ createdAt: { $gte: since }, status: "SUCCESS" }).select("gateway method amount").limit(50000).lean(),
       Dispute.countDocuments({ createdAt: { $gte: since } }),
     ]);
-    // Money was received for these orders. A disputed order was paid (MVEC is
+    // Money was received for these orders. A disputed order was paid (Ikiguzi is
     // holding the money), so it counts as a sale until it is refunded; the
-    // seller breakdown, payment mix and MVEC Earnings use the same rule.
+    // seller breakdown, payment mix and Ikiguzi Earnings use the same rule.
     const paid = orders.filter((o) => [...RECEIVED, "REFUNDED"].includes(o.paymentStatus));
     const kept = paid.filter((o) => o.paymentStatus !== "REFUNDED");
     const gmv = kept.reduce((s, o) => s + num(o.totalAmount), 0);
@@ -335,7 +336,7 @@ exports.getRisk = async (_req, res) => {
     const who = new Map(people.map((u) => [idOf(u), u]));
     const order = { High: 0, Medium: 1, Low: 2 };
     return res.json({
-      signals: signals.map((s, i) => ({ id: `R${i + 1}`, ...s, partyName: s.partyName || (s.partyId ? nameOf(who.get(s.partyId)) : "MVEC"), partyRole: who.get(s.partyId)?.role || "" }))
+      signals: signals.map((s, i) => ({ id: `R${i + 1}`, ...s, partyName: s.partyName || (s.partyId ? nameOf(who.get(s.partyId)) : "Ikiguzi"), partyRole: who.get(s.partyId)?.role || "" }))
         .sort((a, b) => order[a.level] - order[b.level]),
     });
   } catch (error) {
@@ -413,10 +414,10 @@ exports.getPlatform = async (_req, res) => {
     const live = (sandbox) => (sandbox ? "Test mode" : "Live");
     return res.json({
       fees: [
-        { label: "Default MVEC commission", value: `${cfg.defaultCommissionPercent}%`, detail: `Used when no category or seller rule matches. ${activeRules} active rule${activeRules === 1 ? "" : "s"}.` },
-        { label: "Affiliate share paid by MVEC", value: `${cfg.affiliateSharePercent}% of the commission`, detail: "Only on sales from an affiliate link." },
+        { label: "Default Ikiguzi commission", value: `${cfg.defaultCommissionPercent}%`, detail: `Used when no category or seller rule matches. ${activeRules} active rule${activeRules === 1 ? "" : "s"}.` },
+        { label: "Affiliate share paid by Ikiguzi", value: `${cfg.affiliateSharePercent}% of the commission`, detail: "Only on sales from an affiliate link." },
         { label: "Affiliate rate a seller can add", value: `0–${MAX_VENDOR_RATE}% of the sale`, detail: "Paid by the seller on top, only if they joined the affiliate program." },
-        { label: "Payment provider fees paid by", value: cfg.gatewayFeePayer === "SELLER" ? "The seller" : "MVEC", detail: cfg.gatewayFeePayer === "SELLER" ? "Deducted from the seller's share of each sale." : "Deducted from MVEC's commission." },
+        { label: "Payment provider fees paid by", value: cfg.gatewayFeePayer === "SELLER" ? "The seller" : "Ikiguzi", detail: cfg.gatewayFeePayer === "SELLER" ? "Deducted from the seller's share of each sale." : "Deducted from Ikiguzi's commission." },
       ],
       rules: [
         { label: "Time to pay before an order is cancelled", value: "30 minutes" },
@@ -440,11 +441,11 @@ exports.getPlatform = async (_req, res) => {
         { label: "Send and confirm refunds and withdrawals", schedule: "Every 5 minutes", detail: `${queued} in progress, ${failed} failed` },
         { label: "Delivery deadline checks", schedule: "Every 15 minutes" },
         { label: "Pay sellers when the buyer stays silent", schedule: "Every 15 minutes", detail: ops.autoReleaseDays > 0 ? `${ops.autoReleaseDays} day${ops.autoReleaseDays === 1 ? "" : "s"} after shipping` : "Off" },
-        { label: "Pass unanswered problem reports to MVEC", schedule: "Every 30 minutes", detail: `After ${ops.disputeResponseDays} day${ops.disputeResponseDays === 1 ? "" : "s"} without an answer from the seller` },
+        { label: "Pass unanswered problem reports to Ikiguzi", schedule: "Every 30 minutes", detail: `After ${ops.disputeResponseDays} day${ops.disputeResponseDays === 1 ? "" : "s"} without an answer from the seller` },
         { label: "Premium renewals", schedule: "Hourly", detail: ops.subscriptionsEnabled ? "Plans on" : "Paused: plans are off" },
         { label: "End expired ad campaigns", schedule: "Hourly" },
       ],
-      environment: process.env.NODE_ENV || "development",
+      environment: isLive() ? "live" : process.env.NODE_ENV,
       commissionRules: { active: activeRules, applied: true, note: "Manage rates under Money → Commission rules." },
     });
   } catch (error) {

@@ -60,13 +60,13 @@ module.exports = {
     }
   },
 
-  // MVEC verified or rejected a seller/supplier profile.
+  // Ikiguzi verified or rejected a seller/supplier profile.
   async verificationDecision(userId, { kind, name, decision, reason }) {
     const store = kind === "supplier" ? "supplier account" : "store";
     const approved = decision === "VERIFIED";
     const text = approved
-      ? `Good news: MVEC verified your ${store} ${name}. You now show as verified to buyers${kind === "supplier" ? " and vendors" : ""}.`
-      : `MVEC could not verify your ${store} ${name}. Reason: ${reason} Update your profile and submit it again.`;
+      ? `Good news: Ikiguzi verified your ${store} ${name}. You now show as verified to buyers${kind === "supplier" ? " and vendors" : ""}.`
+      : `Ikiguzi could not verify your ${store} ${name}. Reason: ${reason} Update your profile and submit it again.`;
     await notify(userId, {
       type: "ADMIN",
       title: approved ? `Your ${store} is verified` : `Your ${store} needs changes`,
@@ -119,7 +119,7 @@ module.exports = {
       message: "Pay in the next 10 minutes or the order is cancelled and the items are released.",
       reference: order.orderNumber,
       link: `/payment/${idOf(order)}`,
-      sms: `MVEC: order ${order.orderNumber} (${money(order.totalAmount)}) is not paid yet. Pay within 10 minutes to keep it.`,
+      sms: `Ikiguzi: order ${order.orderNumber} (${money(order.totalAmount)}) is not paid yet. Pay within 10 minutes to keep it.`,
     });
   },
 
@@ -137,14 +137,14 @@ module.exports = {
     await notify(order.user, {
       type: "PAYMENT",
       title: `Payment received for ${order.orderNumber}`,
-      message: `MVEC is holding ${money(order.totalAmount)} until you confirm delivery. Your delivery code is on the order page.`,
+      message: `Ikiguzi is holding ${money(order.totalAmount)} until you confirm delivery. Your delivery code is on the order page.`,
       reference: order.orderNumber,
       link: orderLink(order),
       sms: {
         phone: buyerPhone,
-        text: `MVEC: payment for ${order.orderNumber} received. Delivery code: ${order.deliveryOtp}. Give it ONLY when you have your items.`,
+        text: `Ikiguzi: payment for ${order.orderNumber} received. Delivery code: ${order.deliveryOtp}. Give it ONLY when you have your items.`,
       },
-      email: `We received ${money(order.totalAmount)} for order ${order.orderNumber}.\nMVEC holds the payment until you confirm delivery.\nYour delivery code is ${order.deliveryOtp}. Give it only to the person handing you your items.`,
+      email: `We received ${money(order.totalAmount)} for order ${order.orderNumber}.\nIkiguzi holds the payment until you confirm delivery.\nYour delivery code is ${order.deliveryOtp}. Give it only to the person handing you your items.`,
     });
     for (const vendorId of vendorIdsOf(order)) {
       const lines = order.items.filter((i) => idOf(i.vendor) === vendorId);
@@ -153,7 +153,7 @@ module.exports = {
         message: `${lines.reduce((n, i) => n + i.quantity, 0)} item(s) to prepare for ${order.shippingAddress?.city || "delivery"}.`,
         reference: order.orderNumber,
         link: `/vendor/orders/${idOf(order)}`,
-        sms: `MVEC: new paid order ${order.orderNumber}. Please prepare it for delivery.`,
+        sms: `Ikiguzi: new paid order ${order.orderNumber}. Please prepare it for delivery.`,
       });
     }
   },
@@ -179,18 +179,7 @@ module.exports = {
       ].filter(Boolean).join(" "),
       reference: order.orderNumber,
       link: orderLink(order),
-      sms: sms ? { phone: order.recipient?.phone, text: `MVEC: order ${order.orderNumber} ${text}.` } : undefined,
-    });
-  },
-
-  async courierAssigned(order) {
-    await notify(order.courier, {
-      type: "DELIVERY",
-      title: `New delivery ${order.orderNumber}`,
-      message: `${order.recipient?.name || "Buyer"}, ${order.shippingAddress?.street || ""} ${order.shippingAddress?.city || ""}`.trim(),
-      reference: order.orderNumber,
-      link: "/delivery/deliveries",
-      sms: `MVEC: delivery ${order.orderNumber} assigned to you. Open your deliveries for the address.`,
+      sms: sms ? { phone: order.recipient?.phone, text: `Ikiguzi: order ${order.orderNumber} ${text}.` } : undefined,
     });
   },
 
@@ -217,7 +206,7 @@ module.exports = {
       await notify(order.user, {
         type: "DELIVERY",
         title: `Order ${order.orderNumber} delivered`,
-        message: automatic ? "No problem was reported in time, so the seller has been paid. If something is wrong, contact MVEC support." : "Thanks for shopping on MVEC. You can now review the products.",
+        message: automatic ? "No problem was reported in time, so the seller has been paid. If something is wrong, contact Ikiguzi support." : "Thanks for shopping on Ikiguzi. You can now review the products.",
         reference: order.orderNumber,
         link: orderLink(order),
       });
@@ -238,7 +227,7 @@ module.exports = {
           message: "The buyer cancelled before shipping. Do not send these items.",
           reference: order.orderNumber,
           link: `/vendor/orders/${idOf(order)}`,
-          sms: `MVEC: order ${order.orderNumber} was cancelled by the buyer. Do not ship it.`,
+          sms: `Ikiguzi: order ${order.orderNumber} was cancelled by the buyer. Do not ship it.`,
         });
       }
     }
@@ -251,7 +240,7 @@ module.exports = {
       message: `${money(amount)} was sent back to your mobile money number.`,
       reference: order.orderNumber,
       link: orderLink(order),
-      sms: { phone: order.recipient?.phone, text: `MVEC: ${money(amount)} refund for ${order.orderNumber} was sent to your mobile money.` },
+      sms: { phone: order.recipient?.phone, text: `Ikiguzi: ${money(amount)} refund for ${order.orderNumber} was sent to your mobile money.` },
     });
   },
 
@@ -277,7 +266,7 @@ module.exports = {
       await notify(id, {
         type: "ORDER",
         title: `Problem reported on ${order.orderNumber}`,
-        message: `The buyer reported: ${reason}. Payment is on hold. Respond with your side so MVEC can resolve it.`,
+        message: `The buyer reported: ${reason}. Payment is on hold. Respond with your side so Ikiguzi can resolve it.`,
         reference,
         link: `/vendor/refunds?case=${dispute._id}`,
       });
@@ -286,7 +275,7 @@ module.exports = {
       await notify(id, {
         type: "ADMIN",
         title: `Problem reported on ${order.orderNumber}`,
-        message: `${reason}. Payment is on hold until MVEC reviews it.`,
+        message: `${reason}. Payment is on hold until Ikiguzi reviews it.`,
         reference,
         link: `/admin/disputes?case=${dispute._id}`,
       });
@@ -295,7 +284,7 @@ module.exports = {
       await notify(order.user, {
         type: "ORDER",
         title: `We received your report on ${order.orderNumber}`,
-        message: "The seller and MVEC have been told. The payment stays on hold until the problem is resolved.",
+        message: "The seller and Ikiguzi have been told. The payment stays on hold until the problem is resolved.",
         reference,
         link: orderLink(order),
       });
@@ -315,7 +304,7 @@ module.exports = {
   // A new message on a dispute goes to everyone else involved.
   async disputeReply(order, dispute, { fromUserId, fromRole }) {
     const reference = dispute.disputeNumber || order.orderNumber;
-    const from = fromRole === "super_admin" ? "MVEC" : fromRole === "vendor" ? "The seller" : "The buyer";
+    const from = fromRole === "super_admin" ? "Ikiguzi" : fromRole === "vendor" ? "The seller" : "The buyer";
     const title = `${from} replied on ${reference}`;
     const message = `New message on the problem reported for ${order.orderNumber}.`;
     const skip = String(fromUserId);
@@ -349,7 +338,7 @@ module.exports = {
         ? `${money(amount)} was sent to your mobile money.`
         : `The ${money(amount)} transfer failed and the amount is back in your balance. Check your number and try again.`,
       link: supplier ? "/supplier/payments" : "/vendor/payouts",
-      sms: status === "PAID" ? `MVEC: your ${money(amount)} withdrawal was sent to your mobile money.` : undefined,
+      sms: status === "PAID" ? `Ikiguzi: your ${money(amount)} withdrawal was sent to your mobile money.` : undefined,
     });
   },
 
@@ -360,7 +349,7 @@ module.exports = {
       title: titles[status] || "Withdrawal update",
       message: status === "COMPLETED" ? `${money(amount)} was sent to your mobile money.` : reason || `${money(amount)} withdrawal is ${String(status).toLowerCase()}.`,
       link: "/affiliate/withdrawals",
-      sms: status === "COMPLETED" ? `MVEC: your ${money(amount)} affiliate withdrawal was sent to your mobile money.` : undefined,
+      sms: status === "COMPLETED" ? `Ikiguzi: your ${money(amount)} affiliate withdrawal was sent to your mobile money.` : undefined,
     });
   },
 };
