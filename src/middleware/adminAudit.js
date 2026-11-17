@@ -33,6 +33,7 @@ const RULES = [
   ["PATCH", /^\/api\/users\/([^/]+)$/, "User", (b) => (b.status ? `User account set to ${lower(b.status)}` : "User account updated")],
   ["POST", /^\/api\/users\/couriers$/, "User", (b) => `Rider added: ${b.fullName || b.email}`],
   ["PATCH", /^\/api\/admin\/riders\/([^/]+)$/, "Rider", (b) => `Rider ${String(b.status || "").toLowerCase()}`],
+  ["POST", /^\/api\/admin\/deliveries\/([^/]+)\/release$/, "Delivery", () => "Parcel handed to another rider"],
   ["POST", /^\/api\/users\/admins$/, "User", (b) => `Admin added: ${b.fullName || b.email}`],
   ["POST", /^\/api\/users\/([^/]+)\/admin-access$/, "User", (b) => (b.active ? "Admin access restored" : "Admin access removed")],
   ["POST", /^\/api\/disputes\/([^/]+)\/decide$/, "Dispute", (b) => `Problem report decided: ${b.decision === "REFUND_BUYER" ? "buyer refunded" : b.decision === "RELEASE_TO_VENDOR" ? "seller paid" : `split (${b.buyerRefundAmount} RWF refunded, ${b.vendorReleaseAmount} RWF to seller)`}`],

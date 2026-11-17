@@ -56,6 +56,12 @@ This is KitchenLink's delivery-worker model, with one job per seller parcel.
 - Steps are ASSIGNED → PICKED_UP → OUT_FOR_DELIVERY, then `confirm` with the buyer's code.
 - Sellers can't move a rider parcel to shipped or out for delivery. The order follows the rider.
 - Going offline hands parcels not yet picked up back to the pool.
+- Late pickup (`checkLatePickups`, every minute): `DELIVERY_PICKUP_MINUTES` after accepting, the rider is reminded `DELIVERY_PICKUP_WARN_MINUTES` before, flagged at the deadline (rider and admins told), and the parcel goes to another rider `DELIVERY_PICKUP_REASSIGN_MINUTES` after it. Admins can hand a parcel back sooner (`POST /api/admin/deliveries/:id/release`).
+
+**Live tracking (`services/tracking.service.js`)**
+- Each GPS fix (`PATCH /api/rider/location`) can carry heading, speed and accuracy.
+- `GET /api/orders/:id/live` shows the rider, road route, distance and ETA to the buyer, the seller (its own parcels) and admins. `GET /api/rider/deliveries/:id/navigation` adds turn-by-turn steps. `GET /api/admin/deliveries` lists every parcel on the way.
+- Routes come from OSRM (`OSRM_URL`, OpenStreetMap roads, about one call a second, cached), and fall back to straight lines when it's empty or down. Tests set it empty.
 
 **Accounts**
 - Riders sign up with a phone code: `POST /auth/send-otp` → `POST /auth/verify-otp` with `role: "delivery"` → `POST /api/rider/register`. The website (`/signup`, "Delivery worker") and the app (`/rider`) both use this. Riders have no usable password and sign in with a phone code (`purpose: "login"`). Google sign-up never creates riders.

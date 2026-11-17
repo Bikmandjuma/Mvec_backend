@@ -5,6 +5,7 @@ const jwt = require("jsonwebtoken");
 const orm = require("../database/orm");
 const User = require("../models/User");
 const deliveryService = require("../services/delivery.service");
+const trackingService = require("../services/tracking.service");
 const { normalizePhone, phoneVariants } = require("../utils/sms.util");
 const { signToken, getAuthenticatedUserResponse } = require("./auth.controller");
 
@@ -70,7 +71,19 @@ exports.accept = run((req) => deliveryService.accept(req.user, req.params.id));
 exports.reject = run((req) => deliveryService.reject(req.user, req.params.id));
 exports.status = run((req) => deliveryService.updateStatus(req.user, req.params.id, req.body));
 exports.confirm = run((req) => deliveryService.confirm(req.user, req.params.id, req.body));
+exports.navigation = run((req) => trackingService.riderNavigation(req.user, req.params.id));
+// Buyers, sellers and admins: where the riders carrying an order's parcels are.
+exports.orderLive = async (req, res) => {
+  if (!orm.isValidObjectId(req.params.id)) return res.status(404).json({ message: "Order not found." });
+  try {
+    return res.json(await trackingService.orderLive(req.user, req.params.id, { vendorId: req.vendorId }));
+  } catch (error) {
+    return sendError(res, error);
+  }
+};
 
 // Admin: review riders.
 exports.adminList = run((req) => deliveryService.listRiders(req.query));
 exports.adminReview = run((req) => deliveryService.reviewRider(req.params.id, req.body));
+exports.adminDeliveries = run(() => trackingService.activeDeliveries());
+exports.adminRelease = run((req) => deliveryService.adminRelease(req.params.id, req.body));

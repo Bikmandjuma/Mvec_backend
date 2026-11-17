@@ -21,6 +21,14 @@ const settings = () => ({
   // …at most this many at once, each answering within this many seconds.
   maxOfferRecipients: num("DELIVERY_MAX_OFFER_RECIPIENTS", 50),
   offerTimeoutSeconds: num("DELIVERY_OFFER_TIMEOUT_SECONDS", 45),
+  // After accepting, the rider has this long to collect the parcel: reminded
+  // this many minutes before, flagged at the deadline, and the parcel goes to
+  // another rider this long after it.
+  pickupMinutes: num("DELIVERY_PICKUP_MINUTES", 30),
+  pickupWarnMinutes: num("DELIVERY_PICKUP_WARN_MINUTES", 5),
+  reassignAfterMinutes: num("DELIVERY_PICKUP_REASSIGN_MINUTES", 15),
+  // Road routes for the live maps (OpenStreetMap roads); empty = straight lines.
+  osrmUrl: process.env.OSRM_URL ?? "https://router.project-osrm.org",
   // A rider carries one parcel at a time.
   maxActive: 1,
   codeMaxAttempts: 5,
