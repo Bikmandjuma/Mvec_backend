@@ -34,7 +34,7 @@ async function orderLines(vendorId) {
     const subtotal = items.reduce((t, i) => t + Number(i.price) * Number(i.quantity) - Number(i.discount || 0), 0);
     const delivery = (o.shippingBreakdown || []).filter((p) => p.vendor && String(p.vendor) === vid).reduce((t, p) => t + Number(p.fee || 0), 0);
     const sets = settlementsByOrder.get(String(o._id)) || [];
-    // Exact figures from escrow settlements when the order was paid through MVEC.
+    // Exact figures from escrow settlements when the order was paid through Ikiguzi.
     const commission = sets.length ? sets.reduce((t, s) => t + Number(s.commissionAmount || 0), 0) : (subtotal * TOTAL_PLATFORM_FEE_PERCENT) / 100;
     const net = sets.length ? sets.reduce((t, s) => t + Number(s.netAmount || 0), 0) : subtotal - commission + delivery;
     const dispute = disputeByOrder.get(String(o._id));
@@ -126,7 +126,7 @@ async function chargeBalance(vendorId, amount, { type, reference, description })
   await SellerCharge.create({ vendor: vendorId, type, amount, reference, description });
   const ledger = require("./ledger.service");
   if (type === "ADVERTISING") {
-    // Reserved for the campaign; it becomes MVEC revenue click by click.
+    // Reserved for the campaign; it becomes Ikiguzi revenue click by click.
     await ledger.post({ from: ["VENDOR_PAYABLE", vendorId], to: ["AD_BUDGETS"], amount, entryType: "AD_BUDGET_RESERVED", reference, description });
   } else {
     await ledger.mvecEarned({ from: ["VENDOR_PAYABLE", vendorId], amount, entryType: "SUBSCRIPTION_FEE", reference, description });

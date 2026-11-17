@@ -1,3 +1,4 @@
+const { isLive } = require("../config/env");
 const orm = require("../database/orm");
 const Order = require("../models/Order");
 const Payment = require("../models/Payment");
@@ -18,7 +19,7 @@ async function initiateMobileMoneyPayment({ orderId, phoneNumber, gatewayService
 
   // Without gateway credentials the gateway runs in simulation mode. That is
   // fine for local development but must never mark real orders as paid.
-  if (gatewayService.isSandbox() && process.env.NODE_ENV === "production") {
+  if (gatewayService.isSandbox() && isLive()) {
     throw Object.assign(new Error("Mobile money payments are temporarily unavailable. Please try again later."), { statusCode: 503 });
   }
 
@@ -140,7 +141,7 @@ async function initiateStandalonePayment({ amount, phoneNumber, userId, gatewayS
   if (!Number.isInteger(value) || value <= 0) {
     throw Object.assign(new Error("Enter an amount in whole Rwandan francs, for example 1000."), { statusCode: 400 });
   }
-  if (gatewayService.isSandbox() && process.env.NODE_ENV === "production") {
+  if (gatewayService.isSandbox() && isLive()) {
     throw Object.assign(new Error("Mobile money payments are temporarily unavailable. Please try again later."), { statusCode: 503 });
   }
   const phoneInfo = formatRwandanPhone(phoneNumber);
@@ -220,7 +221,7 @@ function mobileMoneyHandler(explicitProvider) {
     } catch (error) {
       if (!error.statusCode) {
         console.error("Mobile money payment failed:", error);
-        return res.status(500).json({ message: "Something went wrong on our side while starting the payment. No money was taken. Please try again; if it keeps failing, contact MVEC support." });
+        return res.status(500).json({ message: "Something went wrong on our side while starting the payment. No money was taken. Please try again; if it keeps failing, contact Ikiguzi support." });
       }
       return res.status(error.statusCode).json({ message: error.message, ...(error.paymentId && { paymentId: error.paymentId }) });
     }
@@ -243,7 +244,7 @@ exports.initiateCardPayment = async (req, res) => {
   try {
     const { orderId } = req.body;
     if (!orm.isValidObjectId(orderId)) return res.status(400).json({ message: "A valid order ID is required." });
-    if (flutterwaveService.isSandbox() && process.env.NODE_ENV === "production") {
+    if (flutterwaveService.isSandbox() && isLive()) {
       return res.status(503).json({ message: "Card payments are temporarily unavailable. Please pay with mobile money." });
     }
 
@@ -299,7 +300,7 @@ exports.initiateKpayPayment = async (req, res) => {
     const method = String(req.body.method || "momo").toLowerCase();
     if (!["momo", "card", "spenn"].includes(method)) return res.status(400).json({ message: "Choose mobile money, card or SPENN." });
     if (!orm.isValidObjectId(orderId)) return res.status(400).json({ message: "A valid order ID is required." });
-    if (kpayService.isSandbox() && process.env.NODE_ENV === "production") {
+    if (kpayService.isSandbox() && isLive()) {
       return res.status(503).json({ message: "K-Pay is temporarily unavailable. Please choose another way to pay." });
     }
 
@@ -336,7 +337,7 @@ exports.initiateKpayPayment = async (req, res) => {
         refid, amount: order.totalAmount, method,
         msisdn: phoneInfo?.formattedNumber || "250780000000",
         email: buyer?.email || order.recipient?.email, name: order.recipient?.name || buyer?.Fullname,
-        customerRef: String(order.user), details: `MVEC order ${order.orderNumber}`,
+        customerRef: String(order.user), details: `Ikiguzi order ${order.orderNumber}`,
         returnUrl: `${api}/api/webhooks/kpay`,
         redirectUrl: `${frontend}/payment/${order._id}?paymentId=${payment._id}`,
       });
@@ -406,7 +407,7 @@ exports.checkPaymentStatus = async (req, res) => {
 
 // Direct payment confirmation endpoint (for Card, Bank, or dev confirmation)
 exports.confirmPayment = async (req, res) => {
-  if (process.env.NODE_ENV === "production") {
+  if (isLive()) {
     return res.status(403).json({ message: "Direct payment confirmation is disabled in production." });
   }
   const session = await orm.startSession();

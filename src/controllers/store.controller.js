@@ -1,3 +1,4 @@
+const { readPin } = require("../config/delivery");
 const orm = require("../database/orm");
 const Store = require("../models/Store");
 const Product = require("../models/Product");
@@ -121,6 +122,14 @@ const applyStoreUpdates = async (store, body) => {
     updates.address = { ...(updates.address || currentAddress), city: body.city };
     if (!updates.location) updates.location = body.city;
   }
+  // Where Ikiguzi riders collect parcels; rider delivery needs that pin.
+  const pin = readPin(body.pickup || {}, { label: "store pin" });
+  if (pin) Object.assign(updates, { pickupLat: pin.lat, pickupLng: pin.lng });
+  if (body.riderDelivery !== undefined) {
+    const hasPin = pin || store.pickupLat != null;
+    if (body.riderDelivery && !hasPin) throw Object.assign(new Error("Set the store's pickup pin on the map before using Ikiguzi riders."), { statusCode: 400 });
+    updates.riderDelivery = Boolean(body.riderDelivery);
+  }
 
   const updated = await Store.findByIdAndUpdate(store._id, updates, { new: true, runValidators: true });
   if (updated.isPrimary) await syncVendorProfile(updated.vendor, updates);
@@ -136,7 +145,7 @@ const settingsView = (store) => ({
 
 const duplicateNameMessage = (error) =>
   error.code === 11000 && error.keyPattern?.storeName
-    ? "A store with this name already exists on MVEC. Choose another name."
+    ? "A store with this name already exists on Ikiguzi. Choose another name."
     : null;
 
 // @desc    Create a store (Vendor). The first store becomes the primary store.
@@ -157,7 +166,10 @@ exports.createStore = async (req, res) => {
     const isPrimary = existingCount === 0;
     const { address, location } = normalizeAddress(req.body);
 
-    const store = await Store.create({
+    // Check the pin before anything is saved.
+    const pin = readPin(req.body.pickup || {}, { label: "store pin" });
+    if (req.body.riderDelivery && !pin) return res.status(400).json({ message: "Set the store's pickup pin on the map before using Ikiguzi riders." });
+    let store = await Store.create({
       vendor: req.user.id,
       isPrimary,
       storeName,
@@ -174,6 +186,10 @@ exports.createStore = async (req, res) => {
       policies: policies || {},
       status: "ACTIVE", // Or PENDING if requiring Super Admin approval
     });
+    // Pickup pin and Ikiguzi riders: validated like any later change.
+    if (pin) {
+      store = await applyStoreUpdates(store, { pickup: pin, riderDelivery: req.body.riderDelivery });
+    }
 
     // The first store also creates the vendor's public profile.
     if (isPrimary) {
@@ -206,7 +222,7 @@ exports.createStore = async (req, res) => {
         message: "Multiple stores are not enabled yet: run `npm run migrate:stores` on the server.",
       });
     }
-    return res.status(500).json({ message: error.message });
+    return res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
@@ -244,7 +260,7 @@ exports.updateMyStore = async (req, res) => {
   } catch (error) {
     const dup = duplicateNameMessage(error);
     if (dup) return res.status(409).json({ message: dup });
-    return res.status(500).json({ message: error.message });
+    return res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 
@@ -273,7 +289,7 @@ exports.updateMyStoreById = async (req, res) => {
   } catch (error) {
     const dup = duplicateNameMessage(error);
     if (dup) return res.status(409).json({ message: dup });
-    return res.status(500).json({ message: error.message });
+    return res.status(error.statusCode || 500).json({ message: error.message });
   }
 };
 

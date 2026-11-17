@@ -13,8 +13,6 @@ const {
   confirmOrderDelivery,
   getAllOrders,
   cancelOrderByBuyer,
-  assignCourier,
-  markOutForDelivery,
 } = require("../controllers/order.controller");
 
 const { checkStaffPermission } = require("../middleware/staff.middleware");
@@ -53,7 +51,7 @@ router.post("/checkout", limits.checkout, createCheckoutOrder);
 router.post("/direct-checkout", limits.checkout, directCheckout);
 router.get("/my-orders", getMyOrders);
 // Keep this before /:id; otherwise "deliverable" is parsed as an order ID.
-router.get("/deliverable", authorize("delivery", "courier", "vendor", "supplier", "super_admin"), supplierSeller(), getDeliverable);
+router.get("/deliverable", authorize("vendor", "supplier", "super_admin"), supplierSeller(), getDeliverable);
 router.get("/vendor/orders", authorize("vendor", "supplier"), supplierSeller(), getVendorOrders);
 // Seller records an order taken outside the online checkout (staff need the orders permission).
 router.post("/vendor/manual", authorize("vendor"), checkStaffPermission("canManageOrders"), limits.checkout, require("../controllers/manualOrder.controller").createManualOrder);
@@ -75,9 +73,7 @@ router.patch(
 );
 
 // Direct route for confirming delivery and unlocking earnings
-router.patch("/:id/deliver", protect, authorize("super_admin", "courier", "delivery", "vendor", "supplier"), supplierSeller("supply"), confirmOrderDelivery);
-router.patch("/:id/courier", protect, authorize("super_admin"), assignCourier);
-router.patch("/:id/out-for-delivery", protect, authorize("super_admin", "delivery", "courier"), markOutForDelivery);
+router.patch("/:id/deliver", protect, authorize("super_admin", "vendor", "supplier"), supplierSeller("supply"), confirmOrderDelivery);
 
 
 module.exports = router;

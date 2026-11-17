@@ -1,5 +1,5 @@
 // Sponsored products. The seller pays the campaign budget from their
-// available balance when submitting; MVEC reviews it; once live, each buyer
+// available balance when submitting; Ikiguzi reviews it; once live, each buyer
 // click spends AD_COST_PER_CLICK from the budget. Whatever is not spent comes
 // back to the balance when the campaign is rejected, ended or runs out of time.
 const Advertisement = require("../models/Advertisement");
@@ -130,7 +130,7 @@ async function click(publicId, visitor) {
   );
   if (!updated) return result;
   result.charged = cost;
-  // The click is MVEC's ad revenue.
+  // The click is Ikiguzi's ad revenue.
   await require("./ledger.service").mvecEarned({
     from: ["AD_BUDGETS"], amount: cost, entryType: "AD_CLICK_REVENUE",
     reference: ad.publicId, description: `Sponsored click · ${ad.product}`,

@@ -22,7 +22,7 @@ router.post("/orders/:orderId/cancel", protect, authorize("vendor", "supplier", 
 // Supplier: ship a paid order.
 router.post("/orders/:orderId/ship", ...supplierSide, c.markShipped);
 
-// Admin: oversight, disputes, and orders paid outside MVEC (all audited).
+// Admin: oversight, disputes, and orders paid outside Ikiguzi (all audited).
 router.get("/admin/orders", protect, authorize("super_admin"), c.adminList);
 router.post("/admin/orders/:orderId/resolve", protect, authorize("super_admin"), c.adminResolve);
 router.post("/admin/orders/:orderId/restock", protect, authorize("super_admin"), c.adminRestock);

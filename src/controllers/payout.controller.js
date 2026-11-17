@@ -214,7 +214,7 @@ exports.releaseOrderEarnings = async (orderId, vendorId) => {
   const order = await Order.findById(orderId);
   if (!order) return;
   // The seller collected this money directly (paid offline, or cash on delivery
-  // for an order they recorded themselves); nothing passed through MVEC.
+  // for an order they recorded themselves); nothing passed through Ikiguzi.
   if (order.paidOffline || (order.source === "MANUAL" && order.paymentMethod === "CASH_ON_DELIVERY")) return;
 
   const vendorItems = order.items.filter(

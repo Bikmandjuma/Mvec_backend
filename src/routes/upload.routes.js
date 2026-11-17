@@ -2,15 +2,19 @@ const express = require("express");
 const crypto = require("crypto");
 const fs = require("fs/promises");
 const path = require("path");
+const multer = require("multer");
 const { protect } = require("../middleware/auth.middleware");
 const { checkStaffPermission } = require("../middleware/staff.middleware");
+const { stripImageMetadata } = require("../utils/imageMetadata");
 const User = require("../models/User");
 
 const router = express.Router();
 const uploadDir = path.resolve(__dirname, "../../uploads");
 const MAX_FILE_SIZE = 8 * 1024 * 1024;
+const MAX_AVATAR_SIZE = 3 * 1024 * 1024;
 const MAX_FILES = 10;
-const MAX_REQUEST_SIZE = MAX_FILE_SIZE * MAX_FILES + 64 * 1024;
+// The declared type must match the file's first bytes, so a renamed script
+// can't be stored as an "image".
 const imageTypes = {
   "image/jpeg": { extension: ".jpg", matches: (b) => b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
   "image/png": { extension: ".png", matches: (b) => b.length >= 8 && b.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) },
@@ -18,107 +22,66 @@ const imageTypes = {
   "image/webp": { extension: ".webp", matches: (b) => b.length >= 12 && b.toString("ascii", 0, 4) === "RIFF" && b.toString("ascii", 8, 12) === "WEBP" },
 };
 
+const receive = (maxSize, fields) => {
+  const parse = multer({ storage: multer.memoryStorage(), limits: { fileSize: maxSize, files: MAX_FILES } }).fields(fields);
+  return (req, res, next) =>
+    parse(req, res, (err) => {
+      if (!err) return next();
+      if (err.code === "LIMIT_FILE_SIZE") return res.status(400).json({ message: `Each image must be ${maxSize / 1024 / 1024} MB or smaller.` });
+      if (err.code === "LIMIT_FILE_COUNT" || err.code === "LIMIT_UNEXPECTED_FILE") return res.status(400).json({ message: `Upload no more than ${MAX_FILES} images at once.` });
+      return res.status(400).json({ message: "The upload could not be read. Try again." });
+    });
+};
+
+const filesOf = (req, ...fields) => fields.flatMap((field) => req.files?.[field] || []);
+
+const isImage = (file) => Boolean(imageTypes[file.mimetype]?.matches(file.buffer));
+
+/** Saves a checked image without its metadata and returns its public URL. sharp throws on a damaged image. */
+async function saveImage(req, file, prefix = "") {
+  const type = imageTypes[file.mimetype];
+  const clean = await stripImageMetadata(file.buffer, file.mimetype);
+  await fs.mkdir(uploadDir, { recursive: true });
+  const name = `${prefix}${crypto.randomUUID()}${type.extension}`;
+  await fs.writeFile(path.join(uploadDir, name), clean, { flag: "wx" });
+  return `${req.protocol}://${req.get("host")}/uploads/${name}`;
+}
+
 function allowOnboardingOrProductUpload(req, res, next) {
   if (["vendor", "supplier", "super_admin"].includes(req.user?.role)) return next();
   return checkStaffPermission("canManageProducts")(req, res, next);
 }
 
-function parseMultipart(body, boundary) {
-  const delimiter = Buffer.from(`--${boundary}`);
-  const separator = Buffer.from(`\r\n--${boundary}`);
-  const parts = [];
-  let cursor = delimiter.length;
-  if (!body.subarray(0, delimiter.length).equals(delimiter)) throw new Error("Malformed multipart form data.");
-
-  while (cursor < body.length) {
-    if (body.subarray(cursor, cursor + 2).toString() === "--") break;
-    if (body.subarray(cursor, cursor + 2).toString() !== "\r\n") throw new Error("Malformed multipart form data.");
-    cursor += 2;
-    const headersEnd = body.indexOf("\r\n\r\n", cursor);
-    if (headersEnd < 0) throw new Error("Malformed multipart form data.");
-    const headers = body.subarray(cursor, headersEnd).toString("utf8");
-    const disposition = headers.match(/content-disposition:\s*form-data;([^\r\n]+)/i)?.[1] || "";
-    const field = disposition.match(/(?:^|;)\s*name="([^"]*)"/i)?.[1];
-    const filename = disposition.match(/(?:^|;)\s*filename="([^"]*)"/i)?.[1];
-    const contentType = headers.match(/(?:^|\r\n)content-type:\s*([^\r\n]+)/i)?.[1]?.trim().toLowerCase();
-    const dataStart = headersEnd + 4;
-    const nextPart = body.indexOf(separator, dataStart);
-    if (nextPart < 0) throw new Error("Malformed multipart form data.");
-    if (filename !== undefined) parts.push({ field, contentType, data: body.subarray(dataStart, nextPart) });
-    cursor = nextPart + separator.length;
+router.post("/images", protect, allowOnboardingOrProductUpload, receive(MAX_FILE_SIZE, [{ name: "images", maxCount: MAX_FILES }]), async (req, res) => {
+  const files = filesOf(req, "images");
+  if (!files.length) return res.status(400).json({ message: "Select at least one image to upload." });
+  if (!files.every(isImage)) {
+    return res.status(400).json({ message: "Only valid JPEG, PNG, WEBP, and GIF images are allowed." });
   }
-  return parts;
-}
-
-async function readRequestBody(req, res) {
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > MAX_REQUEST_SIZE) {
-      res.status(413).json({ message: "Upload request is too large." });
-      return null;
-    }
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks, size);
-}
-
-router.post("/images", protect, allowOnboardingOrProductUpload, async (req, res) => {
   try {
-    const contentType = req.headers["content-type"] || "";
-    const boundary = contentType.match(/^multipart\/form-data\s*;\s*boundary=(?:"([^"]+)"|([^;\s]+))/i);
-    if (!boundary) return res.status(400).json({ message: "Expected multipart form data." });
-    const body = await readRequestBody(req, res);
-    if (!body) return;
-
-    const files = parseMultipart(body, boundary[1] || boundary[2]).filter((part) => part.field === "images");
-    if (!files.length) return res.status(400).json({ message: "Select at least one image to upload." });
-    if (files.length > MAX_FILES) return res.status(400).json({ message: `Upload no more than ${MAX_FILES} images at once.` });
-    for (const file of files) {
-      if (file.data.length > MAX_FILE_SIZE) return res.status(400).json({ message: "Each image must be 8 MB or smaller." });
-      const type = imageTypes[file.contentType];
-      if (!type || !type.matches(file.data)) return res.status(400).json({ message: "Only valid JPEG, PNG, WEBP, and GIF images are allowed." });
-      file.extension = type.extension;
-    }
-
-    await fs.mkdir(uploadDir, { recursive: true });
-    const names = files.map((file) => `${crypto.randomUUID()}${file.extension}`);
-    await Promise.all(files.map((file, index) => fs.writeFile(path.join(uploadDir, names[index]), file.data, { flag: "wx" })));
-    const baseUrl = `${req.protocol}://${req.get("host")}`;
-    return res.status(201).json({ urls: names.map((name) => `${baseUrl}/uploads/${name}`) });
-  } catch (error) {
-    const status = error.message === "Malformed multipart form data." ? 400 : 500;
-    return res.status(status).json({ message: status === 400 ? error.message : "Image upload failed." });
+    const urls = [];
+    for (const file of files) urls.push(await saveImage(req, file));
+    return res.status(201).json({ urls });
+  } catch {
+    return res.status(400).json({ message: "One of the images is damaged. Choose another and try again." });
   }
 });
 
 // Profile photo for any signed-in account (staff upload to their own account).
-const MAX_AVATAR_SIZE = 3 * 1024 * 1024;
-router.post("/avatar", protect, async (req, res) => {
-  try {
-    const contentType = req.headers["content-type"] || "";
-    const boundary = contentType.match(/^multipart\/form-data\s*;\s*boundary=(?:"([^"]+)"|([^;\s]+))/i);
-    if (!boundary) return res.status(400).json({ message: "Expected multipart form data." });
-    const body = await readRequestBody(req, res);
-    if (!body) return;
-    const file = parseMultipart(body, boundary[1] || boundary[2]).find((part) => part.field === "avatar" || part.field === "images");
-    if (!file) return res.status(400).json({ message: "Choose a photo to upload." });
-    if (file.data.length > MAX_AVATAR_SIZE) return res.status(400).json({ message: "Your photo must be 3 MB or smaller." });
-    const type = imageTypes[file.contentType];
-    if (!type || !type.matches(file.data) || file.contentType === "image/gif") return res.status(400).json({ message: "Use a JPEG, PNG or WEBP photo." });
-
-    await fs.mkdir(uploadDir, { recursive: true });
-    const name = `avatar-${crypto.randomUUID()}${type.extension}`;
-    await fs.writeFile(path.join(uploadDir, name), file.data, { flag: "wx" });
-    const avatarUrl = `${req.protocol}://${req.get("host")}/uploads/${name}`;
-    await User.updateOne({ _id: (req.staffUser || req.user)._id }, { $set: { avatarUrl } });
-    return res.status(201).json({ message: "Photo updated.", avatarUrl });
-  } catch (error) {
-    const status = error.message === "Malformed multipart form data." ? 400 : 500;
-    return res.status(status).json({ message: status === 400 ? error.message : "Photo upload failed." });
+router.post("/avatar", protect, receive(MAX_AVATAR_SIZE, [{ name: "avatar", maxCount: 1 }, { name: "images", maxCount: 1 }]), async (req, res) => {
+  const [file] = filesOf(req, "avatar", "images");
+  if (!file) return res.status(400).json({ message: "Choose a photo to upload." });
+  if (file.mimetype === "image/gif" || !isImage(file)) {
+    return res.status(400).json({ message: "Use a JPEG, PNG or WEBP photo." });
   }
+  let avatarUrl;
+  try {
+    avatarUrl = await saveImage(req, file, "avatar-");
+  } catch {
+    return res.status(400).json({ message: "That photo is damaged. Choose another and try again." });
+  }
+  await User.updateOne({ _id: (req.staffUser || req.user)._id }, { $set: { avatarUrl } });
+  return res.status(201).json({ message: "Photo updated.", avatarUrl });
 });
 
 module.exports = router;
-module.exports.parseMultipart = parseMultipart;

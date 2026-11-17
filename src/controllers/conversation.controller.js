@@ -217,7 +217,7 @@ exports.markConversationRead = async (req, res) => {
 // @desc    Find businesses to start a conversation with
 // @route   GET /api/conversations/contacts?q=
 // @access  Private
-// Only business accounts (vendors, suppliers, MVEC support) are searchable, so
+// Only business accounts (vendors, suppliers, Ikiguzi support) are searchable, so
 // buyers' personal details are never exposed through this endpoint.
 exports.searchContacts = async (req, res) => {
   try {

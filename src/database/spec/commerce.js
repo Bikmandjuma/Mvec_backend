@@ -70,6 +70,9 @@ module.exports = [
       "shippingAddress.province": str({ len: 120 }),
       "shippingAddress.district": str({ len: 120 }),
       "shippingAddress.sector": str({ len: 120 }),
+      // The buyer's map pin (needed for Ikiguzi rider delivery).
+      "shippingAddress.lat": num(),
+      "shippingAddress.lng": num(),
       // Who receives the parcel (may differ from the account holder).
       "recipient.name": str({ len: 150 }),
       "recipient.phone": str({ len: 30 }),
@@ -85,7 +88,6 @@ module.exports = [
       paymentMethod: en(["MOMO", "AIRTEL", "CASH_ON_DELIVERY", "CARD", "BANK", "CASH"], { default: "MOMO", required: true }),
       deliveryOtp: str({ len: 12 }),
       deliveryOtpAttempts: int({ required: true, default: 0 }),
-      courier: ref("users", { fk: false, index: true }),
       deliveredVendors: json([], { ref: "users", array: true }),
       shippedAt: date(),
       paymentReminderSentAt: date(),
@@ -282,7 +284,7 @@ module.exports = [
     },
   },
   {
-    // Money MVEC sends to a mobile money number: refunds, seller and affiliate withdrawals.
+    // Money Ikiguzi sends to a mobile money number: refunds, seller and affiliate withdrawals.
     model: "Disbursement", table: "disbursements", collection: "disbursements",
     fields: {
       kind: en(["REFUND", "AFFILIATE_PAYOUT", "VENDOR_PAYOUT"], { required: true, index: true }),

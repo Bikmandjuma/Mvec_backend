@@ -133,7 +133,7 @@ describe("Money flows: ledger, automatic release, disputes, ads and plans", () =
     expect(wallet.availableBalance).toBe(5000);
   });
 
-  test("ad clicks: one paid click per visitor, booked as MVEC income; only charged budget is returned", async () => {
+  test("ad clicks: one paid click per visitor, booked as Ikiguzi income; only charged budget is returned", async () => {
     const vendor = await Vendor.create({ user: seller._id, businessName: "Shop", phone: "0788000001", email: "s@s.test", verificationStatus: "VERIFIED" });
     await VendorWallet.create({ vendor: seller._id, availableBalance: 20000 });
     const ad = await Advertisement.create({ vendor: vendor._id, productId: product._id, product: "Phone", placement: "FEATURED", budget: 5000, spent: 0, refunded: 0, status: "ACTIVE" });

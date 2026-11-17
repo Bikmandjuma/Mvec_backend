@@ -404,7 +404,7 @@ describe("Financials & Payments Integration Suite", () => {
   });
 
   describe("3. Revenue Split Test (no affiliate, default gateway fee)", () => {
-    test("Should apply 5% platform fee and credit vendor and MVEC wallets (MVEC keeps the developer share)", async () => {
+    test("Should apply 5% platform fee and credit vendor and Ikiguzi wallets (Ikiguzi keeps the developer share)", async () => {
       if (!mongoReady) return;
       const commissionResponse = await request(app)
         .post("/api/admin/commissions")
@@ -469,7 +469,7 @@ describe("Financials & Payments Integration Suite", () => {
       const adminWallet = await AdminWallet.findOne({ adminUser: superAdminUser._id });
       expect(adminWallet.pendingBalance).toBe(500);
 
-      // Buyer payment received into MVEC holding; both balances moved.
+      // Buyer payment received into Ikiguzi holding; both balances moved.
       const ledgerEntry = await LedgerEntry.findOne({
         relatedOrder: order._id,
         entryType: "PAYMENT_RECEIVED",
@@ -615,7 +615,7 @@ describe("Financials & Payments Integration Suite", () => {
       expect(adminWalletAfter.availableBalance).toBe(3500);
       expect(adminWalletAfter.totalEarned).toBe(3500);
 
-      // Release empties MVEC holding to its owners: seller 95,000, MVEC 3,500,
+      // Release empties Ikiguzi holding to its owners: seller 95,000, Ikiguzi 3,500,
       // affiliate 500, provider 1,000; the books still add up to zero.
       const accounts = await LedgerAccount.find({});
       const byType = (t) => accounts.filter((a) => a.accountType === t).reduce((n, a) => n + Number(a.balance), 0);

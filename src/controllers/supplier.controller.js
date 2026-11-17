@@ -122,7 +122,7 @@ exports.updateMyProfile = async (req, res) => {
     if (location !== undefined) supplier.location = location;
     if (category !== undefined) supplier.category = category;
 
-    // A rejected profile that has been fixed goes straight back to MVEC for review.
+    // A rejected profile that has been fixed goes straight back to Ikiguzi for review.
     const resubmitted = supplier.verificationStatus === "REJECTED";
     if (resubmitted) {
       supplier.verificationStatus = "PENDING";
@@ -133,7 +133,7 @@ exports.updateMyProfile = async (req, res) => {
       await require("../models/User").findByIdAndUpdate(supplier.user, { verificationStatus: "PENDING" });
       require("../services/notification.service").profileSubmitted({ kind: "supplier", name: supplier.businessName, resubmitted: true }).catch(() => {});
     }
-    return res.status(200).json({ message: resubmitted ? "Profile saved and sent to MVEC for review again." : "Supplier profile updated", supplier });
+    return res.status(200).json({ message: resubmitted ? "Profile saved and sent to Ikiguzi for review again." : "Supplier profile updated", supplier });
   } catch (error) {
     if (error.code === 11000) {
       return res.status(409).json({ message: "A supplier with this business name already exists" });

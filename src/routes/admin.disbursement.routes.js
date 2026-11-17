@@ -5,7 +5,7 @@ const disbursementService = require("../services/disbursement.service");
 const { protect, authorize } = require("../middleware/auth.middleware");
 
 // Mounted at /api/admin/disbursements · refunds and affiliate withdrawals
-// MVEC has sent (or is sending) to mobile money.
+// Ikiguzi has sent (or is sending) to mobile money.
 router.use(protect, authorize("super_admin"));
 
 // GET /api/admin/disbursements?status=FAILED&kind=REFUND

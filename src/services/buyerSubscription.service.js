@@ -26,7 +26,7 @@ async function activatePremium({ userId, paymentId }) {
   sub.lastPaymentId = String(paymentId);
   await sub.save();
 
-  // The Premium fee is MVEC revenue.
+  // The Premium fee is Ikiguzi revenue.
   await require("./ledger.service").mvecEarned({
     from: ["BUYER_PAYMENTS"], amount: sub.price, entryType: "SUBSCRIPTION_FEE",
     reference: String(paymentId), description: "Buyer Premium (ad-free) payment",

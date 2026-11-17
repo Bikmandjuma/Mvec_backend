@@ -91,11 +91,11 @@ exports.protect = async (req, res, next) => {
       }
       // A blocked or suspended account loses access at once, not when its token expires.
       if (["BLOCK", "BLOCKED", "SUSPEND", "SUSPENDED"].includes(String(req.user.status || "ACTIVE").toUpperCase())) {
-        return res.status(403).json({ message: "Your account is blocked or suspended. Contact MVEC support.", code: "ACCOUNT_BLOCKED" });
+        return res.status(403).json({ message: "Your account is blocked or suspended. Contact Ikiguzi support.", code: "ACCOUNT_BLOCKED" });
       }
       // Any other non-active status (e.g. a suspended staff account) is also refused.
       if (req.user.status && req.user.status !== "ACTIVE") {
-        return res.status(403).json({ message: req.user.isVendorStaff ? "This account is suspended. Contact the store owner or MVEC support." : "This account is suspended. Contact MVEC support.", code: "ACCOUNT_BLOCKED" });
+        return res.status(403).json({ message: req.user.isVendorStaff ? "This account is suspended. Contact the store owner or Ikiguzi support." : "This account is suspended. Contact Ikiguzi support.", code: "ACCOUNT_BLOCKED" });
       }
 
       // Sessions created before the latest password change are revoked.

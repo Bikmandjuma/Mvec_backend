@@ -279,7 +279,7 @@ module.exports = [
       description: text({ required: true }),
       status: en(["OPEN", "UNDER_REVIEW", "EVIDENCE_SUBMITTED", "RESOLVED_BUYER_REFUNDED", "RESOLVED_VENDOR_RELEASED", "RESOLVED_SPLIT", "REJECTED", "WITHDRAWN"], { default: "OPEN", required: true, index: true }),
       disputedAmount: money({ required: true }),
-      respondBy: date(), // the seller's deadline to respond before MVEC steps in
+      respondBy: date(), // the seller's deadline to respond before Ikiguzi steps in
       offerAmount: money(),
       offerNote: text(),
       offerStatus: en(["PENDING", "ACCEPTED", "DECLINED"]),

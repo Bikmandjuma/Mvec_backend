@@ -1,6 +1,8 @@
 const express = require("express");
 const router = express.Router();
 const auth = require("../controllers/auth.controller");
+const addresses = require("../controllers/address.controller");
+const wishlist = require("../controllers/wishlist.controller");
 const limits = require("../middleware/rateLimits");
 
 // Route for user registration
@@ -38,11 +40,11 @@ router.delete("/avatar", auth.removeAvatar);
 router.post("/logout-all", auth.logoutAll);
 
 router.patch("/me", auth.updateProfile);
-router.route("/wishlist").get(auth.getWishlist).post(auth.addToWishlist);
-router.delete("/wishlist/:productId", auth.removeFromWishlist);
+router.route("/wishlist").get(wishlist.getWishlist).post(wishlist.addToWishlist);
+router.delete("/wishlist/:productId", wishlist.removeFromWishlist);
 
-router.route("/addresses").get(auth.getAddresses).post(auth.addAddress);
-router.route("/addresses/:addressId").put(auth.updateAddress).delete(auth.deleteAddress);
+router.route("/addresses").get(addresses.getAddresses).post(addresses.addAddress);
+router.route("/addresses/:addressId").put(addresses.updateAddress).delete(addresses.deleteAddress);
 router.post("/change-password", limits.login, auth.changePassword);
 
 module.exports = router;

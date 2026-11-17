@@ -64,7 +64,7 @@ describe("affiliate flow", () => {
   beforeEach(async () => {
     await db.reset();
     vendor = await mkUser("vendor");
-    // The seller runs the affiliate program at 0% of its own, so affiliates earn MVEC's 0.5%.
+    // The seller runs the affiliate program at 0% of its own, so affiliates earn Ikiguzi's 0.5%.
     sellerProfile = await Vendor.create({ user: vendor._id, businessName: "Seller Co", phone: "0788111222", email: `seller${seq}@t.rw`, affiliateEnabled: true, affiliateRate: 0, affiliateScope: "ALL" });
     buyer = await mkUser("buyer");
     affA = await mkUser("affiliate");
@@ -443,7 +443,7 @@ describe("affiliate flow", () => {
     assert.match(links[0].pausedReason, /not running/);
   });
 
-  test("the seller's own rate is added to MVEC's, paid from the seller's net, and the books balance", async () => {
+  test("the seller's own rate is added to Ikiguzi's, paid from the seller's net, and the books balance", async () => {
     assert.equal((await program(vendor, { enabled: true, ratePercent: 10 })).status, 200);
     const { body } = await createLink(affA, mouse._id);
     const c = await click(body.link.affiliateCode);
@@ -455,7 +455,7 @@ describe("affiliate flow", () => {
     await pay(order);
 
     const s = await Settlement.findOne({ order: order._id });
-    assert.equal(s.affiliateShare, 10500, "0.5% MVEC + 10% seller of 100,000");
+    assert.equal(s.affiliateShare, 10500, "0.5% Ikiguzi + 10% seller of 100,000");
     assert.equal(s.vendorAffiliateShare, 10000);
     assert.equal(s.netAmount, 100000 - 5000 - 10000, "seller pays its 10%");
     assert.equal((await wallet()).pendingBalance, 10500);

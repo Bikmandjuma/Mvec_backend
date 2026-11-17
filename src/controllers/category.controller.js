@@ -79,7 +79,7 @@ exports.createCategory = async (req, res) => {
 
     const existing = await Category.findOne({ slug });
     if (existing && !existing.active) {
-      return res.status(409).json({ message: `"${existing.name}" was disabled by MVEC and can't be used. Choose another category.` });
+      return res.status(409).json({ message: `"${existing.name}" was disabled by Ikiguzi and can't be used. Choose another category.` });
     }
     if (existing) {
       // Return the existing category so the form can auto-select it rather than error

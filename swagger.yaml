@@ -1,6 +1,6 @@
 openapi: 3.0.0
 info:
-  title: MVEC Multi-Vendor Marketplace API
+  title: Ikiguzi Multi-Vendor Marketplace API
   description: Consolidated OpenAPI 3.0 specification covering Authentication, Cart, Orders, Products, Stores, Staff Management, Double-Entry Ledger, Commission Rules, Payment Webhooks, B2B Wholesale, Disputes & Arbitration, Affiliate Marketing Engine, and the Supplier Dashboard.
   version: 1.0.0
 servers:
@@ -742,7 +742,7 @@ paths:
         '201':
           description: |
             Staff member assigned to the vendor account. The email must belong
-            to an existing MVEC account. MVEC sends the member a sign-in invitation.
+            to an existing Ikiguzi account. Ikiguzi sends the member a sign-in invitation.
 
   /staff/{id}:
     put:

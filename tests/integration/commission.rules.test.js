@@ -90,7 +90,7 @@ describe("Commission rules: per category, seller overrides, configurable shares"
     expect(s.developerShare).toBe(3000);
     expect(s.platformAffiliateShare).toBe(2000);
     expect(s.vendorAffiliateShare).toBe(2000);
-    expect(s.adminShare).toBe(5000); // provider fee is not taken from MVEC
+    expect(s.adminShare).toBe(5000); // provider fee is not taken from Ikiguzi
     expect(s.vendorNet).toBe(100000 - 10000 - 2000 - 1000);
     expect(s.gatewayFeePayer).toBe("SELLER");
     // Every franc is accounted for.

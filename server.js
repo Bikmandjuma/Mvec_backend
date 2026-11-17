@@ -1,6 +1,7 @@
+// Loads .env before anything reads it, and decides development or live.
+const { isLive, startupReport } = require("./src/config/env");
 const express = require("express");
 const http = require("http");
-const dotenv = require("dotenv");
 const helmet = require("helmet");
 const morgan = require("morgan");
 const cors = require("cors");
@@ -14,7 +15,6 @@ const swaggerDocument = YAML.load("./swagger.yaml");
 
 const { initBackgroundWorkers } = require("./src/workers/slaWorker");
 
-dotenv.config();
 
 // All data lives in MySQL (src/database). Run directly, the server refuses to
 // start without a reachable, fully migrated database. Required by tests, it
@@ -26,7 +26,7 @@ const app = express();
 
 // Over plain http (local dev), HSTS and upgrade-insecure-requests make browsers
 // fetch assets via https, which breaks Swagger UI with a blank page.
-const isProduction = process.env.NODE_ENV === "production";
+const isProduction = isLive();
 app.use(helmet({
   contentSecurityPolicy: {
     directives: { upgradeInsecureRequests: isProduction ? [] : null },
@@ -61,7 +61,7 @@ app.use(express.json({
     req.rawBody = buf;
   },
 }));
-app.use(morgan("dev"));
+app.use(morgan(isProduction ? "combined" : "dev"));
 // Plain-language errors with a support reference on every 5xx.
 app.use(require("./src/middleware/friendlyErrors"));
 // Every successful change an administrator makes goes to the audit log.
@@ -75,6 +75,7 @@ app.use("/api/auth", require("./src/routes/auth.routes"));
 app.use("/api/admin", require("./src/routes/admin.dashboard.routes"));
 app.use("/api/admin", require("./src/routes/admin.ops.routes"));
 app.use("/api/uploads", require("./src/routes/upload.routes"));
+app.use("/api/rider", require("./src/routes/rider.routes"));
 app.use("/api/search", require("./src/routes/search.routes"));
 app.use("/api/products", require("./src/routes/product.routes"));
 app.use("/api/categories", require("./src/routes/category.routes"));
@@ -174,7 +175,6 @@ app.use((err, req, res, next) => {
   // Requests the server could not read are the caller's problem, not ours.
   if (err.type === "entity.parse.failed") return res.status(400).json({ message: "The request could not be read. Refresh the page and try again." });
   if (err.type === "entity.too.large") return res.status(413).json({ message: "What you sent is too large. Use a smaller file or less text." });
-  if (err.code === "LIMIT_FILE_SIZE") return res.status(413).json({ message: "That file is too large. Choose a smaller one and try again." });
   const statusCode = err.statusCode || err.status || 500;
   if (statusCode < 500) return res.status(statusCode).json({ message: err.message });
   console.error(err.stack || err);
@@ -188,13 +188,16 @@ const HOST = process.env.HOST || "0.0.0.0";
 const httpServer = http.createServer(app);
 socketService.init(httpServer);
 
-// Tokens signed with a short or example secret can be forged by anyone who
-// has read .env.example, so production refuses to start with one.
-const weakJwtSecret = (secret) =>
-  !secret || secret.length < 32 || /your_jwt_secret|change_me|secret_key_here/i.test(secret);
-if (isMain && isProduction && weakJwtSecret(process.env.JWT_SECRET)) {
-  console.error("\n[config] JWT_SECRET is missing, too short, or still the example value. Set a random secret of at least 32 characters.\n");
-  process.exit(1);
+// A live server refuses to start with unsafe settings and lists them all;
+// a development server only warns.
+if (isMain) {
+  const { errors, warnings } = startupReport();
+  for (const w of warnings) console.warn(`[config] ${w}`);
+  if (errors.length && isProduction) {
+    console.error(`\n[config] This live server cannot start until these are fixed in .env:\n${errors.map((e) => `  - ${e}`).join("\n")}\n`);
+    process.exit(1);
+  }
+  for (const e of errors) console.warn(`[config] (development) ${e}`);
 }
 
 if (isMain) {

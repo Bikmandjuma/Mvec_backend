@@ -193,7 +193,7 @@ exports.handlePaypackWebhook = async (req, res) => {
     // Payload: { event_id, event_kind, created_at, data: { ref, kind, amount, fee, status, ... } }
     const { event_kind: eventKind, data = {} } = req.body;
 
-    // Money MVEC sent out (refunds, affiliate withdrawals).
+    // Money Ikiguzi sent out (refunds, affiliate withdrawals).
     if (eventKind === "transaction:processed" && data.kind === "CASHOUT") {
       await require("../services/disbursement.service").handleCallback({
         ref: data.ref,

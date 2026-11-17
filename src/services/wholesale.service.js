@@ -3,7 +3,7 @@
 // Life of an order:
 //   PENDING_PAYMENT  created from the supplier's catalog (stock is reserved) or
 //                    from an accepted quote; unpaid orders expire after 48 hours
-//   ESCROW_HELD      the vendor paid; MVEC holds the money (a held settlement
+//   ESCROW_HELD      the vendor paid; Ikiguzi holds the money (a held settlement
 //                    with the wholesale commission frozen at payment time)
 //   SHIPPED          the supplier sent the goods
 //   CONFIRMED_RELEASED  the vendor confirmed receipt (or 7 days passed without
@@ -192,7 +192,7 @@ class WholesaleService {
     return { ...total, affiliateShare: 0, vendorAffiliateShare: 0, gatewayFeePayer: payer, commissionRate: gross ? round((total.totalPlatformFee / gross) * 100) : 0 };
   }
 
-  /** Kept for the admin "paid outside MVEC" action. */
+  /** Kept for the admin "paid outside Ikiguzi" action. */
   async holdWholesaleEscrow(orderId) {
     const order = await WholesaleOrder.findById(orderId);
     if (!order) throw httpError(404, "Wholesale order not found.");
@@ -235,10 +235,10 @@ class WholesaleService {
     await this.lockInEscrow(order, Number(payment.gatewayFee) || 0);
     notify(order.supplier, {
       type: "ORDER", title: `Wholesale order ${order.orderNumber} is paid`,
-      message: `${rwf(order.totalAmount)} is held by MVEC. Ship within ${SHIP_WITHIN_DAYS} days; you are paid when the vendor confirms receipt.`,
-      link: "/supplier/orders", sms: `MVEC: wholesale order ${order.orderNumber} is paid. Please ship it.`,
+      message: `${rwf(order.totalAmount)} is held by Ikiguzi. Ship within ${SHIP_WITHIN_DAYS} days; you are paid when the vendor confirms receipt.`,
+      link: "/supplier/orders", sms: `Ikiguzi: wholesale order ${order.orderNumber} is paid. Please ship it.`,
     });
-    notify(order.vendor, { type: "PAYMENT", title: `Payment received for ${order.orderNumber}`, message: "MVEC holds the money until you confirm you received the goods.", link: "/vendor/purchases" });
+    notify(order.vendor, { type: "PAYMENT", title: `Payment received for ${order.orderNumber}`, message: "Ikiguzi holds the money until you confirm you received the goods.", link: "/vendor/purchases" });
     return order;
   }
 
@@ -260,7 +260,7 @@ class WholesaleService {
       await order.save({ session });
     });
     notify(order.supplier, { type: "PAYOUT", title: `You were paid for ${order.orderNumber}`, message: `${how}. ${rwf(net)} is now in your balance.`, link: "/supplier/payments" });
-    // The money is settled either way; a stocking failure is for MVEC to fix
+    // The money is settled either way; a stocking failure is for Ikiguzi to fix
     // (POST /wholesale/admin/orders/:id/restock), not a reason to undo it.
     let stocked = null;
     try {
@@ -296,7 +296,7 @@ class WholesaleService {
     const disbursement = require("./disbursement.service");
     const pay = payment || await Payment.findOne({ purpose: "WHOLESALE", status: "SUCCESS", transactionReference: { $regex: `^WHS-${order._id}-` } });
     if (!pay) {
-      notifications().adminAlert({ title: `Refund ${order.orderNumber} by hand`, message: `${why} No online payment was found (it may have been paid outside MVEC). Refund ${rwf(order.totalAmount)} to the vendor.`, link: "/admin/suppliers?tab=wholesale" }).catch(() => {});
+      notifications().adminAlert({ title: `Refund ${order.orderNumber} by hand`, message: `${why} No online payment was found (it may have been paid outside Ikiguzi). Refund ${rwf(order.totalAmount)} to the vendor.`, link: "/admin/suppliers?tab=wholesale" }).catch(() => {});
       return null;
     }
     const transfer = await disbursement.refundPayment({
@@ -333,7 +333,7 @@ class WholesaleService {
     await order.save();
     if (wasPaid) await this.refundPayment(order, null, `Cancelled by ${actor.role}.`);
 
-    const who = { vendor: "The vendor", supplier: "The supplier", admin: "MVEC", system: "MVEC (automatically)" }[actor.role];
+    const who = { vendor: "The vendor", supplier: "The supplier", admin: "Ikiguzi", system: "Ikiguzi (automatically)" }[actor.role];
     const msg = `${who} cancelled ${order.orderNumber}${text ? `: ${text}` : "."}${wasPaid ? ` ${rwf(order.totalAmount)} is being refunded to the vendor.` : ""}`;
     if (actor.role !== "vendor") notify(order.vendor, { type: "ORDER", title: `${order.orderNumber} was cancelled`, message: msg, link: "/vendor/purchases" });
     if (actor.role !== "supplier") notify(order.supplier, { type: "ORDER", title: `${order.orderNumber} was cancelled`, message: msg, link: "/supplier/orders" });
@@ -350,7 +350,7 @@ class WholesaleService {
     order.status = "DISPUTED";
     order.disputeReason = text.slice(0, 2000);
     await order.save();
-    notify(order.supplier, { type: "ORDER", title: `Problem reported on ${order.orderNumber}`, message: `${text.slice(0, 160)} MVEC will review it; the payment stays on hold.`, link: "/supplier/orders" });
+    notify(order.supplier, { type: "ORDER", title: `Problem reported on ${order.orderNumber}`, message: `${text.slice(0, 160)} Ikiguzi will review it; the payment stays on hold.`, link: "/supplier/orders" });
     notifications().adminAlert({ title: `Wholesale dispute: ${order.orderNumber}`, message: text.slice(0, 200), link: "/admin/suppliers?tab=wholesale" }).catch(() => {});
     return order;
   }
@@ -361,8 +361,8 @@ class WholesaleService {
     if (!order) throw httpError(404, "Wholesale order not found.");
     if (order.status !== "DISPUTED") throw httpError(409, "This order is not disputed.");
     if (decision === "RELEASE") {
-      await this.releaseToSupplier(order, `MVEC decided the dispute for the supplier${note ? `: ${note}` : ""}`);
-      notify(order.vendor, { type: "ORDER", title: `Dispute on ${order.orderNumber} decided`, message: `MVEC released the payment to the supplier.${note ? ` ${note}` : ""}`, link: "/vendor/purchases" });
+      await this.releaseToSupplier(order, `Ikiguzi decided the dispute for the supplier${note ? `: ${note}` : ""}`);
+      notify(order.vendor, { type: "ORDER", title: `Dispute on ${order.orderNumber} decided`, message: `Ikiguzi released the payment to the supplier.${note ? ` ${note}` : ""}`, link: "/vendor/purchases" });
       return order;
     }
     if (decision === "REFUND") return this.cancelOrder(orderId, { role: "admin" }, note || "Dispute decided for the vendor.");

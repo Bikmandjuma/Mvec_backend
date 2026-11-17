@@ -41,7 +41,7 @@ class DisputeService {
       description: description.trim().slice(0, 2000),
       disputedAmount: safeAmount,
       status: "OPEN",
-      // The seller's deadline to respond before MVEC steps in (admin setting).
+      // The seller's deadline to respond before Ikiguzi steps in (admin setting).
       respondBy: new Date(Date.now() + (Number((await require("./platformSettings.service").get()).disputeResponseDays) || 3) * 24 * 60 * 60 * 1000),
     });
     await DisputeEvidence.create({ dispute: dispute._id, submittedBy: raisedById, senderRole: "system", message: "The buyer reported a problem. The payment is on hold until it's resolved.", attachments: [] });
@@ -61,7 +61,7 @@ class DisputeService {
     const dispute = await Dispute.findById(disputeId);
     if (!dispute) throw new Error("Dispute not found.");
 
-    // Only the buyer who raised it, every seller on the order and MVEC admins take part.
+    // Only the buyer who raised it, every seller on the order and Ikiguzi admins take part.
     const order = await Order.findById(dispute.order);
     const sellers = new Set([String(dispute.vendor), ...(order?.items || []).filter((i) => i.vendor).map((i) => String(i.vendor._id || i.vendor))]);
     const isParty = String(dispute.raisedBy) === String(userId) || sellers.has(String(userId)) || userRole === "super_admin";
@@ -152,7 +152,7 @@ class DisputeService {
         refundPayment = await Payment.findOne({ parentOrder: order._id, status: "SUCCESS" }).sort({ createdAt: -1 }).session(session);
         refundAmount = buyerRefundAmount;
         status = "RESOLVED_SPLIT";
-        // Refund part, release part, MVEC keeps any remainder; the held
+        // Refund part, release part, Ikiguzi keeps any remainder; the held
         // settlements close so delivery can never release them again.
         await financialService.splitHeldEscrowForOrder({
           orderId: order._id, buyerRefund: buyerRefundAmount, sellerRelease: vendorReleaseAmount, session, adminUserId: adminId,

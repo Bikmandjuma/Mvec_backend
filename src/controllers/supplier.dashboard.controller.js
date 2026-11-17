@@ -383,7 +383,7 @@ exports.requestPayout = async (req, res) => {
       message: `${req.user.Fullname || "A supplier"} asked to be paid to ${payoutDestination}.`,
       link: "/admin/suppliers?tab=payouts",
     }).catch(() => {});
-    return res.status(201).json({ message: "Bank payout requested. MVEC sends it and you get a message when it is done.", payout: payoutJson(created) });
+    return res.status(201).json({ message: "Bank payout requested. Ikiguzi sends it and you get a message when it is done.", payout: payoutJson(created) });
   } catch (error) {
     return sendError(res, error);
   } finally {

@@ -1,12 +1,12 @@
-// Problem reports as a case the buyer, the seller and MVEC work through.
+// Problem reports as a case the buyer, the seller and Ikiguzi work through.
 //
 //   1. Buyer reports a problem: the payment is frozen and the seller has
 //      `disputeResponseDays` (admin setting) to respond.
 //   2. Seller resolves it directly: full refund, or a partial-refund offer the
 //      buyer accepts or declines, or replies with their side.
-//   3. Either side can ask MVEC to decide. MVEC also steps in automatically if
+//   3. Either side can ask Ikiguzi to decide. Ikiguzi also steps in automatically if
 //      the seller doesn't respond in time, or the buyer declines an offer.
-//   4. MVEC decides: refund the buyer, pay the seller, or split, with a note
+//   4. Ikiguzi decides: refund the buyer, pay the seller, or split, with a note
 //      both sides see. The money moves at once (dispute.service).
 //   5. The buyer can withdraw the report once the problem is solved; the
 //      order then carries on normally.
@@ -76,7 +76,7 @@ function actionsFor(party, dispute) {
     withdraw: open && party === "buyer",
     // Both
     escalate: open && (party === "buyer" || party === "seller") && !reviewing,
-    // MVEC
+    // Ikiguzi
     decide: open && party === "admin",
   };
 }
@@ -108,7 +108,7 @@ async function getCase(disputeId, user) {
     },
     timeline: timeline.map((e) => ({
       id: String(e._id), role: e.senderRole, message: e.message, attachments: e.attachments || [], createdAt: e.createdAt,
-      who: e.senderRole === "system" ? "MVEC" : e.senderRole === "super_admin" ? "MVEC support" : e.senderRole === "buyer" ? (nameOf(e.submittedBy) || "Buyer") : (nameOf(e.submittedBy) || "Seller"),
+      who: e.senderRole === "system" ? "Ikiguzi" : e.senderRole === "super_admin" ? "Ikiguzi support" : e.senderRole === "buyer" ? (nameOf(e.submittedBy) || "Buyer") : (nameOf(e.submittedBy) || "Seller"),
     })),
     you: party,
     actions: actionsFor(party, dispute),
@@ -138,7 +138,7 @@ async function sellerOffer(disputeId, user, { amount, note }) {
   const { dispute, order } = await load(disputeId);
   if (partyOf(user, dispute, order) !== "seller") throw httpError(403, "Only the seller can make an offer.");
   if (isClosed(dispute)) throw httpError(400, "This case is already closed.");
-  if (dispute.status === "UNDER_REVIEW") throw httpError(400, "MVEC is deciding this case. You can still refund in full, or reply with your side.");
+  if (dispute.status === "UNDER_REVIEW") throw httpError(400, "Ikiguzi is deciding this case. You can still refund in full, or reply with your side.");
   if (dispute.offerStatus === "PENDING") throw httpError(400, "The buyer hasn't answered your last offer yet.");
   const held = await heldFor(order._id);
   const value = Math.round(Number(amount));
@@ -148,7 +148,7 @@ async function sellerOffer(disputeId, user, { amount, note }) {
   await dispute.save();
   await event(dispute, user.id, `The seller offered a partial refund of ${money(value)}${dispute.offerNote ? `: “${dispute.offerNote}”` : ""}. The buyer can accept or decline.`);
   await updateAll(order, dispute, {
-    buyer: { title: `Refund offer on ${order.orderNumber}`, message: `The seller offers to refund ${money(value)}. Accept it, or decline and MVEC will decide.` },
+    buyer: { title: `Refund offer on ${order.orderNumber}`, message: `The seller offers to refund ${money(value)}. Accept it, or decline and Ikiguzi will decide.` },
   });
   return dispute;
 }
@@ -161,7 +161,7 @@ async function buyerRespondOffer(disputeId, user, accept) {
   if (accept) {
     const held = await heldFor(order._id);
     const refund = Math.min(Number(dispute.offerAmount), held.gross);
-    // The seller gets their usual share of what isn't refunded; MVEC keeps its fee on that part.
+    // The seller gets their usual share of what isn't refunded; Ikiguzi keeps its fee on that part.
     const release = held.gross > 0 ? Math.round(((held.gross - refund) * held.net) / held.gross) : 0;
     dispute.offerStatus = "ACCEPTED";
     await dispute.save();
@@ -212,23 +212,23 @@ async function withdraw(disputeId, user, note = "") {
 async function escalate(disputeId, user, reason = "", { silentEvent = false } = {}) {
   const { dispute, order } = await load(disputeId);
   const party = user ? partyOf(user, dispute, order) : "system";
-  if (user && !["buyer", "seller"].includes(party)) throw httpError(403, "Only the buyer or the seller can ask MVEC to decide.");
+  if (user && !["buyer", "seller"].includes(party)) throw httpError(403, "Only the buyer or the seller can ask Ikiguzi to decide.");
   if (isClosed(dispute)) throw httpError(400, "This case is already closed.");
   if (dispute.status === "UNDER_REVIEW") return dispute;
-  const why = String(reason || (party === "buyer" ? "The buyer asked MVEC to decide" : party === "seller" ? "The seller asked MVEC to decide" : "No agreement in time")).slice(0, 300);
+  const why = String(reason || (party === "buyer" ? "The buyer asked Ikiguzi to decide" : party === "seller" ? "The seller asked Ikiguzi to decide" : "No agreement in time")).slice(0, 300);
   Object.assign(dispute, { status: "UNDER_REVIEW", escalatedAt: new Date(), escalationReason: why });
   if (dispute.offerStatus === "PENDING") dispute.offerStatus = "DECLINED";
   await dispute.save();
-  if (!silentEvent) await event(dispute, user?.id, `${why}. MVEC is now reviewing the case and will decide.`);
+  if (!silentEvent) await event(dispute, user?.id, `${why}. Ikiguzi is now reviewing the case and will decide.`);
   await updateAll(order, dispute, {
-    buyer: { title: `MVEC is reviewing ${order.orderNumber}`, message: `${why}. MVEC will look at both sides and decide; you'll be told the outcome.` },
-    seller: { title: `MVEC is reviewing ${order.orderNumber}`, message: `${why}. Add anything that supports your side on the case; MVEC will decide.` },
+    buyer: { title: `Ikiguzi is reviewing ${order.orderNumber}`, message: `${why}. Ikiguzi will look at both sides and decide; you'll be told the outcome.` },
+    seller: { title: `Ikiguzi is reviewing ${order.orderNumber}`, message: `${why}. Add anything that supports your side on the case; Ikiguzi will decide.` },
     admin: { title: `Decision needed: ${dispute.disputeNumber}`, message: `${why}. Review the case and decide.` },
   });
   return dispute;
 }
 
-// Called after any decision (MVEC, seller refund, accepted offer).
+// Called after any decision (Ikiguzi, seller refund, accepted offer).
 async function finish(dispute) {
   const fresh = await Dispute.findById(dispute._id);
   if (fresh && !fresh.closedAt) { fresh.closedAt = new Date(); await fresh.save(); }
@@ -248,17 +248,17 @@ async function finish(dispute) {
   }
 }
 
-// MVEC's decision (admin): moves the money, records it, tells both sides.
+// Ikiguzi's decision (admin): moves the money, records it, tells both sides.
 async function decide(disputeId, user, { decision, buyerRefundAmount, vendorReleaseAmount, notes }) {
   if (!String(notes || "").trim()) throw httpError(400, "Explain the decision; both sides will see it.");
   const resolved = await disputeService.resolveDisputeArbitration({ disputeId, adminId: user.id, decision, buyerRefundAmount, vendorReleaseAmount, notes: String(notes).trim().slice(0, 1000) });
   const label = decision === "REFUND_BUYER" ? "refund the buyer in full" : decision === "RELEASE_TO_VENDOR" ? "pay the seller" : `refund the buyer ${money(buyerRefundAmount)} and release ${money(vendorReleaseAmount)} to the seller`;
-  await event(resolved, user.id, `MVEC decided to ${label}. Reason: ${String(notes).trim()}`);
+  await event(resolved, user.id, `Ikiguzi decided to ${label}. Reason: ${String(notes).trim()}`);
   await finish(resolved);
   return resolved;
 }
 
-// Background job: MVEC steps in when the seller doesn't respond by the
+// Background job: Ikiguzi steps in when the seller doesn't respond by the
 // deadline, or the buyer doesn't answer an offer within the same time.
 async function escalateOverdue(now = new Date()) {
   const days = Number((await settings.get()).disputeResponseDays) || 3;

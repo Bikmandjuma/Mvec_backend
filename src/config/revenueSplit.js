@@ -21,7 +21,7 @@ const cents = (n) => Math.round((Number(n) || 0) * 100) / 100;
 /**
  * Split one order line.
  *  grossTotal              what the buyer paid for the line
- *  commissionPercent       MVEC's commission on this line (from the rules)
+ *  commissionPercent       Ikiguzi's commission on this line (from the rules)
  *  developerSharePercent   % of the commission paid to the developer
  *  affiliateSharePercent   % of the commission paid to the affiliate (only if hasAffiliate)
  *  vendorAffiliatePercent  extra % of the sale the seller pays the affiliate (their program)

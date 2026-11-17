@@ -1,6 +1,6 @@
 // Seller view of affiliate marketing: orders referred by affiliates for this
 // seller's products, the affiliates and products driving them, and link
-// clicks. Affiliate commission comes out of MVEC's platform fee, so referred
+// clicks. Affiliate commission comes out of Ikiguzi's platform fee, so referred
 // sales cost the seller nothing extra.
 const Order = require("../models/Order");
 const Product = require("../models/Product");

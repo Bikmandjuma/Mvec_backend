@@ -1,12 +1,10 @@
 const bcrypt = require("bcryptjs");
-const orm = require("../database/orm");
 const express = require("express");
 const User = require("../models/User");
 const Otp = require("../models/Otp");
 const jwt = require("jsonwebtoken");
 const { OAuth2Client } = require("google-auth-library");
 const crypto = require("crypto");
-const nodemailer = require("nodemailer");
 const {
   normalizePhone,
   phoneVariants,
@@ -308,6 +306,7 @@ const buildAuthenticatedUserResponse = async (user, staffDetails = null) => {
 };
 
 exports.getAuthenticatedUserResponse = buildAuthenticatedUserResponse;
+exports.signToken = signToken;
 
 // ─── REGISTER USER ───────────────────────────────────────────────────────────
 // Supports two flows:
@@ -559,8 +558,8 @@ exports.loginUser = async (req, res) => {
     if (user.status !== "ACTIVE") {
       return res.status(403).json({
         message: user.isVendorStaff
-          ? "This account is suspended. Contact the store owner or MVEC support."
-          : "This account is blocked or suspended. Contact MVEC support.",
+          ? "This account is suspended. Contact the store owner or Ikiguzi support."
+          : "This account is blocked or suspended. Contact Ikiguzi support.",
         code: "ACCOUNT_BLOCKED",
       });
     }
@@ -735,6 +734,7 @@ exports.googleLogin = async (req, res) => {
     // required on the normal sign-up form (password, gender, phone) are not
     // needed for a Google-authenticated profile.
     if (!user) {
+      // Riders sign up with a phone code and their vehicle (POST /api/rider/register).
       const allowedRoles = ["buyer", "vendor", "supplier", "affiliate"];
       const role = allowedRoles.includes(requestedRole) ? requestedRole : "buyer";
 
@@ -774,82 +774,6 @@ exports.googleLogin = async (req, res) => {
   }
 };
 
-// ─── HELPER: NODEMAILER TRANSPORTER ──────────────────────────────────────────
-const getTransporter = () => {
-  const user = process.env.EMAIL_USER;
-  const pass = process.env.EMAIL_PASS;
-
-  if (!user || !pass) {
-    throw new Error(
-      "Email credentials are not configured. Please set EMAIL_USER and EMAIL_PASS environment variables."
-    );
-  }
-
-  // If EMAIL_HOST is provided, use custom SMTP options; otherwise fallback to Gmail service
-  if (process.env.EMAIL_HOST) {
-    return nodemailer.createTransport({
-      host: process.env.EMAIL_HOST,
-      port: Number(process.env.EMAIL_PORT) || 587,
-      secure: process.env.EMAIL_SECURE === "true" || process.env.EMAIL_PORT === "465",
-      auth: { user, pass },
-    });
-  }
-
-  return nodemailer.createTransport({
-    service: process.env.EMAIL_SERVICE || "Gmail",
-    auth: { user, pass },
-  });
-};
-
-const sendResetEmail = async (toEmail, resetUrl) => {
-  const transporter = getTransporter();
-  const fromAddress = process.env.EMAIL_FROM || process.env.EMAIL_USER;
-
-  await transporter.sendMail({
-    from: `"MVEC Support" <${fromAddress}>`,
-    to: toEmail,
-    subject: "Password Reset Request",
-    text: `You requested a password reset for your MVEC account.\n\nPlease click the following link to reset your password (valid for 15 minutes):\n${resetUrl}\n\nIf you did not request this, please ignore this email.`,
-    html: `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="utf-8">
-        <style>
-          .container { font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px; }
-          .header { text-align: center; border-bottom: 1px solid #eee; padding-bottom: 15px; margin-bottom: 20px; }
-          .btn { background-color: #4CAF50; color: #ffffff !important; padding: 12px 24px; text-decoration: none; display: inline-block; border-radius: 5px; font-weight: bold; margin: 15px 0; }
-          .footer { font-size: 12px; color: #888; margin-top: 25px; border-top: 1px solid #eee; padding-top: 15px; }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <div class="header">
-            <h2>Password Reset Request</h2>
-          </div>
-          <p>Hello,</p>
-          <p>You requested a password reset for your MVEC account. Click the button below to set a new password:</p>
-          <p style="text-align: center;">
-            <a href="${resetUrl}" class="btn" style="color: #ffffff;">Reset Password</a>
-          </p>
-          <p>Or copy and paste this link into your browser:</p>
-          <p><a href="${resetUrl}">${resetUrl}</a></p>
-          <p><strong>Note:</strong> This link is valid for 15 minutes only. If you did not request this, please ignore this email.</p>
-          <div class="footer">
-            <p>&copy; ${new Date().getFullYear()} MVEC. All rights reserved.</p>
-          </div>
-        </div>
-      </body>
-      </html>
-    `,
-  });
-};
-
-// Export assisting functions for unit tests
-exports.getTransporter = getTransporter;
-exports.sendResetEmail = sendResetEmail;
-
-// ─── 1. FORGOT PASSWORD CONTROLLER ───────────────────────────────────────────
 // ─── PASSWORD RESET (code by email or SMS) ──────────────────────────────────
 // 1. POST /api/auth/forgot-password   { email } or { phone }  → sends a 6-digit code
 // 2. POST /api/auth/verify-reset-otp  { email|phone, code }   → returns a short-lived resetToken
@@ -950,7 +874,7 @@ exports.forgotPassword = async (req, res) => {
     let delivered = false;
     try {
       if (byEmail) {
-        await messaging.sendEmail({ to: user.email, subject: "Your MVEC password reset code", text: emailText });
+        await messaging.sendEmail({ to: user.email, subject: "Your Ikiguzi password reset code", text: emailText });
         delivered = true;
       } else {
         // By phone: a text message when SMS is set up, and the account's own
@@ -958,8 +882,8 @@ exports.forgotPassword = async (req, res) => {
         delivered = Boolean(await deliverCode({
           phone: user.phone,
           email: user.email,
-          sms: `Your MVEC password reset code is ${code}. It expires in 15 minutes.`,
-          subject: "Your MVEC password reset code",
+          sms: `Your Ikiguzi password reset code is ${code}. It expires in 15 minutes.`,
+          subject: "Your Ikiguzi password reset code",
           text: emailText,
         }));
       }
@@ -1054,193 +978,6 @@ exports.resetPassword = async (req, res) => {
   }
 };
 
-// ─── 3. USER ADDRESSES ───────────────────────────────────────────────────────
-// @desc    Add a new address for logged-in user
-// @route   POST /api/auth/addresses
-// @access  Private
-exports.addAddress = async (req, res) => {
-  try {
-    const userId = req.user._id || req.user.id || req.user.userId;
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    const {
-      type,
-      country,
-      provinceState,
-      cityDistrict,
-      sector,
-      street,
-      building,
-      apartment,
-      postalCode,
-      phone,
-      deliveryInstructions,
-      isDefaultShipping,
-      isDefaultBilling,
-    } = req.body;
-
-    if (user.addresses.length >= 10) {
-      return res.status(400).json({ message: "You can save up to 10 addresses. Remove one first." });
-    }
-    const addressPhone = normalizePhone(phone);
-    if (!addressPhone) {
-      return res.status(400).json({ message: "Please enter a valid Rwandan phone number for this address." });
-    }
-
-    // Unset current default flags if this address is being set as default
-    if (isDefaultShipping) {
-      user.addresses.forEach((addr) => (addr.isDefaultShipping = false));
-    }
-    if (isDefaultBilling) {
-      user.addresses.forEach((addr) => (addr.isDefaultBilling = false));
-    }
-
-    // First address added automatically becomes default
-    const isFirstAddress = user.addresses.length === 0;
-
-    user.addresses.push({
-      type,
-      country,
-      provinceState,
-      cityDistrict,
-      sector,
-      street,
-      building,
-      apartment,
-      postalCode,
-      phone: addressPhone,
-      deliveryInstructions,
-      isDefaultShipping: isFirstAddress ? true : Boolean(isDefaultShipping),
-      isDefaultBilling: isFirstAddress ? true : Boolean(isDefaultBilling),
-    });
-
-    await user.save();
-    return res.status(201).json({
-      message: "Address added successfully",
-      addresses: user.addresses,
-    });
-  } catch (error) {
-    console.error("Error adding address:", error);
-    return res.status(400).json({ message: error.message });
-  }
-};
-
-// @desc    Get all addresses for logged-in user
-// @route   GET /api/auth/addresses
-// @access  Private
-exports.getAddresses = async (req, res) => {
-  try {
-    const userId = req.user._id || req.user.id || req.user.userId;
-    const user = await User.findById(userId).select("addresses");
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    return res.status(200).json({ addresses: user.addresses });
-  } catch (error) {
-    console.error("Error fetching addresses:", error);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-};
-
-// @desc    Update an existing address
-// @route   PUT /api/auth/addresses/:addressId
-// @access  Private
-exports.updateAddress = async (req, res) => {
-  try {
-    const userId = req.user._id || req.user.id || req.user.userId;
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    const address = user.addresses.id(req.params.addressId);
-    if (!address) {
-      return res.status(404).json({ message: "Address not found" });
-    }
-
-    const { isDefaultShipping, isDefaultBilling, _id, ...updateFields } = req.body;
-    if (updateFields.phone !== undefined) {
-      const addressPhone = normalizePhone(updateFields.phone);
-      if (!addressPhone) {
-        return res.status(400).json({ message: "Please enter a valid Rwandan phone number for this address." });
-      }
-      updateFields.phone = addressPhone;
-    }
-
-    // Handle default flag switches across other stored addresses
-    if (isDefaultShipping) {
-      user.addresses.forEach((addr) => (addr.isDefaultShipping = false));
-    }
-    if (isDefaultBilling) {
-      user.addresses.forEach((addr) => (addr.isDefaultBilling = false));
-    }
-
-    Object.assign(address, updateFields);
-    if (typeof isDefaultShipping !== "undefined") {
-      address.isDefaultShipping = Boolean(isDefaultShipping);
-    }
-    if (typeof isDefaultBilling !== "undefined") {
-      address.isDefaultBilling = Boolean(isDefaultBilling);
-    }
-
-    await user.save();
-    return res.status(200).json({
-      message: "Address updated successfully",
-      addresses: user.addresses,
-    });
-  } catch (error) {
-    console.error("Error updating address:", error);
-    return res.status(400).json({ message: error.message });
-  }
-};
-
-// @desc    Delete an address
-// @route   DELETE /api/auth/addresses/:addressId
-// @access  Private
-exports.deleteAddress = async (req, res) => {
-  try {
-    const userId = req.user._id || req.user.id || req.user.userId;
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    const address = user.addresses.id(req.params.addressId);
-    if (!address) {
-      return res.status(404).json({ message: "Address not found" });
-    }
-
-    const wasDefaultShipping = address.isDefaultShipping;
-    const wasDefaultBilling = address.isDefaultBilling;
-
-    // Remove the address subdocument
-    address.deleteOne();
-
-    // Reassign defaults if a default address was deleted
-    if (user.addresses.length > 0) {
-      if (wasDefaultShipping && !user.addresses.some((a) => a.isDefaultShipping)) {
-        user.addresses[0].isDefaultShipping = true;
-      }
-      if (wasDefaultBilling && !user.addresses.some((a) => a.isDefaultBilling)) {
-        user.addresses[0].isDefaultBilling = true;
-      }
-    }
-
-    await user.save();
-    return res.status(200).json({
-      message: "Address deleted successfully",
-      addresses: user.addresses,
-    });
-  } catch (error) {
-    console.error("Error deleting address:", error);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-};
-
 // ─── OTP: SEND VERIFICATION CODE ────────────────────────────────────────────
 // @desc    Send a one-time verification code to a phone number via SMS
 // @route   POST /api/auth/send-otp
@@ -1315,9 +1052,9 @@ exports.sendOtp = async (req, res) => {
       sent = await deliverCode({
         phone: normalizedPhone,
         email: account ? account.email : typedEmail,
-        sms: `Your MVEC verification code is ${code}. It expires in ${Math.round(otpTtlSeconds / 60)} minutes. Never share it.`,
-        subject: "Your MVEC verification code",
-        text: `Your MVEC verification code is ${code}.\nIt expires in ${Math.round(otpTtlSeconds / 60)} minutes.\nNever share this code with anyone. If you did not ask for it, you can ignore this email.`,
+        sms: `Your Ikiguzi verification code is ${code}. It expires in ${Math.round(otpTtlSeconds / 60)} minutes. Never share it.`,
+        subject: "Your Ikiguzi verification code",
+        text: `Your Ikiguzi verification code is ${code}.\nIt expires in ${Math.round(otpTtlSeconds / 60)} minutes.\nNever share this code with anyone. If you did not ask for it, you can ignore this email.`,
       });
     } catch (sendError) {
       console.error("OTP delivery failed:", sendError.message);
@@ -1430,7 +1167,9 @@ exports.verifyOtp = async (req, res) => {
     // ── PURPOSE: REGISTRATION ───────────────────────────────────────────────
     // The phone belongs to the caller. Issue a short-lived token the sign-up
     // request must present to prove the phone was verified.
-    const allowedRoles = ["buyer", "vendor", "supplier", "affiliate"];
+    // "delivery" only unlocks POST /api/rider/register, which adds the vehicle
+    // and waits for admin approval; POST /auth/register still refuses it.
+    const allowedRoles = ["buyer", "vendor", "supplier", "affiliate", "delivery"];
     const finalRole = allowedRoles.includes(role) ? role : "buyer";
     const verificationToken = jwt.sign(
       { phone: normalizedPhone, purpose, role: finalRole },
@@ -1450,71 +1189,6 @@ exports.verifyOtp = async (req, res) => {
   }
 };
 
-
-// ─── WISHLIST ────────────────────────────────────────────────────────────────
-const WISHLIST_MAX = 200;
-const Product = require("../models/Product");
-const { effectivePrice } = require("../utils/pricing.util");
-
-async function wishlistResponse(userId) {
-  const user = await User.findById(userId).select("wishlist").populate({
-    path: "wishlist.product",
-    select: "name price discountPrice media stockQuantity status vendor category",
-    populate: [{ path: "vendor", select: "Fullname companyName" }, { path: "category", select: "name" }],
-  });
-  // Products that were deleted drop out of the list.
-  return (user?.wishlist || []).filter((w) => w.product).map((w) => ({
-    product: w.product,
-    savedPrice: w.savedPrice,
-    savedAt: w.savedAt,
-  }));
-}
-
-// @route GET /api/auth/wishlist
-exports.getWishlist = async (req, res) => {
-  try {
-    return res.status(200).json({ items: await wishlistResponse(req.user.id) });
-  } catch (error) {
-    console.error("Wishlist load failed:", error);
-    return res.status(500).json({ message: "Could not load your wishlist." });
-  }
-};
-
-// @route POST /api/auth/wishlist   { productIds: [...] }  (adds; used to merge device lists too)
-exports.addToWishlist = async (req, res) => {
-  try {
-    const ids = [...new Set((Array.isArray(req.body.productIds) ? req.body.productIds : [req.body.productId]).map(String))]
-      .filter((id) => orm.isValidObjectId(id))
-      .slice(0, WISHLIST_MAX);
-    if (!ids.length) return res.status(400).json({ message: "Choose a product to save." });
-
-    const products = await Product.find({ _id: { $in: ids }, status: { $in: ["ACTIVE", "OUT_OF_STOCK"] } }).select("price discountPrice");
-    const user = await User.findById(req.user.id).select("wishlist");
-    const have = new Set(user.wishlist.map((w) => String(w.product)));
-    for (const p of products) {
-      if (!have.has(String(p._id)) && user.wishlist.length < WISHLIST_MAX) {
-        user.wishlist.push({ product: p._id, savedPrice: effectivePrice(p), savedAt: new Date() });
-      }
-    }
-    await user.save({ validateBeforeSave: false });
-    return res.status(200).json({ items: await wishlistResponse(req.user.id) });
-  } catch (error) {
-    console.error("Wishlist add failed:", error);
-    return res.status(500).json({ message: "Could not save this product." });
-  }
-};
-
-// @route DELETE /api/auth/wishlist/:productId
-exports.removeFromWishlist = async (req, res) => {
-  try {
-    if (!orm.isValidObjectId(req.params.productId)) return res.status(404).json({ message: "Product not in your wishlist." });
-    await User.updateOne({ _id: req.user.id }, { $pull: { wishlist: { product: req.params.productId } } });
-    return res.status(200).json({ items: await wishlistResponse(req.user.id) });
-  } catch (error) {
-    console.error("Wishlist remove failed:", error);
-    return res.status(500).json({ message: "Could not remove this product." });
-  }
-};
 
 // ─── GUEST CHECKOUT ─────────────────────────────────────────────────────────
 // Buyers can order without creating an account. Safety comes from proving
@@ -1567,7 +1241,7 @@ exports.guestVerify = async (req, res) => {
       return res.status(409).json({ message: "This number belongs to a business account. Log in to buy with it." });
     }
     if (user && user.status && user.status !== "ACTIVE") {
-      return res.status(403).json({ message: "This account is blocked or suspended. Contact MVEC support.", code: "ACCOUNT_BLOCKED" });
+      return res.status(403).json({ message: "This account is blocked or suspended. Contact Ikiguzi support.", code: "ACCOUNT_BLOCKED" });
     }
     if (!user) {
       const normalizedEmail = String(email || "").trim().toLowerCase();

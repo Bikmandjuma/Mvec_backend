@@ -9,6 +9,7 @@
 //   AIRTEL_GATEWAY_ACCOUNT
 // and implement the provider-specific payload transform inside `requestCollection()`.
 
+const { isLive } = require("../config/env");
 const crypto = require("crypto");
 const axios = require("axios");
 const NodeCache = require("node-cache");
@@ -53,7 +54,7 @@ exports.checkTransactionStatus = async (transactionId) => {
 };
 
 // Determine base URL dynamically based on environment
-const AIRTEL_BASE_URL = process.env.NODE_ENV === "production"
+const AIRTEL_BASE_URL = isLive()
   ? "https://openapi.airtel.africa"
   : "https://openapiuat.airtel.africa"; // Sandbox environment endpoint
 
@@ -133,9 +134,9 @@ exports.initiateAirtelUssdPush = async ({ phoneNumber, amount, reference }) => {
 };
 
 // Sandbox/dev mode is the default so local development and tests work without
-// a live provider. When NODE_ENV === "production" a real network request is made.
+// a live provider. On a live server (see config/env.js) a real network request is made.
 function isSandbox() {
-  return process.env.NODE_ENV !== "production" || !process.env.AIRTEL_GATEWAY_BASE_URL;
+  return !isLive() || !process.env.AIRTEL_GATEWAY_BASE_URL;
 }
 
 /**
@@ -155,7 +156,7 @@ function buildCollectionPayload({ amount, currency, msisdn, externalId, message 
     reference: externalId,
     subscriber: { country: "RW", currency: currency || "RWF", msisdn: String(msisdn) },
     transaction: { amount: String(amount), country: "RW", currency: currency || "RWF", id: externalId },
-    message: message || "MVEC Marketplace payment",
+    message: message || "Ikiguzi Marketplace payment",
   };
 }
 

@@ -166,7 +166,7 @@ export async function runMoreFlows(base, { adminEmail, adminPassword }) {
   rec("buyer subscription", await BUY.call("POST", "/buyer/subscription", { plan: "PREMIUM" }), (d) => ({ plan: d?.subscription?.planKey }));
 
   // ── Admin: become seller, vendors, users; search; reports ────────────────
-  rec("admin become seller", await ADM.call("POST", "/vendors/become-seller", { businessName: "MVEC Official", phone: "0788400099", email: "official@e2e.test" }), (d) => ({ enabled: d?.isSellerEnabled, msg: !!d?.message }));
+  rec("admin become seller", await ADM.call("POST", "/vendors/become-seller", { businessName: "Ikiguzi Official", phone: "0788400099", email: "official@e2e.test" }), (d) => ({ enabled: d?.isSellerEnabled, msg: !!d?.message }));
   rec("admin vendors", await ADM.call("GET", "/admin/vendors"), (d) => ({ n: (d?.data || d?.vendors || []).length }));
   rec("admin users", await ADM.call("GET", "/users"), (d) => ({ n: (d?.users || d?.data || []).length }));
   rec("admin suspend user", await ADM.call("PATCH", `/users/${buyer?.id || buyer?._id}`, { status: "SUSPEND" }), (d) => ({ status: (d?.user || d?.data)?.status }));

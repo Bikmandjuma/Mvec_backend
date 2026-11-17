@@ -18,6 +18,9 @@ module.exports = (sequelize) => {
     deliveryInstructions: { type: DataTypes.STRING(500), allowNull: true },
     isDefaultShipping: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     isDefaultBilling: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    // Map pin, so an Ikiguzi rider can find the door.
+    lat: { type: DataTypes.DOUBLE, allowNull: true, get() { const v = this.getDataValue("lat"); return v == null ? v : Number(v); } },
+    lng: { type: DataTypes.DOUBLE, allowNull: true, get() { const v = this.getDataValue("lng"); return v == null ? v : Number(v); } },
   }, { tableName: "user_addresses", timestamps: true });
 
   UserAddress.associate = (m) => UserAddress.belongsTo(m.User, { foreignKey: "userId" });

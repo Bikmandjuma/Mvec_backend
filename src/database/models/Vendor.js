@@ -22,12 +22,12 @@ module.exports = (sequelize) => {
     status: { type: DataTypes.ENUM("ACTIVE", "SUSPENDED", "BLOCKED", "UNDER_REVIEW"), allowNull: false, defaultValue: "ACTIVE" },
     location: { type: DataTypes.JSON, allowNull: true }, // Mixed in Mongoose
     // Affiliate program: off until the seller opts in. affiliateRate (%) is paid
-    // by the seller on affiliate-driven sales, on top of MVEC's own share.
+    // by the seller on affiliate-driven sales, on top of Ikiguzi's own share.
     affiliateEnabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     affiliateRate: { type: DataTypes.DECIMAL(5, 2), allowNull: false, defaultValue: 0 },
     affiliateScope: { type: DataTypes.ENUM("ALL", "SELECTED"), allowNull: false, defaultValue: "ALL" },
     affiliateUpdatedAt: { type: DataTypes.DATE, allowNull: true },
-    // Why MVEC rejected the profile (shown to the seller so they can fix it).
+    // Why Ikiguzi rejected the profile (shown to the seller so they can fix it).
     verificationNote: { type: DataTypes.STRING(500), allowNull: true, defaultValue: "" },
   }, {
     tableName: "vendors",

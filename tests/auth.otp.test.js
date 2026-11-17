@@ -257,6 +257,20 @@ describe("Phone OTP Unit Tests (send-otp / verify-otp)", () => {
       assert.equal(decoded.role, "vendor");
     });
 
+    it("should issue a rider's registration token with the delivery role", async () => {
+      const code = "123456";
+      Otp.findOne = () => mockFindOneSort(buildOtpDoc(code, { purpose: "registration" }));
+
+      const { req, res } = createMockReqRes({
+        body: { phone: "0788123456", code, purpose: "registration", role: "delivery" },
+      });
+      await authController.verifyOtp(req, res);
+
+      assert.equal(res.statusCode, 200);
+      // POST /api/rider/register accepts only a token stamped "delivery".
+      assert.equal(jwt.verify(res.jsonData.verificationToken, process.env.JWT_SECRET).role, "delivery");
+    });
+
     it("should sign in an existing user (passwordless) when purpose is login", async () => {
       const code = "654321";
       Otp.findOne = () => mockFindOneSort(buildOtpDoc(code));

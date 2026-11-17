@@ -1,6 +1,6 @@
-// MVEC's own money: what MVEC keeps from commissions builds up in one MVEC
-// wallet (held until delivery, then available). MVEC does not send this money
-// itself: an admin moves it from MVEC's payment-provider account (Paypack,
+// Ikiguzi's own money: what Ikiguzi keeps from commissions builds up in one Ikiguzi
+// wallet (held until delivery, then available). Ikiguzi does not send this money
+// itself: an admin moves it from Ikiguzi's payment-provider account (Paypack,
 // Flutterwave, K-Pay) to the company bank, then records the withdrawal here
 // so the books match.
 const orm = require("../database/orm");
@@ -11,7 +11,7 @@ const AdminPayout = require("../models/AdminPayout");
 
 const generatePayoutNumber = () => `PAY-ADM-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
 
-// The MVEC wallet is kept on the first admin account (the one escrow credits).
+// The Ikiguzi wallet is kept on the first admin account (the one escrow credits).
 async function mvecWalletOwner() {
   const admin = await User.findOne({ role: "super_admin" }).sort({ createdAt: 1 }).select("_id").lean();
   return admin?._id;
@@ -24,12 +24,12 @@ exports.getAdminBalance = async (_req, res) => {
     const wallet = (await AdminWallet.findOne({ adminUser: owner })) || { pendingBalance: 0, availableBalance: 0, totalEarned: 0, totalWithdrawn: 0 };
     return res.status(200).json({ wallet });
   } catch (error) {
-    return res.status(500).json({ message: "Could not load MVEC's balance." });
+    return res.status(500).json({ message: "Could not load Ikiguzi's balance." });
   }
 };
 
 // @route POST /api/admin/payouts/request   { amount, destination, note }
-// Records money an admin moved out of MVEC's provider account.
+// Records money an admin moved out of Ikiguzi's provider account.
 exports.requestAdminPayout = async (req, res) => {
   const amount = Math.round(Number(req.body.amount));
   const destination = String(req.body.destination || req.body.accountDetails?.accountNumber || "").trim().slice(0, 120);
@@ -48,14 +48,14 @@ exports.requestAdminPayout = async (req, res) => {
     if (!wallet) {
       await session.abortTransaction();
       const current = await AdminWallet.findOne({ adminUser: owner });
-      return res.status(400).json({ message: `MVEC's available balance is ${Math.round(current?.availableBalance || 0).toLocaleString("en-RW")} RWF. Money is available once orders are delivered.` });
+      return res.status(400).json({ message: `Ikiguzi's available balance is ${Math.round(current?.availableBalance || 0).toLocaleString("en-RW")} RWF. Money is available once orders are delivered.` });
     }
     const [payout] = await AdminPayout.create([{
       payoutNumber: generatePayoutNumber(), adminUser: req.user._id || req.user.id, amount, paymentMethod: "BANK",
-      accountDetails: { accountName: req.user.Fullname || "MVEC", accountNumber: destination, bankName: note || "Recorded withdrawal" },
+      accountDetails: { accountName: req.user.Fullname || "Ikiguzi", accountNumber: destination, bankName: note || "Recorded withdrawal" },
       status: "PAID", processedAt: new Date(),
     }], { session });
-    await ledger.payoutSent({ fromType: "PLATFORM_REVENUE", amount, reference: payout.payoutNumber, description: `MVEC withdrawal to ${destination}`, session });
+    await ledger.payoutSent({ fromType: "PLATFORM_REVENUE", amount, reference: payout.payoutNumber, description: `Ikiguzi withdrawal to ${destination}`, session });
     await session.commitTransaction();
     return res.status(201).json({
       message: `Recorded: ${amount.toLocaleString("en-RW")} RWF moved to ${destination}.`, payout, wallet,
@@ -69,7 +69,7 @@ exports.requestAdminPayout = async (req, res) => {
   }
 };
 
-// @route GET /api/admin/payouts/history — every recorded MVEC withdrawal.
+// @route GET /api/admin/payouts/history — every recorded Ikiguzi withdrawal.
 exports.getAdminPayoutHistory = async (_req, res) => {
   try {
     const payouts = await AdminPayout.find({}).populate("adminUser", "Fullname").sort({ createdAt: -1 }).limit(100);

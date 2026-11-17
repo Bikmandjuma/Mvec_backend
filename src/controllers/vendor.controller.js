@@ -221,7 +221,7 @@ exports.updateMyProfile = async (req, res) => {
       vendor.location = typeof address === "object" ? (address.city || address.street) : address;
     }
 
-    // A rejected profile that has been fixed goes straight back to MVEC for review.
+    // A rejected profile that has been fixed goes straight back to Ikiguzi for review.
     const resubmitted = vendor.verificationStatus === "REJECTED";
     if (resubmitted) {
       vendor.verificationStatus = "PENDING";
@@ -261,7 +261,7 @@ exports.updateMyProfile = async (req, res) => {
       console.error("Auto-sync Store error on vendor profile update:", storeErr.message);
     }
 
-    return res.status(200).json({ message: resubmitted ? "Profile saved and sent to MVEC for review again." : "Vendor profile updated", vendor });
+    return res.status(200).json({ message: resubmitted ? "Profile saved and sent to Ikiguzi for review again." : "Vendor profile updated", vendor });
   } catch (error) {
     if (error.code === 11000) {
       return res.status(409).json({ message: "A vendor with this business name already exists" });
@@ -288,7 +288,7 @@ const toPublicVendor = (v) => ({
   description: v.description,
   category: v.category,
   location: v.location,
-  // Contact details stay private: buyers reach sellers through MVEC messages.
+  // Contact details stay private: buyers reach sellers through Ikiguzi messages.
   ratingAvg: v.ratingAvg,
   verificationStatus: v.verificationStatus,
   status: v.status,

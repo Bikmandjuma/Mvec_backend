@@ -854,7 +854,7 @@ class AffiliateService {
     ]);
     const byUser = new Map(vendors.map((v) => [String(v.user), v]));
     const linkFor = new Map(mine.map((l) => [String(l.targetProduct), l.affiliateCode]));
-    // MVEC's part depends on the commission rule for the seller and category.
+    // Ikiguzi's part depends on the commission rule for the seller and category.
     const commission = require("./commission.service");
     const mvecPart = await Promise.all(rows.map((p) => commission.platformAffiliatePercent({ vendorId: p.vendor, categoryId: p.category?._id || p.category })));
     return {

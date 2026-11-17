@@ -37,6 +37,8 @@ const checkoutService = require("../services/checkout.service");
 const financialService = require("../services/financial.service");
 const notifications = require("../services/notification.service");
 const disbursementService = require("../services/disbursement.service");
+const handover = require("../services/handover.service");
+const deliveryService = require("../services/delivery.service");
 
 const sendError = (res, error, fallback = "Something went wrong. Please try again.") => {
   if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
@@ -135,13 +137,11 @@ exports.getDeliverable = async (req, res) => {
     // Sellers (vendors and suppliers) see only orders with their own items.
     // (a supplier team member works on the owner's orders, set in req.vendorId).
     if (["vendor", "supplier"].includes(req.user.role)) query["items.vendor"] = req.vendorId || req.user.id;
-    if (["delivery", "courier"].includes(req.user.role)) query.courier = req.user.id;
 
     const orders = await Order.find(query)
       .select("-deliveryOtp")
       .populate("user", "Fullname phone")
       .populate("items.vendor", "Fullname companyName")
-      .populate("courier", "Fullname phone")
       .sort({ createdAt: -1 });
     return res.status(200).json({ orders });
   } catch (error) {
@@ -299,7 +299,7 @@ function sellerNextStatuses(order) {
 }
 exports.sellerNextStatuses = sellerNextStatuses;
 
-// Seller cancellation: restock their items and, for orders paid through MVEC,
+// Seller cancellation: restock their items and, for orders paid through Ikiguzi,
 // refund the buyer by unwinding the held escrow.
 async function cancelBySeller(order, vendorIds, reason) {
   const session = await orm.startSession();
@@ -359,8 +359,19 @@ async function cancelBySeller(order, vendorIds, reason) {
 const FULFILMENT_FLOW = ["CONFIRMED", "PROCESSING", "READY_FOR_SHIPMENT", "SHIPPED", "OUT_FOR_DELIVERY"];
 const DELIVERY_OTP_MAX_ATTEMPTS = 5;
 
-async function advanceFulfilment({ order, status, actor }) {
+async function advanceFulfilment({ order, status, actor, sellerIds = handover.vendorsOf(order) }) {
   const next = String(status || "").toUpperCase();
+  // Parcels Ikiguzi riders carry move on with the rider, not the seller.
+  const riderParcels = sellerIds.filter((id) => deliveryService.isRiderParcel(order, id));
+  if (["SHIPPED", "OUT_FOR_DELIVERY"].includes(next) && riderParcels.length && riderParcels.length === sellerIds.length) {
+    throw checkoutService.httpError(400, "An Ikiguzi rider collects this parcel. The order moves on when the rider picks it up.");
+  }
+  // Another seller already marked the order ready: this seller's ready parcel
+  // still has to reach a rider.
+  if (next === "READY_FOR_SHIPMENT" && riderParcels.length && FULFILMENT_FLOW.indexOf(order.orderStatus) >= FULFILMENT_FLOW.indexOf(next)) {
+    await deliveryService.createForOrder(order, riderParcels);
+    return order;
+  }
   if (!FULFILMENT_FLOW.includes(next)) {
     throw checkoutService.httpError(400, "Choose one of: processing, ready for shipment, shipped, out for delivery. Delivery is confirmed with the buyer's code.");
   }
@@ -369,7 +380,7 @@ async function advanceFulfilment({ order, status, actor }) {
   const isCashOnDelivery = order.paymentMethod === "CASH_ON_DELIVERY" && order.paymentStatus === "PENDING" && order.orderStatus !== "PENDING";
   if (order.paymentStatus !== "PAID" && !isCashOnDelivery) {
     throw checkoutService.httpError(400, order.paymentStatus === "DISPUTED"
-      ? "This order is under dispute review. Wait for MVEC's decision before moving it."
+      ? "This order is under dispute review. Wait for Ikiguzi's decision before moving it."
       : "This order isn't paid yet, so it can't be prepared or shipped.");
   }
   if (order.shippingMethod === "PICKUP" && ["SHIPPED", "OUT_FOR_DELIVERY"].includes(next)) {
@@ -388,6 +399,7 @@ async function advanceFulfilment({ order, status, actor }) {
   await order.save();
   socketService.emitOrderStatusUpdate(order);
   notifications.orderStatusChanged(order, actor).catch(() => {});
+  if (next === "READY_FOR_SHIPMENT" && riderParcels.length) await deliveryService.createForOrder(order, riderParcels);
   return order;
 }
 
@@ -418,7 +430,8 @@ exports.updateVendorOrderStatus = async (req, res) => {
       const result = await cancelOrder({ orderId: order._id, actor: req.user, sellerId });
       return res.status(200).json({ message: "Order cancelled and the buyer refunded.", order: result.order });
     }
-    await advanceFulfilment({ order, status, actor: req.user });
+    const sellerIds = req.user.role === "super_admin" ? undefined : handover.vendorsOf(order).filter((v) => vendorIds.includes(v));
+    await advanceFulfilment({ order, status, actor: req.user, sellerIds });
     return res.status(200).json({ message: "Order updated successfully", order });
   } catch (error) {
     return sendError(res, error);
@@ -447,7 +460,8 @@ exports.updateOrderStatus = async (req, res) => {
       const result = await cancelOrder({ orderId: order._id, actor: req.user });
       return res.status(200).json({ message: "Order cancelled and the buyer refunded.", order: result.order });
     }
-    await advanceFulfilment({ order, status: req.body.status, actor: req.user });
+    const sellerIds = req.user.role === "super_admin" ? undefined : [String(req.user.id)];
+    await advanceFulfilment({ order, status: req.body.status, actor: req.user, sellerIds });
     return res.status(200).json({ message: `Order status updated to ${order.orderStatus}.`, order });
   } catch (error) {
     return sendError(res, error);
@@ -460,9 +474,9 @@ exports.updateOrderStatus = async (req, res) => {
 // @access  Private (Admin / Delivery Agent)
 // @desc    Confirm delivery with the buyer's 6-digit code and release escrow
 // @route   PATCH /api/orders/:id/deliver   { deliveryOtp }
-// @access  Private (Super Admin, assigned courier, or a vendor for its own items)
+// @access  Private (Super Admin, or a seller for its own items; riders confirm on /api/rider)
 // A vendor's confirmation releases only that vendor's money; the order is
-// DELIVERED once every vendor in it has handed over (or a courier/admin
+// DELIVERED once every vendor in it has handed over (or an admin
 // confirms the whole order).
 exports.confirmOrderDelivery = async (req, res) => {
   const { id } = req.params;
@@ -491,10 +505,6 @@ exports.confirmOrderDelivery = async (req, res) => {
       await session.abortTransaction();
       return res.status(403).json({ message: "You do not sell items in this order." });
     }
-    if (role === "delivery" && String(order.courier || "") !== String(req.user.id)) {
-      await session.abortTransaction();
-      return res.status(403).json({ message: "This delivery is not assigned to you." });
-    }
 
     if (["DELIVERED", "COMPLETED"].includes(order.orderStatus)) {
       await session.abortTransaction();
@@ -505,7 +515,7 @@ exports.confirmOrderDelivery = async (req, res) => {
       return res.status(400).json({ message: `A ${order.orderStatus.toLowerCase()} order cannot be delivered.` });
     }
     // Cash on delivery: the seller collected the money at the door, so the
-    // code also confirms payment. Nothing went through MVEC escrow.
+    // code also confirms payment. Nothing went through Ikiguzi escrow.
     const cashOnDelivery = order.paymentMethod === "CASH_ON_DELIVERY" && order.paymentStatus === "PENDING" && order.orderStatus !== "PENDING";
     // Only paid orders can be delivered. This also keeps a DISPUTED order's
     // escrow frozen until an admin resolves the dispute.
@@ -520,39 +530,17 @@ exports.confirmOrderDelivery = async (req, res) => {
 
     if ((order.deliveryOtpAttempts || 0) >= DELIVERY_OTP_MAX_ATTEMPTS) {
       await session.abortTransaction();
-      return res.status(423).json({ message: "Too many wrong codes. MVEC support must confirm this delivery." });
+      return res.status(423).json({ message: "Too many wrong codes. Ikiguzi support must confirm this delivery." });
     }
     if (!order.deliveryOtp || code !== order.deliveryOtp) {
       await session.abortTransaction();
       await Order.updateOne({ _id: order._id }, { $inc: { deliveryOtpAttempts: 1 } });
       const left = DELIVERY_OTP_MAX_ATTEMPTS - (order.deliveryOtpAttempts || 0) - 1;
-      return res.status(400).json({ message: left > 0 ? `Wrong delivery code. ${left} attempt${left === 1 ? "" : "s"} left.` : "Wrong delivery code. This delivery is now locked for MVEC support." });
+      return res.status(400).json({ message: left > 0 ? `Wrong delivery code. ${left} attempt${left === 1 ? "" : "s"} left.` : "Wrong delivery code. This delivery is now locked for Ikiguzi support." });
     }
 
     const releaseFor = isVendor && role !== "super_admin" ? [sellerId] : orderVendors;
-    for (const vendorId of releaseFor) {
-      await releaseVendorEscrowFunds(order._id, vendorId, session);
-    }
-    const delivered = new Set([...(order.deliveredVendors || []).map(String), ...releaseFor]);
-    order.deliveredVendors = [...delivered];
-
-    const complete = orderVendors.every((v) => delivered.has(v));
-    if (cashOnDelivery && complete) {
-      order.paymentStatus = "PAID";
-      order.paidOffline = true;
-      order.paidAt = new Date();
-    }
-    if (complete) {
-      order.orderStatus = "DELIVERED";
-      order.isDelivered = true;
-      order.deliveredAt = new Date();
-    }
-    await order.save({ session });
-
-    // Affiliate commission is approved once the whole order is delivered.
-    if (complete) {
-      await financialService.approveAffiliateCommissionsForOrder({ orderId: order._id, session });
-    }
+    const { complete } = await handover.handOver({ order, vendorIds: releaseFor, session });
 
     await session.commitTransaction();
     socketService.emitOrderStatusUpdate(order);
@@ -569,55 +557,6 @@ exports.confirmOrderDelivery = async (req, res) => {
     return sendError(res, error, "We could not confirm this delivery. Please try again.");
   } finally {
     session.endSession();
-  }
-};
-
-// @desc    Assigned courier picked the parcel up
-// @route   PATCH /api/orders/:id/out-for-delivery
-// @access  Private (assigned courier, Super Admin)
-exports.markOutForDelivery = async (req, res) => {
-  try {
-    if (!orm.isValidObjectId(req.params.id)) return res.status(400).json({ message: "A valid order ID is required." });
-    const order = await Order.findById(req.params.id);
-    if (!order) return res.status(404).json({ message: "Order not found." });
-    if (req.user.role !== "super_admin" && String(order.courier || "") !== String(req.user.id)) {
-      return res.status(403).json({ message: "This delivery is not assigned to you." });
-    }
-    await advanceFulfilment({ order, status: "OUT_FOR_DELIVERY", actor: req.user });
-    return res.status(200).json({ message: "Marked out for delivery. The buyer has been notified.", order });
-  } catch (error) {
-    return sendError(res, error);
-  }
-};
-
-// @desc    Assign (or clear) the courier delivering an order
-// @route   PATCH /api/orders/:id/courier   { courierId | null }
-// @access  Private (Super Admin)
-exports.assignCourier = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { courierId } = req.body;
-    if (!orm.isValidObjectId(id)) return res.status(400).json({ message: "A valid order ID is required." });
-    const order = await Order.findById(id);
-    if (!order) return res.status(404).json({ message: "Order not found." });
-    if (order.paymentStatus !== "PAID" || ["DELIVERED", "COMPLETED", "CANCELLED"].includes(order.orderStatus)) {
-      return res.status(400).json({ message: "Only paid orders that are not yet delivered can be assigned." });
-    }
-    if (courierId) {
-      const User = require("../models/User");
-      const courier = orm.isValidObjectId(courierId) ? await User.findOne({ _id: courierId, role: "delivery" }) : null;
-      if (!courier) return res.status(400).json({ message: "Choose a courier account." });
-      if (courier.status && courier.status !== "ACTIVE") return res.status(400).json({ message: "This courier's account is blocked or suspended. Choose another courier." });
-      order.courier = courier._id;
-    } else {
-      order.courier = null;
-    }
-    await order.save();
-    socketService.emitOrderStatusUpdate(order);
-    if (order.courier) notifications.courierAssigned(order).catch(() => {});
-    return res.status(200).json({ message: order.courier ? "Courier assigned." : "Courier removed.", order });
-  } catch (error) {
-    return sendError(res, error);
   }
 };
 
@@ -680,7 +619,7 @@ async function cancelOrder({ orderId, actor, reason, sellerId: actingFor }) {
         throw checkoutService.httpError(400, "This order is already being delivered or closed and cannot be cancelled.");
       }
     } else if ((role === "vendor" || role === "supplier") && order.items.some((i) => String(i.vendor) === sellerId)) {
-      if (!sellerOwnsAll) throw checkoutService.httpError(400, "This order includes other sellers' items. Ask MVEC support to cancel it.");
+      if (!sellerOwnsAll) throw checkoutService.httpError(400, "This order includes other sellers' items. Ask Ikiguzi support to cancel it.");
     } else {
       throw checkoutService.httpError(403, "Access denied.");
     }
@@ -692,7 +631,7 @@ async function cancelOrder({ orderId, actor, reason, sellerId: actingFor }) {
     }
 
     isPaid = order.paymentStatus === "PAID";
-    // Paid to the seller outside MVEC: MVEC holds nothing and refunds nothing.
+    // Paid to the seller outside Ikiguzi: Ikiguzi holds nothing and refunds nothing.
     paidOutsideMvec = isPaid && Boolean(order.paidOffline);
     if (paidOutsideMvec) {
       if (isBuyer && role !== "super_admin") {
@@ -715,12 +654,13 @@ async function cancelOrder({ orderId, actor, reason, sellerId: actingFor }) {
     }
     order.cancellationReason = reason || (isBuyer
       ? (isPaid ? "Buyer cancelled within 30 minutes of payment" : "Buyer cancelled before payment")
-      : role === "vendor" || role === "supplier" ? "Seller could not fulfil the order" : "Cancelled by MVEC");
+      : role === "vendor" || role === "supplier" ? "Seller could not fulfil the order" : "Cancelled by Ikiguzi");
     order.orderStatus = "CANCELLED";
     await order.save({ session });
     await session.commitTransaction();
-    // Give back the coupon use this order held.
+    // Give back the coupon use this order held, and withdraw its parcels from riders.
     await promotionService.release(order);
+    await deliveryService.cancelForOrder(order._id);
   } catch (error) {
     if (session.inTransaction()) await session.abortTransaction();
     throw error;
@@ -781,33 +721,6 @@ exports.cancelOrderByBuyer = async (req, res) => {
   }
 };
 
-/**
- * Internal Escrow Release Helper
- * One settlement exists per order item, so a vendor can have several. Each is
- * released through the financial service, which keeps the double-entry ledger,
- * platform shares and wallets consistent (and is the same code the admin manual
- * release uses).
- */
-async function releaseVendorEscrowFunds(orderId, vendorId, session) {
-  const settlements = await Settlement.find({
-    order: orderId,
-    vendor: vendorId,
-    status: "HELD",
-  }).session(session);
-
-  for (const settlement of settlements) {
-    await financialService.releaseEscrowToVendor({ settlementId: settlement._id, session });
-  }
-}
-
-// Delegate to the finance service so delivery releases escrow exactly like
-// the admin release does: correct double-entry ledger rows, platform /
-// developer / admin shares and wallet balances in one place.
-async function releaseSettlement(settlement, orderId, vendorId, session) {
-  await financialService.releaseEscrowToVendor({ settlementId: settlement._id, session });
-}
-
-
 // ---------------------------------------------------------------------------
 // Automatic release: if the buyer neither confirms delivery nor reports a
 // problem within the admin-set number of days after the parcel left the
@@ -839,7 +752,7 @@ exports.autoReleaseDueDeliveries = async (now = new Date()) => {
         continue;
       }
       const vendors = [...new Set(order.items.filter((i) => i.vendor).map((i) => String(i.vendor)))];
-      for (const vendorId of vendors) await releaseVendorEscrowFunds(order._id, vendorId, session);
+      for (const vendorId of vendors) await handover.releaseVendorEscrow(order._id, vendorId, session);
       order.deliveredVendors = vendors;
       order.orderStatus = "DELIVERED";
       order.isDelivered = true;

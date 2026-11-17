@@ -9,7 +9,7 @@ const DEFAULTS = {
   // paid automatically when the buyer neither confirms nor reports a problem.
   // 0 turns automatic release off.
   autoReleaseDays: 1,
-  // Paid plans (Seller Premium, Buyer ad-free). Off until MVEC has enough
+  // Paid plans (Seller Premium, Buyer ad-free). Off until Ikiguzi has enough
   // users: while off nobody is charged and every seller keeps full access.
   subscriptionsEnabled: false,
   sellerPremiumPrice: 5000,
@@ -17,7 +17,7 @@ const DEFAULTS = {
   // Free plan listing limit, applied only while subscriptions are on.
   freeProductLimit: 50,
   // Days the seller has to respond to a problem report (and the buyer to an
-  // offer) before MVEC steps in to decide.
+  // offer) before Ikiguzi steps in to decide.
   disputeResponseDays: 3,
 };
 const LIMITS = {

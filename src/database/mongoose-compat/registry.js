@@ -40,6 +40,7 @@ const LEGACY = {
           type: F("string"), country: F("string"), provinceState: F("string"), cityDistrict: F("string"), sector: F("string"), street: F("string"),
           building: F("string"), apartment: F("string"), postalCode: F("string"), phone: F("string"),
           deliveryInstructions: F("string"), isDefaultShipping: F("bool"), isDefaultBilling: F("bool"),
+          lat: F("number"), lng: F("number"),
         },
       },
       wishlist: {
@@ -71,6 +72,7 @@ const LEGACY = {
       "policies.shippingPolicy": F("string", "shippingPolicy"), businessAddress: F("string"), businessPhone: F("string"),
       taxId: F("string"), operatingHours: { ...F("json"), jsonDefault: {} }, shippingRules: { ...F("json"), jsonDefault: [] },
       defaultShippingRuleId: F("string"), twoFactorEnabled: F("bool"), marketplaceLive: F("bool"), socialLinks: F("json"), status: F("string"),
+      pickupLat: F("number"), pickupLng: F("number"), riderDelivery: F("bool"),
     },
   },
   Staff: {

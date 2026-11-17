@@ -10,7 +10,7 @@ router.get("/ledger", getLedgerEntries);
 router.patch("/settlements/:id/hold", placeAdminHold);
 router.delete("/settlements/:id/hold", liftAdminHold);
 router.post("/settlements/:id/release", manualEscrowRelease);
-// Compare a payment provider statement with MVEC's records.
+// Compare a payment provider statement with Ikiguzi's records.
 router.post("/reconcile", runReconciliation);
 
 module.exports = router;
