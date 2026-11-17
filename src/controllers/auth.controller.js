@@ -1059,6 +1059,21 @@ exports.sendOtp = async (req, res) => {
     } catch (sendError) {
       console.error("OTP delivery failed:", sendError.message);
     }
+    // Temporary, until SMS is set up (SHOW_RIDER_CODES=true): riders see their
+    // code on screen instead. Only for rider sign-up on a number with no
+    // account, and rider sign-in; buyers, sellers and admins never see one.
+    const riderCode = process.env.SHOW_RIDER_CODES === "true" && (
+      (purpose === "registration" && req.body.role === "delivery" && !account) ||
+      (purpose === "login" && account?.role === "delivery")
+    );
+    if (!sent && riderCode) {
+      console.warn(`[OTP] SMS not set up: showed a rider ${purpose} code on screen (SHOW_RIDER_CODES).`);
+      return res.status(200).json({
+        message: "Text messages aren't set up yet, so your code is shown here.",
+        devCode: code,
+        sentTo: { sms: false, email: null },
+      });
+    }
     if (!sent) {
       await Otp.updateMany({ phone: normalizedPhone, purpose, consumed: false }, { $set: { consumed: true } });
       return res.status(503).json({

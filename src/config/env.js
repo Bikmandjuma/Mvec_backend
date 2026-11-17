@@ -43,7 +43,10 @@ function startupReport(env = process.env) {
   const sms = (env.SMS_PROVIDER || "").trim().toLowerCase();
   const smsReady = (sms === "pindo" && env.PINDO_API_TOKEN) || (sms === "africastalking" && env.AT_USERNAME && env.AT_API_KEY);
   if (!smsReady) {
-    errors.push("No SMS gateway (SMS_PROVIDER=pindo with PINDO_API_TOKEN, or africastalking with AT_USERNAME and AT_API_KEY): sign-in codes could not be delivered");
+    const message = "No SMS gateway (SMS_PROVIDER=pindo with PINDO_API_TOKEN, or africastalking with AT_USERNAME and AT_API_KEY): sign-in codes could not be delivered";
+    // Until SMS is set up, SHOW_RIDER_CODES lets a live server run (riders see their codes on screen).
+    if (env.SHOW_RIDER_CODES === "true") warnings.push(message);
+    else errors.push(message);
   }
 
   if (env.ALLOW_UNSIGNED_WEBHOOKS === "true") {
@@ -58,6 +61,9 @@ function startupReport(env = process.env) {
   ];
   if (!gateways.some(Boolean)) {
     warnings.push("No payment gateway is configured: online payments are refused until one is connected");
+  }
+  if (env.SHOW_RIDER_CODES === "true") {
+    warnings.push("SHOW_RIDER_CODES is on: riders see their sign-in codes on screen when no text can be sent. Anyone with a rider's phone number can sign in as them. Turn it off once SMS works");
   }
   if (!(env.EMAIL_USER && env.EMAIL_PASS)) {
     warnings.push("No email account (EMAIL_USER, EMAIL_PASS): verification and receipt emails are not sent");

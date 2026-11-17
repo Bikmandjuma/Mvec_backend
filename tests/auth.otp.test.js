@@ -120,6 +120,38 @@ describe("Phone OTP Unit Tests (send-otp / verify-otp)", () => {
       }
     });
 
+    it("without SMS, SHOW_RIDER_CODES shows riders (only) their code on screen", async () => {
+      const messaging = require("../src/services/messaging.service");
+      const originals = { smsProvider: messaging.smsProvider, emailConfigured: messaging.emailConfigured };
+      messaging.smsProvider = () => null;
+      messaging.emailConfigured = () => false;
+      const send = async (body, account = null) => {
+        User.findOne = async () => account;
+        const { req, res } = createMockReqRes({ body: { phone: "0788123456", ...body } });
+        await authController.sendOtp(req, res);
+        return res;
+      };
+      try {
+        // Switch off: no code anywhere, as before.
+        assert.equal((await send({ purpose: "registration", role: "delivery" })).statusCode, 503);
+
+        process.env.SHOW_RIDER_CODES = "true";
+        const signUp = await send({ purpose: "registration", role: "delivery" });
+        assert.equal(signUp.statusCode, 200);
+        assert.match(signUp.jsonData.devCode, /^\d{6}$/);
+        const signIn = await send({ purpose: "login" }, { role: "delivery", phone: "0788123456" });
+        assert.match(signIn.jsonData.devCode, /^\d{6}$/);
+
+        // Never for anyone else, or for a number that already has an account.
+        assert.equal((await send({ purpose: "login" }, { role: "buyer", phone: "0788123456" })).statusCode, 503);
+        assert.equal((await send({ purpose: "login" }, { role: "vendor", phone: "0788123456" })).statusCode, 503);
+        assert.equal((await send({ purpose: "registration", role: "vendor" })).statusCode, 503);
+        assert.equal((await send({ purpose: "registration", role: "delivery" }, { role: "buyer", phone: "0788123456" })).statusCode, 503);
+      } finally {
+        Object.assign(messaging, originals);
+      }
+    });
+
     it("should email the code to an existing account's own address, never to a typed one", async () => {
       const messaging = require("../src/services/messaging.service");
       const originals = { sendEmail: messaging.sendEmail, emailConfigured: messaging.emailConfigured };
