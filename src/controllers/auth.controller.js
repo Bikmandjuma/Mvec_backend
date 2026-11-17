@@ -734,7 +734,8 @@ exports.googleLogin = async (req, res) => {
     // required on the normal sign-up form (password, gender, phone) are not
     // needed for a Google-authenticated profile.
     if (!user) {
-      const allowedRoles = ["buyer", "vendor", "supplier", "affiliate", "delivery"];
+      // Riders sign up with a phone code and their vehicle (POST /api/rider/register).
+      const allowedRoles = ["buyer", "vendor", "supplier", "affiliate"];
       const role = allowedRoles.includes(requestedRole) ? requestedRole : "buyer";
 
       user = new User({
@@ -1166,7 +1167,9 @@ exports.verifyOtp = async (req, res) => {
     // ── PURPOSE: REGISTRATION ───────────────────────────────────────────────
     // The phone belongs to the caller. Issue a short-lived token the sign-up
     // request must present to prove the phone was verified.
-    const allowedRoles = ["buyer", "vendor", "supplier", "affiliate"];
+    // "delivery" only unlocks POST /api/rider/register, which adds the vehicle
+    // and waits for admin approval; POST /auth/register still refuses it.
+    const allowedRoles = ["buyer", "vendor", "supplier", "affiliate", "delivery"];
     const finalRole = allowedRoles.includes(role) ? role : "buyer";
     const verificationToken = jwt.sign(
       { phone: normalizedPhone, purpose, role: finalRole },

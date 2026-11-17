@@ -1,4 +1,6 @@
 // Ikiguzi riders (/api/rider): sign-up, going online, offers and trips.
+const crypto = require("crypto");
+const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const orm = require("../database/orm");
 const User = require("../models/User");
@@ -39,7 +41,11 @@ exports.register = async (req, res) => {
       return res.status(409).json({ message: "This phone number already has an Ikiguzi account. Sign in instead." });
     }
     const email = String(req.body.email || "").trim().toLowerCase() || undefined;
-    const user = await User.create({ Fullname: fullName, phone: `0${phone.slice(4)}`, email, role: "delivery", isOnboarded: true });
+    const user = await User.create({
+      Fullname: fullName, phone: `0${phone.slice(4)}`, email, role: "delivery", isOnboarded: true,
+      // Riders sign in with a phone code; this password is never used (they can set one with "Forgot password").
+      password: await bcrypt.hash(crypto.randomBytes(32).toString("hex"), 10),
+    });
     await deliveryService.register(user, req.body);
     return res.status(201).json({
       message: "You're signed up. Ikiguzi will review your details and tell you when you can start.",

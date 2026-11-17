@@ -58,7 +58,7 @@ This is KitchenLink's delivery-worker model, with one job per seller parcel.
 - Going offline hands parcels not yet picked up back to the pool.
 
 **Accounts**
-- Riders sign up with a phone code: `POST /auth/send-otp` → `POST /auth/verify-otp` with `role: "delivery"` → `POST /api/rider/register`.
+- Riders sign up with a phone code: `POST /auth/send-otp` → `POST /auth/verify-otp` with `role: "delivery"` → `POST /api/rider/register`. The website (`/signup`, "Delivery worker") and the app (`/rider`) both use this. Riders have no usable password and sign in with a phone code (`purpose: "login"`). Google sign-up never creates riders.
 - Self sign-ups wait for admin approval (`/api/admin/riders`). An admin's "Add courier" creates an approved rider.
 - Before accepting, a rider sees only the pickup area and fee. The buyer's name, phone and pin appear once the job is theirs.
 

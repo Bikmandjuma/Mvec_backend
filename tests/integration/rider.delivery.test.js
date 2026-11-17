@@ -173,6 +173,18 @@ describe("Ikiguzi riders deliver sellers' parcels", () => {
     expect((await Delivery.findById(job._id)).status).toBe("READY_FOR_PICKUP");
   });
 
+  test("a rider signs up with a verified phone and waits for approval", async () => {
+    const phoneToken = (role) => jwt.sign({ phone: "+250788555777", purpose: "registration", role }, secret, { expiresIn: "15m" });
+    const details = { fullName: "Rider Gamma", vehicleType: "MOTORBIKE", plateNumber: "RAC 777 C" };
+    expect((await request(app).post("/api/rider/register").send({ ...details, verificationToken: phoneToken("buyer") })).status).toBe(400);
+
+    const res = await request(app).post("/api/rider/register").send({ ...details, verificationToken: phoneToken("delivery") });
+    expect(res.status).toBe(201);
+    expect(res.body.token).toBeTruthy();
+    expect(res.body.user.role).toBe("delivery");
+    expect((await Rider.findOne({ user: res.body.user._id || res.body.user.id })).status).toBe("PENDING");
+  });
+
   test("a rider waits for approval; an admin approves", async () => {
     const pending = await request(app).get("/api/rider/deliveries/available").set(as("riderB"));
     expect(pending.status).toBe(403);
