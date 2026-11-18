@@ -36,7 +36,8 @@ const effectiveStoreId = async (product) => {
 
 // Keeps OUT_OF_STOCK in step with quantity (atomic updates skip save hooks).
 const syncStockStatus = async (product, session) => {
-  if (product.stockQuantity <= 0 && product.status !== "OUT_OF_STOCK") {
+  // PENDING_APPROVAL waits for the seller's approval at any stock (listingApproval.service).
+  if (product.stockQuantity <= 0 && !["OUT_OF_STOCK", "PENDING_APPROVAL"].includes(product.status)) {
     return Product.findByIdAndUpdate(product._id, { $set: { status: "OUT_OF_STOCK", stockQuantity: 0 } }, { new: true, session });
   }
   if (product.stockQuantity > 0 && product.status === "OUT_OF_STOCK") {

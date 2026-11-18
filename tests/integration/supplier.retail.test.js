@@ -160,10 +160,10 @@ describe("Suppliers sell published products to buyers", () => {
     expect(delivered.status).toBe(200);
   });
 
-  test("unverified suppliers cannot publish; viewers of the catalog can't either", async () => {
-    await Supplier.updateOne({ _id: supplier._id }, { $set: { verificationStatus: "PENDING" } });
+  test("paused suppliers cannot publish; viewers of the catalog can't either", async () => {
+    await Supplier.updateOne({ _id: supplier._id }, { $set: { status: "SUSPENDED" } });
     expect((await publish({ price: 8000, units: 5 })).status).toBe(403);
-    await Supplier.updateOne({ _id: supplier._id }, { $set: { verificationStatus: "VERIFIED" } });
+    await Supplier.updateOne({ _id: supplier._id }, { $set: { status: "ACTIVE" } });
     expect((await request(app).post(`/api/suppliers/me/products/${product._id}/publish`).set(as("warehouse")).send({ price: 8000, units: 5 })).status).toBe(403);
   });
 });

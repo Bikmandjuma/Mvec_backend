@@ -132,10 +132,12 @@ describe("Phone OTP Unit Tests (send-otp / verify-otp)", () => {
         return res;
       };
       try {
-        // Switch off: no code anywhere, as before.
+        // Switched off: no code anywhere.
+        process.env.SHOW_RIDER_CODES = "false";
         assert.equal((await send({ purpose: "registration", role: "delivery" })).statusCode, 503);
 
-        process.env.SHOW_RIDER_CODES = "true";
+        // On by default, until SMS works.
+        delete process.env.SHOW_RIDER_CODES;
         const signUp = await send({ purpose: "registration", role: "delivery" });
         assert.equal(signUp.statusCode, 200);
         assert.match(signUp.jsonData.devCode, /^\d{6}$/);
@@ -149,6 +151,7 @@ describe("Phone OTP Unit Tests (send-otp / verify-otp)", () => {
         assert.equal((await send({ purpose: "registration", role: "delivery" }, { role: "buyer", phone: "0788123456" })).statusCode, 503);
       } finally {
         Object.assign(messaging, originals);
+        delete process.env.SHOW_RIDER_CODES;
       }
     });
 

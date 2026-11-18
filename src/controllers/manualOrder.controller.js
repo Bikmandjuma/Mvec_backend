@@ -139,7 +139,7 @@ exports.createManualOrder = async (req, res) => {
         throw Object.assign(new Error(`Only ${p.stockQuantity} units of ${p.name} are in stock.`), { status: 409 });
       }
       reserved.push([productId, qty]);
-      if (updated.stockQuantity <= 0) await Product.updateOne({ _id: productId }, { $set: { status: "OUT_OF_STOCK", stockQuantity: 0 } });
+      if (updated.stockQuantity <= 0) await Product.updateOne({ _id: productId, status: { $ne: "PENDING_APPROVAL" } }, { $set: { status: "OUT_OF_STOCK", stockQuantity: 0 } });
     }
 
     // 6. Create the order
