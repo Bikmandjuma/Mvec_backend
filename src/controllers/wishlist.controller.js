@@ -38,7 +38,7 @@ exports.addToWishlist = async (req, res) => {
       .slice(0, WISHLIST_MAX);
     if (!ids.length) return res.status(400).json({ message: "Choose a product to save." });
 
-    const products = await Product.find({ _id: { $in: ids }, status: { $in: ["ACTIVE", "OUT_OF_STOCK"] } }).select("price discountPrice");
+    const products = await Product.find({ _id: { $in: ids }, status: { $in: ["ACTIVE", "OUT_OF_STOCK"] } }).select(require("../utils/pricing.util").PRICE_FIELDS);
     const user = await User.findById(req.user.id).select("wishlist");
     const have = new Set(user.wishlist.map((w) => String(w.product)));
     for (const p of products) {
@@ -47,6 +47,8 @@ exports.addToWishlist = async (req, res) => {
       }
     }
     await user.save({ validateBeforeSave: false });
+    // A saved product's price is watched: the buyer hears when it drops.
+    for (const p of products) await require("../services/alerts.service").subscribe(req.user, p._id, "PRICE_DROP").catch(() => {});
     return res.status(200).json({ items: await wishlistResponse(req.user.id) });
   } catch (error) {
     console.error("Wishlist add failed:", error);
@@ -59,6 +61,7 @@ exports.removeFromWishlist = async (req, res) => {
   try {
     if (!orm.isValidObjectId(req.params.productId)) return res.status(404).json({ message: "Product not in your wishlist." });
     await User.updateOne({ _id: req.user.id }, { $pull: { wishlist: { product: req.params.productId } } });
+    await require("../services/alerts.service").unsubscribe(req.user, req.params.productId, "PRICE_DROP").catch(() => {});
     return res.status(200).json({ items: await wishlistResponse(req.user.id) });
   } catch (error) {
     console.error("Wishlist remove failed:", error);

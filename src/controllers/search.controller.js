@@ -1,3 +1,5 @@
+const { dealView } = require("../utils/pricing.util");
+const withDeal = (p) => { const out = p && p.toJSON ? p.toJSON() : { ...p }; out.deal = dealView(out); return out; };
 const Product = require("../models/Product");
 const Vendor = require("../models/Vendor");
 const Category = require("../models/Category");
@@ -189,8 +191,9 @@ exports.search = async (req, res) => {
         query: q || "",
         category: resolvedCategory ? resolvedCategory.name : category || "",
       },
-      products: pageProducts,
-      related,
+      // With the flash deal as buyers see it now.
+      products: pageProducts.map(withDeal),
+      related: related.map(withDeal),
     });
   } catch (error) {
     return res.status(500).json({ message: error.message });

@@ -65,7 +65,7 @@ exports.createCheckoutOrder = async (req, res) => {
 
     const order = await checkoutService.createOrder({
       userId: req.user.id,
-      lines: cart.items.map((item) => ({ productId: String(item.product), quantity: item.quantity })),
+      lines: cart.items.map((item) => ({ productId: String(item.product), variantId: item.variant ? String(item.variant) : null, quantity: item.quantity })),
       delivery: deliveryFromBody(req.body),
       paymentMethod: req.body.paymentMethod,
       visitorId: req.body.visitorId,
@@ -682,7 +682,7 @@ async function cancelOrder({ orderId, actor, reason, sellerId: actingFor }) {
     console.error(`Affiliate commission reversal failed for order ${order._id}:`, err.message);
   }
   await checkoutService.restoreStock(
-    (order.items || []).filter((item) => item.product).map((item) => ({ product: item.product, quantity: item.quantity })),
+    (order.items || []).filter((item) => item.product).map((item) => ({ product: item.product, variant: item.variant, deal: item.deal, quantity: item.quantity })),
   );
   socketService.emitOrderStatusUpdate(order);
 

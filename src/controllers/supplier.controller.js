@@ -71,8 +71,11 @@ exports.onboardSupplier = async (req, res) => {
       return res.status(400).json({ message: "Business name, phone, email, description, logo, category, and location are required." });
     }
 
+    let documents;
+    try { documents = require("../utils/sellerDocuments").clean(req.body.documents, req.user.id); } catch (e) { return res.status(400).json({ message: e.message }); }
     const supplier = existing || new Supplier({ user: req.user.id });
     Object.assign(supplier, { businessName, description, phone, email, logoUrl, category, location, verificationStatus: "PENDING", verificationNote: "" });
+    if (documents !== undefined) supplier.documents = documents;
     await supplier.save();
     require("../services/notification.service").profileSubmitted({ kind: "supplier", name: businessName, resubmitted: !created }).catch(() => {});
     await require("../models/User").findByIdAndUpdate(req.user.id, { companyName: businessName, businessName, description, logoUrl, category, location, isOnboarded: true, verificationStatus: "PENDING" });
@@ -121,6 +124,9 @@ exports.updateMyProfile = async (req, res) => {
     if (logoUrl !== undefined) supplier.logoUrl = logoUrl;
     if (location !== undefined) supplier.location = location;
     if (category !== undefined) supplier.category = category;
+    if (req.body.documents !== undefined) {
+      try { supplier.documents = require("../utils/sellerDocuments").clean(req.body.documents, req.user.id); } catch (e) { return res.status(400).json({ message: e.message }); }
+    }
 
     // A rejected profile that has been fixed goes straight back to Ikiguzi for review.
     const resubmitted = supplier.verificationStatus === "REJECTED";
@@ -308,6 +314,7 @@ exports.adminVerifySupplier = async (req, res) => {
 
     supplier.verificationStatus = decision;
     supplier.verificationNote = decision === "REJECTED" ? reason : "";
+    require("../services/badge.service").clear(supplier.user);
     await supplier.save();
     // Approval puts the seller's waiting products in front of buyers; rejection takes them off.
     const listed = await require("../services/listingApproval.service").followDecision(supplier.user, decision);

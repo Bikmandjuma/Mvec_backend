@@ -79,6 +79,9 @@ const cancelExpiredUnpaidOrders = async () => {
         for (const item of freshOrder.items) {
           if (!item.product) continue;
           await Product.updateOne({ _id: item.product }, { $inc: { stockQuantity: item.quantity } }, { session });
+          // The size/colour and the deal units it took go back too.
+          if (item.variant) await require("../models/ProductVariant").updateOne({ _id: item.variant }, { $inc: { stockQuantity: item.quantity } }, { session });
+          if (item.deal) await Product.updateOne({ _id: item.product, dealSold: { $gte: item.quantity } }, { $inc: { dealSold: -item.quantity } }, { session });
           await Product.updateOne(
             { _id: item.product, status: "OUT_OF_STOCK", stockQuantity: { $gt: 0 } },
             { $set: { status: "ACTIVE" } },
@@ -199,6 +202,14 @@ exports.initBackgroundWorkers = () => {
     const deliveries = require("../services/delivery.service");
     deliveries.expireStaleOffers().catch((error) => console.error("[Delivery dispatch] failed:", error.message));
     deliveries.checkLatePickups().catch((error) => console.error("[Late pickups] failed:", error.message));
+    // Buyers waiting for a product to come back or get cheaper.
+    require("../services/alerts.service").check().catch((error) => console.error("[Alerts] failed:", error.message));
+  });
+  // Returns the seller didn't answer in time go to Ikiguzi (every 30 minutes).
+  cron.schedule("*/30 * * * *", () => {
+    require("../services/returns.service").escalateOverdue()
+      .then((n) => { if (n) console.log(`[Returns] ${n} return(s) passed to Ikiguzi.`); })
+      .catch((e) => console.error("[Returns] escalation failed:", e.message));
   });
   cron.schedule("17 * * * *", endExpiredCampaigns);
   // Problem reports: Ikiguzi steps in when the seller misses the response

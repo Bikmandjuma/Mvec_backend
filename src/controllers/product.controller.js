@@ -1,8 +1,46 @@
 const Product = require("../models/Product");
+const ProductVariant = require("../models/ProductVariant");
 const Category = require("../models/Category");
 const orm = require("../database/orm");
 const { resolveOwnedStore } = require("../utils/vendorStore.util");
 const listingApproval = require("../services/listingApproval.service");
+const variants = require("../services/variant.service");
+const badges = require("../services/badge.service");
+
+const { dealView } = require("../utils/pricing.util");
+/** A product as JSON, with its flash deal as buyers see it now (`deal`, or null). */
+const plain = (doc) => {
+  const out = doc && doc.toJSON ? doc.toJSON() : { ...doc };
+  out.deal = dealView(out);
+  return out;
+};
+
+/**
+ * Checks a flash deal in a create/update payload: a price below the regular
+ * price, a start before the end, at most 14 days, and a whole number of units.
+ * `dealPrice: null` ends a deal.
+ */
+function checkDeal(payload, current = {}) {
+  if (!["dealPrice", "dealStartsAt", "dealEndsAt", "dealQuantity"].some((k) => payload[k] !== undefined)) return null;
+  if (payload.dealPrice === null || payload.dealPrice === "") {
+    Object.assign(payload, { dealPrice: null, dealStartsAt: null, dealEndsAt: null, dealQuantity: null, dealSold: 0 });
+    return null;
+  }
+  const price = Number(payload.price ?? current.price);
+  const deal = Number(payload.dealPrice ?? current.dealPrice);
+  const starts = new Date(payload.dealStartsAt ?? current.dealStartsAt ?? Date.now());
+  const ends = new Date(payload.dealEndsAt ?? current.dealEndsAt);
+  if (!(deal > 0) || !(deal < price)) return "The deal price must be lower than the regular price.";
+  if (Number.isNaN(starts.getTime()) || Number.isNaN(ends.getTime()) || ends <= starts) return "Choose when the deal starts and ends; the end must come after the start.";
+  if (ends - starts > 14 * 24 * 3600 * 1000) return "A deal can run for at most 14 days.";
+  if (ends <= new Date()) return "The deal's end time has already passed.";
+  const cap = payload.dealQuantity === undefined ? current.dealQuantity : payload.dealQuantity;
+  if (cap !== null && cap !== undefined && cap !== "" && (!Number.isInteger(Number(cap)) || Number(cap) < 1)) return "Deal units must be a whole number of 1 or more, or empty for no limit.";
+  Object.assign(payload, { dealPrice: deal, dealStartsAt: starts, dealEndsAt: ends, dealQuantity: cap === "" || cap === undefined ? null : cap === null ? null : Number(cap) });
+  // A new deal (new start) counts its units from zero.
+  if (payload.dealStartsAt && String(new Date(current.dealStartsAt || 0).getTime()) !== String(starts.getTime())) payload.dealSold = 0;
+  return null;
+}
 
 const WAITING_NOTE = "Buyers will see it once Ikiguzi approves your store.";
 
@@ -105,7 +143,7 @@ exports.getAllProducts = async (req, res) => {
       if (Number.isFinite(page) && page > 1) cursor = cursor.skip((page - 1) * limit);
     }
 
-    const products = await cursor;
+    const products = (await cursor).map(plain);
     const total = await Product.countDocuments(query);
 
     return res.status(200).json({
@@ -129,9 +167,10 @@ exports.getVendorProducts = async (req, res) => {
     const query = { $or: [{ vendor: vendorId }, { vendor: req.user.id }] };
     if (req.query.store === "primary") query.store = null;
     else if (orm.isValidObjectId(req.query.store)) query.store = req.query.store;
-    const products = await Product.find(query)
+    const products = (await Product.find(query)
       .populate("category", "name")
-      .populate("store", "storeName slug isPrimary");
+      .populate("store", "storeName slug isPrimary")).map(plain);
+    await variants.attach(products);
 
     return res.status(200).json({ count: products.length, products });
   } catch (error) {
@@ -162,6 +201,9 @@ exports.createProduct = async (req, res) => {
     }
     const storeCheck = await checkProductStore(vendorId, payload.store);
     if (storeCheck.error) return res.status(400).json({ message: storeCheck.error });
+    const dealError = checkDeal(payload);
+    if (dealError) return res.status(400).json({ message: dealError });
+    delete payload.dealSold;
     // Until Ikiguzi approves the seller, a product meant to go live waits.
     const approved = await listingApproval.sellerApproved(vendorId);
     const product = new Product({
@@ -173,7 +215,7 @@ exports.createProduct = async (req, res) => {
 
     await product.save();
     const waiting = product.status === listingApproval.PENDING;
-    return res.status(201).json({ message: waiting ? `Product saved. ${WAITING_NOTE}` : "Product created successfully", product, waitingForApproval: waiting });
+    return res.status(201).json({ message: waiting ? `Product saved. ${WAITING_NOTE}` : "Product created successfully", product: plain(product), waitingForApproval: waiting });
   } catch (error) {
     if (error.code === 11000) {
       const field = Object.keys(error.keyPattern || {})[0] || "field";
@@ -244,6 +286,11 @@ exports.updateProduct = async (req, res) => {
     // Prevent changing immutable unique indexes
     delete updates.sku;
     delete updates.slug;
+    const dealError = checkDeal(updates, product);
+    if (dealError) return res.status(400).json({ message: dealError });
+    if (updates.dealSold !== 0) delete updates.dealSold;
+    // With variants, stock is the sum of the variants' stock: set it per variant.
+    if (updates.stockQuantity !== undefined && (await ProductVariant.countDocuments({ product: product._id }))) delete updates.stockQuantity;
 
     if (updates.media) {
       updates.media = { ...(product.media?.toObject?.() || product.media || {}), ...updates.media };
@@ -278,7 +325,7 @@ exports.updateProduct = async (req, res) => {
 
     return res
       .status(200)
-      .json({ message: product.status === listingApproval.PENDING ? `Product saved. ${WAITING_NOTE}` : "Product updated successfully", product, waitingForApproval: product.status === listingApproval.PENDING });
+      .json({ message: product.status === listingApproval.PENDING ? `Product saved. ${WAITING_NOTE}` : "Product updated successfully", product: plain(product), waitingForApproval: product.status === listingApproval.PENDING });
   } catch (error) {
     return res.status(400).json({ message: error.message });
   }
@@ -334,8 +381,10 @@ exports.getProductById = async (req, res) => {
     }
 
     // Only the seller and admins see the cost price.
-    const body = product.toJSON ? product.toJSON() : { ...product };
+    const body = plain(product);
     if (!canSeeHidden) delete body.costPrice;
+    await variants.attach(body);
+    body.sellerBadges = await badges.forSeller(vendorId);
     return res.status(200).json({ product: body });
   } catch (error) {
     console.error("Error fetching product by ID:", error);
@@ -359,7 +408,10 @@ exports.getProductBySlug = async (req, res) => {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    return res.status(200).json({ product });
+    const body = plain(product);
+    await variants.attach(body);
+    body.sellerBadges = await badges.forSeller(String(product.vendor?._id || product.vendor || ""));
+    return res.status(200).json({ product: body });
   } catch (error) {
     console.error("Error fetching product by slug:", error);
     return res.status(500).json({ message: "Invalid Product ID or server error" });
@@ -405,6 +457,7 @@ exports.getRecommendations = async (req, res) => {
       picks = picks.concat(popular.filter((p) => !have.has(String(p._id)))).slice(0, limit);
     }
     // `recommendations` kept for older clients.
+    picks = picks.map(plain);
     return res.status(200).json({ products: picks, recommendations: picks, personalized });
   } catch (error) {
     console.error("Recommendations failed:", error);
@@ -440,4 +493,47 @@ exports.bulkCreateProducts = async (req, res) => {
   }
   const created = results.filter((r) => r.ok).length;
   return res.status(created ? 201 : 400).json({ message: `${created} of ${rows.length} product${rows.length === 1 ? "" : "s"} created.`, created, results });
+};
+
+// @desc    Replace a product's sizes/colours (each with its own stock and price)
+// @route   PUT /api/products/:id/variants   { variants: [{ id?, options: { Size, Color }, price?, stockQuantity, sku?, image? }] }
+// @access  Private (the product's seller, staff with canManageProducts, admin)
+exports.setProductVariants = async (req, res) => {
+  try {
+    if (!orm.isValidObjectId(req.params.id)) return res.status(404).json({ message: "Product not found" });
+    const product = await Product.findById(req.params.id).lean();
+    if (!product) return res.status(404).json({ message: "Product not found" });
+    const vendorId = String(req.vendorId || req.targetVendorId || req.user.id);
+    if (req.user.role !== "super_admin" && String(product.vendor) !== vendorId && String(product.vendor) !== String(req.user.id)) {
+      return res.status(403).json({ message: "Access denied. You can only change your own products." });
+    }
+    const result = await variants.setVariants(product._id, req.body?.variants || []);
+    return res.status(200).json({ message: result.variants.length ? `${result.variants.length} option${result.variants.length === 1 ? "" : "s"} saved.` : "Options removed.", ...result });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ message: error.message });
+  }
+};
+
+// @desc    Flash deals: on now (ending soonest first) and starting within a day
+// @route   GET /api/products/deals
+// @access  Public
+exports.getDeals = async (req, res) => {
+  try {
+    const now = new Date();
+    const soon = new Date(now.getTime() + 24 * 3600 * 1000);
+    const rows = await Product.find({ status: "ACTIVE", dealPrice: { $gt: 0 }, dealEndsAt: { $gt: now }, dealStartsAt: { $lte: soon } })
+      .select("-costPrice")
+      .populate("vendor", "Fullname companyName")
+      .populate("category", "name slug")
+      .sort({ dealEndsAt: 1 })
+      .limit(100);
+    const products = rows.map(plain).filter((p) => p.deal);
+    return res.status(200).json({
+      live: products.filter((p) => p.deal.live),
+      upcoming: products.filter((p) => !p.deal.live),
+      serverTime: now,
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "We could not load today's deals. Please try again." });
+  }
 };

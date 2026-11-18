@@ -117,8 +117,11 @@ exports.onboardVendor = async (req, res) => {
       locationVal = typeof address === "object" ? (address.city || address.street) : address;
     }
 
+    let documents;
+    try { documents = require("../utils/sellerDocuments").clean(req.body.documents, req.user.id); } catch (e) { return res.status(400).json({ message: e.message }); }
     const vendor = existing || new Vendor({ user: req.user.id });
     Object.assign(vendor, { businessName, description, phone, email, logoUrl, category, bannerUrl, location: locationVal, verificationStatus: "PENDING", verificationNote: "" });
+    if (documents !== undefined) vendor.documents = documents;
     await vendor.save();
     require("../services/notification.service").profileSubmitted({ kind: "seller", name: businessName, resubmitted: !created }).catch(() => {});
     await User.findByIdAndUpdate(req.user.id, { companyName: businessName, businessName, description, logoUrl, category, location: locationVal, isOnboarded: true, verificationStatus: "PENDING" });
@@ -215,6 +218,9 @@ exports.updateMyProfile = async (req, res) => {
     if (email !== undefined) vendor.email = email;
     if (logoUrl !== undefined) vendor.logoUrl = logoUrl;
     if (bannerUrl !== undefined) vendor.bannerUrl = bannerUrl;
+    if (req.body.documents !== undefined) {
+      try { vendor.documents = require("../utils/sellerDocuments").clean(req.body.documents, req.user.id); } catch (e) { return res.status(400).json({ message: e.message }); }
+    }
     if (location !== undefined) {
       vendor.location = location;
     } else if (address !== undefined) {
@@ -326,7 +332,7 @@ exports.getVendors = async (req, res) => {
     const vendors = all.slice((pageNum - 1) * limit, pageNum * limit);
 
     return res.status(200).json({
-      data: vendors.map(toPublicVendor),
+      data: await Promise.all(vendors.map(async (v) => ({ ...toPublicVendor(v), badges: await require("../services/badge.service").forSeller(v.user) }))),
       meta: { page: pageNum, pageSize: limit, total: all.length },
     });
   } catch (error) {
@@ -358,7 +364,8 @@ exports.getVendorByIdOrSlug = async (req, res) => {
       countFollowers(vendor._id),
       req.user ? isFollowing(req.user.id, vendor._id) : false,
     ]);
-    return res.status(200).json({ vendor: { ...toPublicVendor(vendor), followers, following } });
+    const badges = await require("../services/badge.service").forSeller(vendor.user);
+    return res.status(200).json({ vendor: { ...toPublicVendor(vendor), followers, following, badges } });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }
@@ -446,6 +453,7 @@ exports.adminVerifyVendor = async (req, res) => {
 
     vendor.verificationStatus = decision;
     vendor.verificationNote = decision === "REJECTED" ? reason : "";
+    require("../services/badge.service").clear(vendor.user);
     await vendor.save();
     // Approval puts the seller's waiting products in front of buyers; rejection takes them off.
     const listed = await require("../services/listingApproval.service").followDecision(vendor.user, decision);

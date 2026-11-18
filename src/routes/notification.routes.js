@@ -12,6 +12,14 @@ router.get("/mine", notification.listMyNotifications);
 router.post("/read-all", notification.markAllRead);
 router.patch("/:id/read", notification.markRead);
 
+// Push: the app registers its device token after sign-in, and removes it on sign-out.
+const push = require("../services/push.service");
+const pushRun = (fn) => async (req, res) => {
+  try { return res.status(200).json(await fn(req)); } catch (e) { return res.status(e.statusCode || 500).json({ message: e.statusCode ? e.message : "Could not update this device." }); }
+};
+router.post("/devices", pushRun((req) => push.register(req.user, req.body || {})));
+router.delete("/devices", pushRun((req) => push.unregister(req.user, req.body?.token || req.query.token)));
+
 // Admin oversight.
 router.get("/", authorize("super_admin"), notification.adminListNotifications);
 

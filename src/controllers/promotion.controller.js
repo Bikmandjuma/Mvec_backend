@@ -60,14 +60,16 @@ function invalidPromotion({ type, value, startsAt, endsAt, usageLimit, minOrderA
 // @access  Private
 exports.validateCoupon = async (req, res) => {
   try {
-    const { code, items = [], shippingAddress, shippingMethod } = req.body;
+    const { code, shippingAddress, shippingMethod } = req.body;
+    // Lines may name a size/colour ("productId~variantId"); checkout prices the variant itself.
+    const items = (Array.isArray(req.body.items) ? req.body.items : []).map((i) => ({ ...i, productId: String(i.productId || "").split("~")[0] }));
     const ids = items.map((i) => i.productId).filter((id) => orm.isValidObjectId(id));
     const products = await Product.find({ _id: { $in: ids } });
     const byId = new Map(products.map((p) => [String(p._id), p]));
     const lines = items
       .map((i) => ({ product: byId.get(String(i.productId)), quantity: Number(i.qty || i.quantity) || 1 }))
       .filter((l) => l.product)
-      .map((l) => ({ ...l, price: l.product.discountPrice || l.product.price }));
+      .map((l) => ({ ...l, price: require("../utils/pricing.util").effectivePrice(l.product) }));
     if (!lines.length) return res.status(400).json({ message: "Your basket is empty." });
 
     let parcels = [];

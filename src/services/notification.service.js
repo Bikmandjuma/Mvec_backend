@@ -18,6 +18,8 @@ async function notify(recipient, { type = "ORDER", title, message = "", referenc
   } catch (err) {
     console.error("Notification save failed:", err.message);
   }
+  // The same message on the phone's lock screen (once Firebase is set up).
+  require("./push.service").sendToUser(recipientId, { title, body: message, link }).catch(() => {});
   if (!sms && !email) return;
   const user = await User.findById(recipientId).select("phone email").lean().catch(() => null);
   if (sms) {

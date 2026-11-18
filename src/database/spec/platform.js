@@ -209,6 +209,8 @@ module.exports = [
       category: str({ len: 120, default: "" }),
       verificationStatus: en(["UNVERIFIED", "PENDING", "VERIFIED", "REJECTED"], { default: "UNVERIFIED", required: true }),
       verificationNote: str({ len: 500, default: "" }),
+      // Private ID / business papers for Ikiguzi's review: [{ kind, url, name, uploadedAt }]
+      documents: json([]),
       ratingAvg: num({ required: true, default: 0 }),
       status: en(["ACTIVE", "SUSPENDED", "BLOCKED", "UNDER_REVIEW"], { default: "ACTIVE", required: true }),
       location: json(null),
@@ -669,6 +671,16 @@ module.exports = [
       note: text({ apiDefault: "" }),
       validUntil: date(),
       status: en(["SUBMITTED", "ACCEPTED", "DECLINED", "WITHDRAWN"], { default: "SUBMITTED", required: true, index: true }),
+    },
+  },
+  {
+    // Phones and browsers that receive push notifications (FCM tokens).
+    model: "DeviceToken", table: "device_tokens", collection: "devicetokens",
+    fields: {
+      user: ref("users", { required: true, index: true, onDelete: "CASCADE" }),
+      token: str({ len: 500, required: true, unique: true }),
+      platform: en(["ANDROID", "IOS", "WEB"], { default: "ANDROID", required: true }),
+      lastSeenAt: date(),
     },
   },
 ];

@@ -43,6 +43,8 @@ module.exports = [
         model: "CartItem", table: "cart_items", parentKey: "cartId",
         fields: {
           product: ref("products", { required: true, onDelete: "CASCADE" }),
+          // The size/colour chosen, for products with variants.
+          variant: ref("product_variants", { fk: false }),
           quantity: int({ required: true, default: 1 }),
           price: money({ required: true }),
         },
@@ -115,6 +117,11 @@ module.exports = [
           vendor: ref("users", { fk: false, index: true }),
           category: ref("categories", { fk: false }),
           name: str({ required: true }),
+          // The size/colour bought ("Red / M"), for products with variants.
+          variant: ref("product_variants", { fk: false }),
+          variantLabel: str({ len: 120 }),
+          // Bought at a flash-deal price (counts against the deal's units).
+          deal: bool(false),
           price: money({ required: true }),
           quantity: int({ required: true }),
           image: str({ len: 1000 }),
@@ -342,6 +349,58 @@ module.exports = [
       currency: str({ len: 8, default: "RWF", required: true }),
       transactionDate: date({ required: true }),
       reconciliationStatus: en(["MATCHED", "MISMATCHED", "MISSING_IN_LEDGER"], { default: "MISSING_IN_LEDGER", required: true }),
+    },
+  },
+  {
+    // A product's sizes/colours, each with its own stock and (optionally) price.
+    model: "ProductVariant", table: "product_variants", collection: "productvariants",
+    fields: {
+      product: ref("products", { required: true, index: true, onDelete: "CASCADE" }),
+      label: str({ len: 120, required: true }), // "Red / M"
+      options: json({}), // { Color: "Red", Size: "M" }
+      sku: str({ len: 80 }),
+      price: money(), // null: the product's price
+      stockQuantity: int({ required: true, default: 0 }),
+      image: str({ len: 1000 }),
+      position: int({ required: true, default: 0 }),
+    },
+  },
+  {
+    // A buyer sending items back after delivery (services/returns.service.js).
+    model: "ReturnRequest", table: "return_requests", collection: "returnrequests",
+    fields: {
+      returnNumber: str({ len: 40, required: true, unique: true }),
+      order: ref("orders", { required: true, index: true, fk: false }),
+      buyer: ref("users", { required: true, index: true, fk: false }),
+      vendor: ref("users", { required: true, index: true, fk: false }),
+      // [{ orderItemId, product, variant, name, variantLabel, quantity, price, image }]
+      items: json([]),
+      reason: en(["DAMAGED", "WRONG_ITEM", "NOT_AS_DESCRIBED", "MISSING_PARTS", "DOES_NOT_FIT", "CHANGED_MIND", "OTHER"], { required: true }),
+      description: text(),
+      photos: json([]),
+      status: en(["REQUESTED", "APPROVED", "REJECTED", "ESCALATED", "RECEIVED", "REFUNDED", "CANCELLED"], { default: "REQUESTED", required: true, index: true }),
+      refundAmount: money({ required: true, default: 0 }),
+      sellerNote: text(), // return instructions, or why it was rejected
+      adminNote: text(),
+      respondBy: date(),
+      approvedAt: date(),
+      receivedAt: date(),
+      refundedAt: date(),
+      // [{ status, at, note, by }]
+      history: json([]),
+    },
+  },
+  {
+    // "Tell me when it's back" / "tell me when the price drops".
+    model: "ProductAlert", table: "product_alerts", collection: "productalerts",
+    indexes: [{ fields: ["userId", "productId", "kind"], unique: true }],
+    fields: {
+      user: ref("users", { required: true, onDelete: "CASCADE" }),
+      product: ref("products", { required: true, index: true, onDelete: "CASCADE" }),
+      kind: en(["BACK_IN_STOCK", "PRICE_DROP"], { required: true }),
+      priceAtSignup: money(),
+      active: bool(true, { index: true }),
+      notifiedAt: date(),
     },
   },
 ];

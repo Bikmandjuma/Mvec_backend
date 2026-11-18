@@ -64,6 +64,9 @@ function startupReport(env = process.env) {
   if (!gateways.some(Boolean)) {
     warnings.push("No payment gateway is configured: online payments are refused until one is connected");
   }
+  if (!(env.FIREBASE_PROJECT_ID && env.FIREBASE_CLIENT_EMAIL && env.FIREBASE_PRIVATE_KEY)) {
+    warnings.push("No push notifications (FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY): riders and buyers only see alerts while the app is open");
+  }
   if (!(env.EMAIL_USER && env.EMAIL_PASS)) {
     warnings.push("No email account (EMAIL_USER, EMAIL_PASS): verification and receipt emails are not sent");
   }

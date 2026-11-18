@@ -60,6 +60,7 @@ const LEGACY = {
       bannerUrl: F("string"), description: F("string"), phone: F("string"), email: F("string"), commissionRate: F("number"),
       verificationStatus: F("string"), ratingAvg: F("number"), status: F("string"), location: F("json"), category: F("string"),
       affiliateEnabled: F("bool"), affiliateRate: F("number"), affiliateScope: F("string"), affiliateUpdatedAt: F("date"), verificationNote: F("string"),
+      documents: { ...F("json"), jsonDefault: [] },
     },
   },
   Store: {
@@ -104,6 +105,7 @@ const LEGACY = {
       description: F("string"), shortDescription: F("string"), price: F("number"), costPrice: F("number"), discountPrice: F("number"),
       discountType: F("string"), discountValue: F("number"), stockQuantity: F("number"), lowStockThreshold: F("number"), status: F("string"),
       affiliateEnabled: F("bool"),
+      dealPrice: F("number"), dealStartsAt: F("date"), dealEndsAt: F("date"), dealQuantity: F("number"), dealSold: F("number"),
       "media.mainImage": F("string", "mainImage"), "media.gallery": { ...F("json", "gallery"), jsonDefault: [] },
       "media.thumbnails": { ...F("json", "thumbnails"), jsonDefault: [] }, "media.videos": { ...F("json", "videos"), jsonDefault: [] },
       ...Object.fromEntries(["color", "size", "material", "weight", "capacity", "model"].map((a) => [`attributes.${a}`, F("string", a)])),

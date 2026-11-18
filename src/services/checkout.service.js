@@ -3,7 +3,8 @@ const orm = require("../database/orm");
 const Order = require("../models/Order");
 const Product = require("../models/Product");
 const { normalizePhone } = require("../utils/sms.util");
-const { effectivePrice } = require("../utils/pricing.util");
+const { effectivePrice, dealOn } = require("../utils/pricing.util");
+const variantService = require("./variant.service");
 const affiliateAttribution = require("./affiliateAttribution.service");
 const { PROVINCES, RWANDA_LOCATIONS, provinceOfDistrict } = require("../config/rwandaLocations");
 const shippingService = require("./shipping.service");
@@ -91,20 +92,28 @@ function normaliseLines(rawLines) {
   if (!Array.isArray(rawLines) || rawLines.length === 0) throw httpError(400, "Your cart is empty.");
   const merged = new Map();
   for (const line of rawLines) {
-    const productId = String(line?.productId || "");
+    // "productId~variantId" (as cart lines are keyed), or productId plus variantId.
+    const key = variantService.parseKey(line?.productId);
+    const productId = key.productId;
+    const variantId = line?.variantId ? String(line.variantId) : key.variantId;
     if (!orm.isValidObjectId(productId)) throw httpError(400, "Every checkout item must reference a valid product.");
+    if (variantId && !orm.isValidObjectId(variantId)) throw httpError(400, "Choose one of the product's sizes or colours.");
     const qty = Number(line.quantity ?? line.qty);
     if (!Number.isInteger(qty) || qty < 1) throw httpError(400, "Product quantity must be a positive whole number.");
-    merged.set(productId, (merged.get(productId) || 0) + qty);
+    const k = variantService.keyOf(productId, variantId);
+    const prev = merged.get(k);
+    merged.set(k, { productId, variantId, quantity: (prev?.quantity || 0) + qty });
   }
-  for (const qty of merged.values()) {
-    if (qty > MAX_QTY_PER_LINE) throw httpError(400, `You can order at most ${MAX_QTY_PER_LINE} units of a product at once.`);
+  for (const { quantity } of merged.values()) {
+    if (quantity > MAX_QTY_PER_LINE) throw httpError(400, `You can order at most ${MAX_QTY_PER_LINE} units of a product at once.`);
   }
-  return [...merged.entries()].map(([productId, quantity]) => ({ productId, quantity }));
+  return [...merged.values()];
 }
 
 async function restoreStock(lines) {
-  for (const { product, quantity } of lines) {
+  for (const { product, variant, quantity, deal } of lines) {
+    if (variant) await variantService.giveBack(variant, quantity);
+    if (deal) await Product.updateOne({ _id: product, dealSold: { $gte: quantity } }, { $inc: { dealSold: -quantity } });
     await Product.updateOne({ _id: product }, { $inc: { stockQuantity: quantity } });
     await Product.updateOne(
       { _id: product, status: "OUT_OF_STOCK", stockQuantity: { $gt: 0 } },
@@ -140,13 +149,29 @@ async function reserveStock(lines) {
   const reserved = [];
   try {
     for (const line of lines) {
+      const gone = () => httpError(409, `${line.name}${line.variantLabel ? ` (${line.variantLabel})` : ""} is no longer available in the quantity you selected. Please update your cart.`);
+      // The size/colour first: its own stock is what runs out.
+      if (line.variant && !(await variantService.take(line.variant, line.quantity))) throw gone();
+      // Deal units are limited: take them only while the deal has units left.
+      // Count first, then check: an order that pushes the count past the cap undoes itself.
+      if (line.deal) {
+        await Product.updateOne({ _id: line.product }, { $inc: { dealSold: line.quantity } });
+        const fresh = await Product.findById(line.product).select("dealQuantity dealSold").lean();
+        if (fresh.dealQuantity !== null && fresh.dealQuantity !== undefined && fresh.dealSold > fresh.dealQuantity) {
+          await Product.updateOne({ _id: line.product }, { $inc: { dealSold: -line.quantity } });
+          if (line.variant) await variantService.giveBack(line.variant, line.quantity);
+          throw httpError(409, `The deal on ${line.name} just sold out. Refresh to see the current price.`);
+        }
+      }
       const updated = await Product.findOneAndUpdate(
         { _id: line.product, status: "ACTIVE", stockQuantity: { $gte: line.quantity } },
         { $inc: { stockQuantity: -line.quantity } },
         { new: true }
       );
       if (!updated) {
-        throw httpError(409, `${line.name} is no longer available in the quantity you selected. Please update your cart.`);
+        if (line.variant) await variantService.giveBack(line.variant, line.quantity);
+        if (line.deal) await Product.updateOne({ _id: line.product }, { $inc: { dealSold: -line.quantity } });
+        throw gone();
       }
       reserved.push(line);
       lowStockAlert(updated, line.quantity).catch(() => {});
@@ -189,10 +214,11 @@ async function createOrder({ userId, lines: rawLines, delivery, paymentMethod, v
 
   const products = await Product.find({ _id: { $in: lines.map((l) => l.productId) } });
   const byId = new Map(products.map((p) => [p._id.toString(), p]));
+  const variantsOf = await variantService.byProduct(products.map((p) => p._id));
 
   const orderItems = [];
   let subtotal = 0;
-  for (const { productId, quantity } of lines) {
+  for (const { productId, variantId, quantity } of lines) {
     const product = byId.get(productId);
     if (!product || product.status !== "ACTIVE") {
       throw httpError(400, `${product?.name || "A product in your order"} is no longer available.`);
@@ -200,19 +226,32 @@ async function createOrder({ userId, lines: rawLines, delivery, paymentMethod, v
     if (product.vendor && product.vendor.toString() === String(userId)) {
       throw httpError(403, "You cannot buy your own product.");
     }
-    if (product.stockQuantity < quantity) {
-      throw httpError(400, `Only ${product.stockQuantity} of ${product.name} left in stock.`);
+    // A product with sizes/colours is bought as one of them.
+    const options = variantsOf.get(productId) || [];
+    const variant = variantId ? options.find((v) => String(v._id) === variantId) : null;
+    if (options.length && !variant) {
+      throw httpError(400, variantId ? `That option of ${product.name} is no longer sold. Choose another.` : `Choose a size or colour for ${product.name}.`);
     }
-    const price = effectivePrice(product);
+    if (!options.length && variantId) throw httpError(400, `${product.name} has no sizes or colours to choose from. Remove it and add it again.`);
+    const inStock = variant ? Number(variant.stockQuantity) : product.stockQuantity;
+    if (inStock < quantity) {
+      throw httpError(400, `Only ${inStock} of ${product.name}${variant ? ` (${variant.label})` : ""} left in stock.`);
+    }
+    const price = variantService.priceOf(product, variant);
+    // A deal price (only for the product's own price, not a variant's own).
+    const deal = (!variant || variant.price === null || variant.price === undefined) && dealOn(product);
     subtotal += price * quantity;
     orderItems.push({
       product: product._id,
       vendor: product.vendor || null,
       category: product.category || undefined,
       name: product.name,
+      variant: variant?._id || null,
+      variantLabel: variant?.label || null,
+      deal: Boolean(deal),
       price,
       quantity,
-      image: product.media?.mainImage || "",
+      image: variant?.image || product.media?.mainImage || "",
     });
   }
 
@@ -264,7 +303,7 @@ async function createOrder({ userId, lines: rawLines, delivery, paymentMethod, v
     throw httpError(400, `Guest orders are limited to RWF ${GUEST_MAX_ORDER_AMOUNT.toLocaleString("en-US")}. Create an account with a password to place a larger order.`);
   }
 
-  const stockLines = orderItems.map((i) => ({ product: i.product, quantity: i.quantity, name: i.name }));
+  const stockLines = orderItems.map((i) => ({ product: i.product, variant: i.variant, variantLabel: i.variantLabel, deal: i.deal, quantity: i.quantity, name: i.name }));
   await reserveStock(stockLines);
   if (promotionId) {
     try { await promotionService.redeem(promotionId); } catch (error) { await restoreStock(stockLines); throw error; }

@@ -28,6 +28,13 @@ module.exports = (sequelize) => {
     stockQuantity: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, defaultValue: 0 },
     lowStockThreshold: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 5 },
     status: { type: DataTypes.ENUM("DRAFT", "PENDING_APPROVAL", "ACTIVE", "INACTIVE", "OUT_OF_STOCK"), allowNull: false, defaultValue: "DRAFT" },
+    // Flash deal: dealPrice between dealStartsAt and dealEndsAt, for up to
+    // dealQuantity units (null: no limit); dealSold counts units sold at it.
+    dealPrice: { type: DataTypes.DECIMAL(14, 2), allowNull: true },
+    dealStartsAt: { type: DataTypes.DATE, allowNull: true },
+    dealEndsAt: { type: DataTypes.DATE, allowNull: true },
+    dealQuantity: { type: DataTypes.INTEGER, allowNull: true },
+    dealSold: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
     // Chosen for the seller's affiliate program (used when the scope is SELECTED).
     affiliateEnabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     // `media` sub-document
@@ -105,6 +112,9 @@ module.exports = (sequelize) => {
     return {
       ...rest,
       price: num(rest.price), costPrice: num(rest.costPrice), discountPrice: num(rest.discountPrice), discountValue: num(rest.discountValue),
+      dealPrice: num(rest.dealPrice),
+      // The flash deal as buyers see it right now (null when none is on or coming).
+      deal: require("../../utils/pricing.util").dealView(rest),
       vendor: vendor ? this.vendor.toApi() : vendorId,
       store: store ? this.store.toApi() : storeId,
       supplier: supplierId,

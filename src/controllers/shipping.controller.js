@@ -204,7 +204,9 @@ exports.getLocations = (req, res) => res.status(200).json({ locations: RWANDA_LO
 // @access  Private (buyer)
 exports.quote = async (req, res) => {
   try {
-    const { address = {}, method = "STANDARD", items } = req.body;
+    const { address = {}, method = "STANDARD" } = req.body;
+    // Lines may name a size/colour ("productId~variantId"): delivery depends on the product.
+    const items = Array.isArray(req.body.items) ? req.body.items.map((i) => ({ ...i, productId: String(i.productId || "").split("~")[0] })) : req.body.items;
     let lines = [];
     if (Array.isArray(items) && items.length) {
       const ids = items.map((i) => i.productId).filter((id) => orm.isValidObjectId(id));
@@ -212,7 +214,7 @@ exports.quote = async (req, res) => {
       const byId = Object.fromEntries(products.map((p) => [String(p._id), p]));
       lines = items
         .filter((i) => byId[i.productId])
-        .map((i) => ({ product: byId[i.productId], quantity: Number(i.qty || i.quantity) || 1, price: byId[i.productId].discountPrice || byId[i.productId].price }));
+        .map((i) => ({ product: byId[i.productId], quantity: Number(i.qty || i.quantity) || 1, price: require("../utils/pricing.util").effectivePrice(byId[i.productId]) }));
     } else {
       if (!req.user) return res.status(400).json({ message: "Choose the products to deliver." });
       const cart = await Cart.findOne({ user: req.user.id }).populate("items.product");

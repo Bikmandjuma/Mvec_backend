@@ -39,6 +39,16 @@ Tests need MySQL. `tests/helpers/mysql.js` creates and migrates the `_test` data
 - Until then, a product meant to go live is stored as `PENDING_APPROVAL`, which no buyer-facing query shows (they all read `ACTIVE`/`OUT_OF_STOCK`). Create, update and supplier publish apply `statusFor()`. Stock changes never move a waiting product to `OUT_OF_STOCK`.
 - The admin's verify decision calls `followDecision()`. VERIFIED puts waiting products live, and REJECTED takes live ones back to waiting. Drafts and hidden products stay as the seller left them.
 
+## Marketplace features
+
+- **Variants** (`services/variant.service.js`, `product_variants`): a product's sizes and colours, each with its own stock and an optional own price. The product's `stockQuantity` is their sum. Cart and checkout lines name one as `"productId~variantId"`, and `parseKey()` reads that everywhere a product id is taken. Checkout takes the variant's stock first, atomically. Cancelling or expiry gives it back.
+- **Flash deals** (`dealPrice/dealStartsAt/dealEndsAt/dealQuantity/dealSold` on products): `utils/pricing.util.js` `effectivePrice()` applies a live deal, so every price follows it. Load `PRICE_FIELDS` wherever you price. Deal units are counted at checkout (`order_items.deal`) and given back on cancel. `GET /api/products/deals`. Products sent to clients carry `deal` (`dealView`).
+- **Returns** (`services/returns.service.js`, `/api/returns`): within `returnWindowDays` (admin setting, default 7) of that seller's handover. REQUESTED → APPROVED (with instructions) → RECEIVED → REFUNDED, or REJECTED → the buyer escalates → Ikiguzi decides. A return unanswered by `respondBy` escalates on its own (slaWorker). The seller can also refund without taking the items back. Escrow is already released at delivery, so the refund posts reverse ledger entries: the seller's net share leaves their balance (which may go below zero), Ikiguzi's commission and the payment fee leave Ikiguzi's revenue, and the affiliate's share is reversed. The delivery fee is never refunded.
+- **Alerts** (`services/alerts.service.js`): back in stock and price drop, checked every minute. Saving to the wishlist watches the price.
+- **Seller badges** (`services/badge.service.js`): Verified, Top rated, Ships fast and New seller, computed from data and cached for 10 minutes. They appear on product pages and store pages.
+- **Seller documents**: `POST /api/uploads/documents` saves an ID or registration paper to `private-uploads/`. Only the owner and admins can read it, through `GET /api/uploads/private/:name`. It's stored in `vendors.documents` or `suppliers.documents` (`utils/sellerDocuments.js`).
+- **Push** (`services/push.service.js`): FCM HTTP v1 with `FIREBASE_PROJECT_ID/CLIENT_EMAIL/PRIVATE_KEY`. Every `notification.service.notify()` is also pushed to the user's devices (`/api/notifications/devices`). It's off without the keys.
+
 ## Money
 
 - The buyer pays Ikiguzi, and the money sits in escrow. `services/payment.service.js` locks one settlement per order item, plus one commission-free settlement per parcel's delivery fee.

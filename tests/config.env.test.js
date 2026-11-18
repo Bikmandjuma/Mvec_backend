@@ -11,6 +11,9 @@ const safe = {
   MOMO_BASE_URL: "https://momo.example",
   EMAIL_USER: "mail@ikiguzi.com",
   EMAIL_PASS: "pass",
+  FIREBASE_PROJECT_ID: "ikiguzi",
+  FIREBASE_CLIENT_EMAIL: "push@ikiguzi.iam.gserviceaccount.com",
+  FIREBASE_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----x-----END PRIVATE KEY-----",
 };
 
 describe("development or live", () => {

@@ -19,6 +19,8 @@ const DEFAULTS = {
   // Days the seller has to respond to a problem report (and the buyer to an
   // offer) before Ikiguzi steps in to decide.
   disputeResponseDays: 3,
+  // Days after delivery a buyer can ask to return items. 0 turns returns off.
+  returnWindowDays: 7,
 };
 const LIMITS = {
   autoReleaseDays: [0, 30],
@@ -26,6 +28,7 @@ const LIMITS = {
   buyerPremiumPrice: [500, 100000],
   freeProductLimit: [1, 10000],
   disputeResponseDays: [1, 14],
+  returnWindowDays: [0, 30],
 };
 
 let cache = { value: null, at: 0 };

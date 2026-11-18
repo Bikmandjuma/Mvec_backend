@@ -29,6 +29,8 @@ module.exports = (sequelize) => {
     affiliateUpdatedAt: { type: DataTypes.DATE, allowNull: true },
     // Why Ikiguzi rejected the profile (shown to the seller so they can fix it).
     verificationNote: { type: DataTypes.STRING(500), allowNull: true, defaultValue: "" },
+    // Private ID / business papers for Ikiguzi's review: [{ kind, url, name, uploadedAt }]
+    documents: { type: DataTypes.JSON, allowNull: true },
   }, {
     tableName: "vendors",
     timestamps: true,
