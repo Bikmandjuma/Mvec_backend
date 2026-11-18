@@ -193,9 +193,12 @@ exports.sendPaymentReminders = sendPaymentReminders;
 
 exports.initBackgroundWorkers = () => {
   cron.schedule("7 * * * *", renewSubscriptions);
-  // Rider offers nobody answered go to the next nearest riders.
+  // Rider offers nobody answered go to the next nearest riders; parcels not
+  // collected in time are flagged, then given to another rider.
   cron.schedule("* * * * *", () => {
-    require("../services/delivery.service").expireStaleOffers().catch((error) => console.error("[Delivery dispatch] failed:", error.message));
+    const deliveries = require("../services/delivery.service");
+    deliveries.expireStaleOffers().catch((error) => console.error("[Delivery dispatch] failed:", error.message));
+    deliveries.checkLatePickups().catch((error) => console.error("[Late pickups] failed:", error.message));
   });
   cron.schedule("17 * * * *", endExpiredCampaigns);
   // Problem reports: Ikiguzi steps in when the seller misses the response

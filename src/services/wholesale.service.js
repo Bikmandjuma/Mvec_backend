@@ -32,7 +32,15 @@ const AUTO_RELEASE_DAYS = 7;
 const httpError = (status, message) => Object.assign(new Error(message), { statusCode: status });
 const rwf = (n) => `${Math.round(Number(n) || 0).toLocaleString("en-RW")} RWF`;
 const notifications = () => require("./notification.service");
-const notify = (to, payload) => notifications().notify(to, payload).catch(() => {});
+
+// Notifications should never cause an otherwise successful order operation to fail.
+const notify = async (to, payload) => {
+  try {
+    await notifications().notify(to, payload);
+  } catch (error) {
+    console.error("Wholesale notification failed:", error.message);
+  }
+};
 
 async function inTransaction(work) {
   const session = await orm.startSession();
@@ -58,6 +66,7 @@ class WholesaleService {
     if (!supplier) throw httpError(400, "Supplier is not active and verified.");
     if (String(supplier.user) === String(vendorId)) throw httpError(400, "You cannot order from yourself.");
     if (!Array.isArray(items) || items.length === 0) throw httpError(400, "At least one wholesale product is required.");
+
     // The store that receives the goods; none chosen = the primary store.
     let store = null;
     if (storeId) {
@@ -109,17 +118,26 @@ class WholesaleService {
       orderNumber: `WSO-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`,
       vendor: vendorId,
       supplier: supplier.user,
-      items: lines.map(({ product, quantity, unitPrice }) => ({ product: product._id, productName: product.name, unit: product.unit || "piece", unitPrice, quantity, moq: product.moq })),
-      totalAmount: lines.reduce((sum, l) => sum + l.unitPrice * l.quantity, 0),
+      items: lines.map(({ product, quantity, unitPrice }) => ({
+        product: product._id,
+        productName: product.name,
+        unit: product.unit || "piece",
+        unitPrice,
+        quantity,
+        moq: product.moq,
+      })),
+      totalAmount: lines.reduce((sum, line) => sum + line.unitPrice * line.quantity, 0),
       category: lines[0].product.category || "",
       stockReserved: true,
       store: store?._id || null,
       status: "PENDING_PAYMENT",
       deliveryOtp: require("crypto").randomInt(100000, 1000000).toString(),
     });
-    notify(supplier.user, {
-      type: "ORDER", title: `New wholesale order ${order.orderNumber}`,
-      message: `${rwf(order.totalAmount)}. The stock is reserved; you will be told when the vendor pays.`, link: "/supplier/orders",
+    await notify(supplier.user, {
+      type: "ORDER",
+      title: `New wholesale order ${order.orderNumber}`,
+      message: `${rwf(order.totalAmount)}. The stock is reserved; you will be told when the vendor pays.`,
+      link: "/supplier/orders",
     });
     return order;
   }
@@ -132,7 +150,14 @@ class WholesaleService {
       supplier: quote.supplier,
       quote: quote._id,
       category: request.category,
-      items: (quote.lines || []).map((l) => ({ product: null, productName: l.product, unit: l.unit || "piece", unitPrice: Math.round(Number(l.unitPrice)), quantity: Number(l.units), moq: 1 })),
+      items: (quote.lines || []).map((line) => ({
+        product: null,
+        productName: line.product,
+        unit: line.unit || "piece",
+        unitPrice: Math.round(Number(line.unitPrice)),
+        quantity: Number(line.units),
+        moq: 1,
+      })),
       totalAmount: Math.round(Number(quote.totalAmount)),
       stockReserved: false,
       status: "PENDING_PAYMENT",
@@ -157,9 +182,11 @@ class WholesaleService {
     order.status = "SHIPPED";
     order.shippedAt = new Date();
     await order.save();
-    notify(order.vendor, {
-      type: "DELIVERY", title: `${order.orderNumber} is on its way`,
-      message: `Confirm receipt when the goods arrive, or report a problem. If you do neither, the supplier is paid automatically after ${AUTO_RELEASE_DAYS} days.`, link: "/vendor/purchases",
+    await notify(order.vendor, {
+      type: "DELIVERY",
+      title: `${order.orderNumber} is on its way`,
+      message: `Confirm receipt when the goods arrive, or report a problem. If you do neither, the supplier is paid automatically after ${AUTO_RELEASE_DAYS} days.`,
+      link: "/vendor/purchases",
     });
     return order;
   }
@@ -168,12 +195,16 @@ class WholesaleService {
   async splitForOrder(order, gatewayFee = 0) {
     const commission = require("./commission.service");
     const Category = require("../models/Category");
-    const productIds = (order.items || []).map((i) => i.product).filter(Boolean);
-    const products = productIds.length ? await WholesaleProduct.find({ _id: { $in: productIds } }).select("category").lean() : [];
-    const catName = new Map(products.map((p) => [String(p._id), p.category]));
-    const names = [...new Set([...(order.items || []).map((i) => catName.get(String(i.product)) || order.category).filter(Boolean)])];
-    const cats = names.length ? await Category.find({ name: { $in: names } }).select("name").lean() : [];
-    const catId = new Map(cats.map((c) => [c.name.toLowerCase(), c._id]));
+    const productIds = (order.items || []).map((item) => item.product).filter(Boolean);
+    const products = productIds.length
+      ? await WholesaleProduct.find({ _id: { $in: productIds } }).select("category").lean()
+      : [];
+    const catName = new Map(products.map((product) => [String(product._id), product.category]));
+    const names = [...new Set((order.items || [])
+      .map((item) => catName.get(String(item.product)) || order.category)
+      .filter(Boolean))];
+    const categories = names.length ? await Category.find({ name: { $in: names } }).select("name").lean() : [];
+    const catId = new Map(categories.map((category) => [category.name.toLowerCase(), category._id]));
     const gross = Number(order.totalAmount);
     const total = { totalPlatformFee: 0, developerShare: 0, adminShare: 0, vendorNet: 0, gatewayFee: 0 };
     let payer = "MVEC";
@@ -181,15 +212,25 @@ class WholesaleService {
       const lineGross = Number(item.unitPrice) * Number(item.quantity);
       const name = catName.get(String(item.product)) || order.category || "";
       const split = await commission.splitFor({
-        scope: "WHOLESALE", vendorId: order.supplier, categoryId: catId.get(name.toLowerCase()) || null,
-        grossTotal: lineGross, hasAffiliate: false, gatewayFee: gross ? (Number(gatewayFee) * lineGross) / gross : 0,
+        scope: "WHOLESALE",
+        vendorId: order.supplier,
+        categoryId: catId.get(name.toLowerCase()) || null,
+        grossTotal: lineGross,
+        hasAffiliate: false,
+        gatewayFee: gross ? (Number(gatewayFee) * lineGross) / gross : 0,
       });
-      for (const k of Object.keys(total)) total[k] += Number(split[k]) || 0;
+      for (const key of Object.keys(total)) total[key] += Number(split[key]) || 0;
       payer = split.gatewayFeePayer;
     }
-    const round = (n) => Math.round(n * 100) / 100;
-    Object.keys(total).forEach((k) => { total[k] = round(total[k]); });
-    return { ...total, affiliateShare: 0, vendorAffiliateShare: 0, gatewayFeePayer: payer, commissionRate: gross ? round((total.totalPlatformFee / gross) * 100) : 0 };
+    const round = (number) => Math.round(number * 100) / 100;
+    Object.keys(total).forEach((key) => { total[key] = round(total[key]); });
+    return {
+      ...total,
+      affiliateShare: 0,
+      vendorAffiliateShare: 0,
+      gatewayFeePayer: payer,
+      commissionRate: gross ? round((total.totalPlatformFee / gross) * 100) : 0,
+    };
   }
 
   /** Kept for the admin "paid outside Ikiguzi" action. */
@@ -205,8 +246,12 @@ class WholesaleService {
     const split = await this.splitForOrder(order, gatewayFee);
     await inTransaction(async (session) => {
       await financial.lockPaymentInEscrow({
-        orderId: order._id, vendorId: order.supplier, grossAmount: Number(order.totalAmount),
-        commissionAmount: split.totalPlatformFee, split, session,
+        orderId: order._id,
+        vendorId: order.supplier,
+        grossAmount: Number(order.totalAmount),
+        commissionAmount: split.totalPlatformFee,
+        split,
+        session,
       });
       order.status = "ESCROW_HELD";
       order.paidAt = new Date();
@@ -233,12 +278,19 @@ class WholesaleService {
       throw new Error(`Wholesale payment ${payment.transactionReference} is ${payment.amount} RWF but the order is ${order.totalAmount} RWF.`);
     }
     await this.lockInEscrow(order, Number(payment.gatewayFee) || 0);
-    notify(order.supplier, {
-      type: "ORDER", title: `Wholesale order ${order.orderNumber} is paid`,
+    await notify(order.supplier, {
+      type: "ORDER",
+      title: `Wholesale order ${order.orderNumber} is paid`,
       message: `${rwf(order.totalAmount)} is held by Ikiguzi. Ship within ${SHIP_WITHIN_DAYS} days; you are paid when the vendor confirms receipt.`,
-      link: "/supplier/orders", sms: `Ikiguzi: wholesale order ${order.orderNumber} is paid. Please ship it.`,
+      link: "/supplier/orders",
+      sms: `Ikiguzi: wholesale order ${order.orderNumber} is paid. Please ship it.`,
     });
-    notify(order.vendor, { type: "PAYMENT", title: `Payment received for ${order.orderNumber}`, message: "Ikiguzi holds the money until you confirm you received the goods.", link: "/vendor/purchases" });
+    await notify(order.vendor, {
+      type: "PAYMENT",
+      title: `Payment received for ${order.orderNumber}`,
+      message: "Ikiguzi holds the money until you confirm you received the goods.",
+      link: "/vendor/purchases",
+    });
     return order;
   }
 
@@ -253,13 +305,22 @@ class WholesaleService {
         net = Number(settlement.netAmount);
       } else {
         // Orders paid before escrow settlements existed: credit the full amount.
-        await VendorWallet.findOneAndUpdate({ vendor: order.supplier }, { $inc: { availableBalance: net, totalEarned: net } }, { upsert: true, session });
+        await VendorWallet.findOneAndUpdate(
+          { vendor: order.supplier },
+          { $inc: { availableBalance: net, totalEarned: net } },
+          { upsert: true, session },
+        );
       }
       order.status = "CONFIRMED_RELEASED";
       order.confirmedAt = new Date();
       await order.save({ session });
     });
-    notify(order.supplier, { type: "PAYOUT", title: `You were paid for ${order.orderNumber}`, message: `${how}. ${rwf(net)} is now in your balance.`, link: "/supplier/payments" });
+    await notify(order.supplier, {
+      type: "PAYOUT",
+      title: `You were paid for ${order.orderNumber}`,
+      message: `${how}. ${rwf(net)} is now in your balance.`,
+      link: "/supplier/payments",
+    });
     // The money is settled either way; a stocking failure is for Ikiguzi to fix
     // (POST /wholesale/admin/orders/:id/restock), not a reason to undo it.
     let stocked = null;
@@ -268,7 +329,11 @@ class WholesaleService {
       if (!stocked.skipped) order.stockedAt = new Date();
     } catch (error) {
       console.error(`Stocking ${order.orderNumber} failed:`, error.message);
-      notifications().adminAlert({ title: `Stock ${order.orderNumber} by hand`, message: `The order completed but its goods could not be added to the vendor's store: ${error.message}`, link: "/admin/suppliers?tab=wholesale" }).catch(() => {});
+      notifications().adminAlert({
+        title: `Stock ${order.orderNumber} by hand`,
+        message: `The order completed but its goods could not be added to the vendor's store: ${error.message}`,
+        link: "/admin/suppliers?tab=wholesale",
+      }).catch(() => {});
     }
     return { order, net, stocked };
   }
@@ -277,7 +342,9 @@ class WholesaleService {
   async confirmReceiptAndRelease(orderId, vendorUserId) {
     const order = await WholesaleOrder.findOne({ _id: orderId, ...(vendorUserId ? { vendor: vendorUserId } : {}) });
     if (!order) throw httpError(404, "Wholesale order not found.");
-    if (!["ESCROW_HELD", "SHIPPED", "DELIVERED"].includes(order.status)) throw httpError(409, `Cannot confirm an order that is ${order.status.toLowerCase().replaceAll("_", " ")}.`);
+    if (!["ESCROW_HELD", "SHIPPED", "DELIVERED"].includes(order.status)) {
+      throw httpError(409, `Cannot confirm an order that is ${order.status.toLowerCase().replaceAll("_", " ")}.`);
+    }
     const { net, stocked } = await this.releaseToSupplier(order);
     return { order, supplierReceived: net, stocked: stocked?.stocked || [] };
   }
@@ -294,14 +361,24 @@ class WholesaleService {
   /** Give the vendor's payment back the way they paid. */
   async refundPayment(order, payment, why) {
     const disbursement = require("./disbursement.service");
-    const pay = payment || await Payment.findOne({ purpose: "WHOLESALE", status: "SUCCESS", transactionReference: { $regex: `^WHS-${order._id}-` } });
+    const pay = payment || await Payment.findOne({
+      purpose: "WHOLESALE",
+      status: "SUCCESS",
+      transactionReference: { $regex: `^WHS-${order._id}-` },
+    });
     if (!pay) {
-      notifications().adminAlert({ title: `Refund ${order.orderNumber} by hand`, message: `${why} No online payment was found (it may have been paid outside Ikiguzi). Refund ${rwf(order.totalAmount)} to the vendor.`, link: "/admin/suppliers?tab=wholesale" }).catch(() => {});
+      notifications().adminAlert({
+        title: `Refund ${order.orderNumber} by hand`,
+        message: `${why} No online payment was found (it may have been paid outside Ikiguzi). Refund ${rwf(order.totalAmount)} to the vendor.`,
+        link: "/admin/suppliers?tab=wholesale",
+      }).catch(() => {});
       return null;
     }
     const transfer = await disbursement.refundPayment({
       order: { _id: order._id, user: order.vendor, orderNumber: order.orderNumber, recipient: { phone: pay.phoneNumber } },
-      payment: pay, amount: Number(pay.amount), idempotencyKey: `WHS-REFUND-${order._id}`,
+      payment: pay,
+      amount: Number(pay.amount),
+      idempotencyKey: `WHS-REFUND-${order._id}`,
     });
     await Payment.updateOne({ _id: pay._id }, { $set: { status: "REFUNDED" } });
     return transfer;
@@ -316,8 +393,14 @@ class WholesaleService {
     if (!order) throw httpError(404, "Wholesale order not found.");
     if (actor.role === "vendor" && String(order.vendor) !== String(actor.userId)) throw httpError(404, "Wholesale order not found.");
     if (actor.role === "supplier" && String(order.supplier) !== String(actor.userId)) throw httpError(404, "Wholesale order not found.");
-    const cancellable = actor.role === "admin" ? ["PENDING_PAYMENT", "ESCROW_HELD", "DISPUTED", "SHIPPED"] : ["PENDING_PAYMENT", "ESCROW_HELD"];
-    if (!cancellable.includes(order.status)) throw httpError(409, order.status === "SHIPPED" ? "The goods were already shipped. Report a problem instead." : "This order can no longer be cancelled.");
+    const cancellable = actor.role === "admin"
+      ? ["PENDING_PAYMENT", "ESCROW_HELD", "DISPUTED", "SHIPPED"]
+      : ["PENDING_PAYMENT", "ESCROW_HELD"];
+    if (!cancellable.includes(order.status)) {
+      throw httpError(409, order.status === "SHIPPED"
+        ? "The goods were already shipped. Report a problem instead."
+        : "This order can no longer be cancelled.");
+    }
     const text = String(reason || "").trim().slice(0, 300);
     if (actor.role === "supplier" && text.length < 5) throw httpError(400, "Tell the vendor why you are cancelling.");
 
@@ -333,10 +416,19 @@ class WholesaleService {
     await order.save();
     if (wasPaid) await this.refundPayment(order, null, `Cancelled by ${actor.role}.`);
 
-    const who = { vendor: "The vendor", supplier: "The supplier", admin: "Ikiguzi", system: "Ikiguzi (automatically)" }[actor.role];
-    const msg = `${who} cancelled ${order.orderNumber}${text ? `: ${text}` : "."}${wasPaid ? ` ${rwf(order.totalAmount)} is being refunded to the vendor.` : ""}`;
-    if (actor.role !== "vendor") notify(order.vendor, { type: "ORDER", title: `${order.orderNumber} was cancelled`, message: msg, link: "/vendor/purchases" });
-    if (actor.role !== "supplier") notify(order.supplier, { type: "ORDER", title: `${order.orderNumber} was cancelled`, message: msg, link: "/supplier/orders" });
+    const who = {
+      vendor: "The vendor",
+      supplier: "The supplier",
+      admin: "Ikiguzi",
+      system: "Ikiguzi (automatically)",
+    }[actor.role];
+    const message = `${who} cancelled ${order.orderNumber}${text ? `: ${text}` : "."}${wasPaid ? ` ${rwf(order.totalAmount)} is being refunded to the vendor.` : ""}`;
+    if (actor.role !== "vendor") {
+      await notify(order.vendor, { type: "ORDER", title: `${order.orderNumber} was cancelled`, message, link: "/vendor/purchases" });
+    }
+    if (actor.role !== "supplier") {
+      await notify(order.supplier, { type: "ORDER", title: `${order.orderNumber} was cancelled`, message, link: "/supplier/orders" });
+    }
     return order;
   }
 
@@ -344,14 +436,25 @@ class WholesaleService {
   async openDispute(orderId, vendorUserId, reason) {
     const order = await WholesaleOrder.findOne({ _id: orderId, vendor: vendorUserId });
     if (!order) throw httpError(404, "Wholesale order not found.");
-    if (!["ESCROW_HELD", "SHIPPED", "DELIVERED"].includes(order.status)) throw httpError(409, "Only paid orders that have not been completed can be disputed.");
+    if (!["ESCROW_HELD", "SHIPPED", "DELIVERED"].includes(order.status)) {
+      throw httpError(409, "Only paid orders that have not been completed can be disputed.");
+    }
     const text = String(reason || "").trim();
     if (text.length < 10) throw httpError(400, "Describe the problem (at least 10 characters).");
     order.status = "DISPUTED";
     order.disputeReason = text.slice(0, 2000);
     await order.save();
-    notify(order.supplier, { type: "ORDER", title: `Problem reported on ${order.orderNumber}`, message: `${text.slice(0, 160)} Ikiguzi will review it; the payment stays on hold.`, link: "/supplier/orders" });
-    notifications().adminAlert({ title: `Wholesale dispute: ${order.orderNumber}`, message: text.slice(0, 200), link: "/admin/suppliers?tab=wholesale" }).catch(() => {});
+    await notify(order.supplier, {
+      type: "ORDER",
+      title: `Problem reported on ${order.orderNumber}`,
+      message: `${text.slice(0, 160)} Ikiguzi will review it; the payment stays on hold.`,
+      link: "/supplier/orders",
+    });
+    notifications().adminAlert({
+      title: `Wholesale dispute: ${order.orderNumber}`,
+      message: text.slice(0, 200),
+      link: "/admin/suppliers?tab=wholesale",
+    }).catch(() => {});
     return order;
   }
 
@@ -362,7 +465,12 @@ class WholesaleService {
     if (order.status !== "DISPUTED") throw httpError(409, "This order is not disputed.");
     if (decision === "RELEASE") {
       await this.releaseToSupplier(order, `Ikiguzi decided the dispute for the supplier${note ? `: ${note}` : ""}`);
-      notify(order.vendor, { type: "ORDER", title: `Dispute on ${order.orderNumber} decided`, message: `Ikiguzi released the payment to the supplier.${note ? ` ${note}` : ""}`, link: "/vendor/purchases" });
+      await notify(order.vendor, {
+        type: "ORDER",
+        title: `Dispute on ${order.orderNumber} decided`,
+        message: `Ikiguzi released the payment to the supplier.${note ? ` ${note}` : ""}`,
+        link: "/vendor/purchases",
+      });
       return order;
     }
     if (decision === "REFUND") return this.cancelOrder(orderId, { role: "admin" }, note || "Dispute decided for the vendor.");
@@ -377,17 +485,49 @@ class WholesaleService {
    */
   async runAutomations(now = new Date()) {
     const done = { expired: 0, cancelled: 0, released: 0 };
-    const unpaid = await WholesaleOrder.find({ status: "PENDING_PAYMENT", createdAt: { $lte: new Date(now - UNPAID_EXPIRY_HOURS * HOURS) } }).limit(100);
-    for (const o of unpaid) { try { await this.cancelOrder(o._id, { role: "system" }, `Not paid within ${UNPAID_EXPIRY_HOURS} hours.`); done.expired += 1; } catch (e) { console.error("Wholesale expiry failed:", e.message); } }
-    const unshipped = await WholesaleOrder.find({ status: "ESCROW_HELD", paidAt: { $lte: new Date(now - SHIP_WITHIN_DAYS * 24 * HOURS) } }).limit(100);
-    for (const o of unshipped) { try { await this.cancelOrder(o._id, { role: "admin" }, `Not shipped within ${SHIP_WITHIN_DAYS} days.`); done.cancelled += 1; } catch (e) { console.error("Wholesale ship deadline failed:", e.message); } }
-    const shipped = await WholesaleOrder.find({ status: "SHIPPED", shippedAt: { $lte: new Date(now - AUTO_RELEASE_DAYS * 24 * HOURS) } }).limit(100);
-    for (const o of shipped) {
+    const unpaid = await WholesaleOrder.find({
+      status: "PENDING_PAYMENT",
+      createdAt: { $lte: new Date(now - UNPAID_EXPIRY_HOURS * HOURS) },
+    }).limit(100);
+    for (const order of unpaid) {
       try {
-        await this.releaseToSupplier(o, `${AUTO_RELEASE_DAYS} days passed with no problem reported`);
-        notify(o.vendor, { type: "ORDER", title: `${o.orderNumber} completed`, message: `No problem was reported within ${AUTO_RELEASE_DAYS} days, so the supplier was paid.`, link: "/vendor/purchases" });
+        await this.cancelOrder(order._id, { role: "system" }, `Not paid within ${UNPAID_EXPIRY_HOURS} hours.`);
+        done.expired += 1;
+      } catch (error) {
+        console.error("Wholesale expiry failed:", error.message);
+      }
+    }
+
+    const unshipped = await WholesaleOrder.find({
+      status: "ESCROW_HELD",
+      paidAt: { $lte: new Date(now - SHIP_WITHIN_DAYS * 24 * HOURS) },
+    }).limit(100);
+    for (const order of unshipped) {
+      try {
+        await this.cancelOrder(order._id, { role: "admin" }, `Not shipped within ${SHIP_WITHIN_DAYS} days.`);
+        done.cancelled += 1;
+      } catch (error) {
+        console.error("Wholesale ship deadline failed:", error.message);
+      }
+    }
+
+    const shipped = await WholesaleOrder.find({
+      status: "SHIPPED",
+      shippedAt: { $lte: new Date(now - AUTO_RELEASE_DAYS * 24 * HOURS) },
+    }).limit(100);
+    for (const order of shipped) {
+      try {
+        await this.releaseToSupplier(order, `${AUTO_RELEASE_DAYS} days passed with no problem reported`);
+        await notify(order.vendor, {
+          type: "ORDER",
+          title: `${order.orderNumber} completed`,
+          message: `No problem was reported within ${AUTO_RELEASE_DAYS} days, so the supplier was paid.`,
+          link: "/vendor/purchases",
+        });
         done.released += 1;
-      } catch (e) { console.error("Wholesale auto-release failed:", e.message); }
+      } catch (error) {
+        console.error("Wholesale auto-release failed:", error.message);
+      }
     }
     return done;
   }

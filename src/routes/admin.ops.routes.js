@@ -17,6 +17,8 @@ router.get("/audit-logs", ops.getAuditLogs);
 const rider = require("../controllers/rider.controller");
 router.get("/riders", rider.adminList);
 router.patch("/riders/:id", rider.adminReview);
+router.get("/deliveries", rider.adminDeliveries);
+router.post("/deliveries/:id/release", rider.adminRelease);
 
 // Operational settings: automatic release days, subscription program & prices.
 const settings = require("../services/platformSettings.service");

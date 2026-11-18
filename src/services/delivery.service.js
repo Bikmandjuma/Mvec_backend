@@ -24,6 +24,7 @@ const socketService = require("./socket.service");
 const httpError = (statusCode, message, code) => Object.assign(new Error(message), { statusCode, code });
 const idOf = (v) => String(v?._id || v?.id || v || "");
 const money = (n) => `${new Intl.NumberFormat("en-RW").format(Math.round(Number(n) || 0))} RWF`;
+const kigaliTime = (d) => new Date(d).toLocaleTimeString("en-GB", { timeZone: "Africa/Kigali", hour: "2-digit", minute: "2-digit" });
 
 const addressLine = (a = {}) => [a.street, a.sector, a.district || a.city].filter(Boolean).join(", ");
 const withHistory = (delivery, status, note) => [...(delivery.history || []), { status, at: new Date(), note: note || cfg.LABELS[status] }];
@@ -202,14 +203,42 @@ async function register(user, body = {}) {
   return rider;
 }
 
+/** A reading from the phone's GPS, or null when it's missing or out of range. */
+const reading = (value, min, max) => {
+  const n = Number(value);
+  return value === null || value === undefined || value === "" || !Number.isFinite(n) || n < min || n > max ? null : n;
+};
+
 async function updateLocation(user, body = {}) {
   const rider = await riderOf(user);
   const point = cfg.readPin(body, { required: true, label: "your location" });
   rider.lat = point.lat;
   rider.lng = point.lng;
+  rider.heading = reading(body.heading, 0, 360);
+  rider.speedMps = reading(body.speedMps ?? body.speed, 0, 70);
+  rider.accuracyM = reading(body.accuracyM ?? body.accuracy, 0, 10000);
   rider.locationAt = new Date();
   await rider.save();
   return { location: { lat: point.lat, lng: point.lng, at: rider.locationAt } };
+}
+
+/**
+ * Takes a parcel back from the rider who accepted it (before pickup) and
+ * offers it to other riders; never back to that rider.
+ */
+async function handBack(delivery, note) {
+  const riderId = idOf(delivery.rider);
+  delivery.rider = null;
+  delivery.status = "READY_FOR_PICKUP";
+  delivery.assignedAt = null;
+  delivery.pickupWarnedAt = null;
+  delivery.lateAt = null;
+  delivery.offerExpiresAt = null;
+  delivery.rejectedBy = [...new Set([...(delivery.rejectedBy || []).map(String), riderId])];
+  delivery.history = withHistory(delivery, "READY_FOR_PICKUP", note);
+  await delivery.save();
+  await dispatch(delivery._id);
+  return riderId;
 }
 
 /** Going offline hands parcels not yet picked up back to the pool. */
@@ -221,13 +250,7 @@ async function setAvailability(user, body = {}) {
   if (!rider.isOnline) {
     const assigned = await Delivery.find({ rider: idOf(user), status: "ASSIGNED" });
     for (const delivery of assigned) {
-      delivery.rider = null;
-      delivery.status = "READY_FOR_PICKUP";
-      delivery.assignedAt = null;
-      delivery.rejectedBy = [...(delivery.rejectedBy || []), idOf(user)];
-      delivery.history = withHistory(delivery, "READY_FOR_PICKUP", "The rider went offline; offered to others");
-      await delivery.save();
-      await dispatch(delivery._id);
+      await handBack(delivery, "The rider went offline; offered to others");
       handedBack += 1;
     }
   }
@@ -274,7 +297,7 @@ async function accept(user, deliveryId) {
   // First to accept wins: the update only applies while nobody has it.
   const claimed = await Delivery.updateOne(
     { _id: current._id, rider: null, status: "READY_FOR_PICKUP" },
-    { $set: { rider: me, status: "ASSIGNED", assignedAt: now } },
+    { $set: { rider: me, status: "ASSIGNED", assignedAt: now, pickupWarnedAt: null, lateAt: null } },
   );
   if (!claimed.modifiedCount) throw httpError(409, "Another rider already took this delivery.", "DELIVERY_ALREADY_ASSIGNED");
 
@@ -287,7 +310,11 @@ async function accept(user, deliveryId) {
   notifications.notify(delivery.vendor, {
     type: "DELIVERY", title: `${name} is coming for your parcel`, message: "Have the parcel ready for the Ikiguzi rider.", link: "/vendor/orders",
   }).catch(() => {});
-  return { delivery: await serialize(delivery, { rider, reveal: true }), message: `Head to ${delivery.pickupName}${km != null ? ` (${Math.round(km * 10) / 10} km away)` : ""}.` };
+  const due = new Date(now.getTime() + cfg.settings().pickupMinutes * 60 * 1000);
+  return {
+    delivery: await serialize(delivery, { rider, reveal: true }),
+    message: `Head to ${delivery.pickupName}${km != null ? ` (${Math.round(km * 10) / 10} km away)` : ""} and collect it by ${kigaliTime(due)}.`,
+  };
 }
 
 async function reject(user, deliveryId) {
@@ -434,6 +461,82 @@ async function wallet(user) {
   };
 }
 
+/* ----------------------------- late pickups ----------------------------- */
+
+/**
+ * Parcels accepted but not collected (every minute, as in KitchenLink): the
+ * rider is reminded shortly before the deadline, flagged at it (rider and
+ * admins are told), and the parcel goes to another rider a while after it.
+ */
+async function checkLatePickups(now = new Date()) {
+  const s = cfg.settings();
+  const minutes = (n) => n * 60 * 1000;
+  const counts = { warned: 0, flagged: 0, reassigned: 0 };
+  const waitingPickup = await Delivery.find({ status: "ASSIGNED", rider: { $ne: null } });
+  for (const delivery of waitingPickup) {
+    if (!delivery.assignedAt) continue;
+    const dueAt = new Date(new Date(delivery.assignedAt).getTime() + minutes(s.pickupMinutes));
+    const reassignAt = new Date(dueAt.getTime() + minutes(s.reassignAfterMinutes));
+    const riderId = idOf(delivery.rider);
+    if (now >= reassignAt) {
+      await handBack(delivery, `Not collected by ${kigaliTime(dueAt)}; offered to other riders`);
+      notifications.notify(riderId, {
+        type: "DELIVERY", title: "Delivery given to another rider",
+        message: `You didn't collect the parcel at ${delivery.pickupName} in time, so it went to another rider.`,
+        link: "/delivery", sms: `Ikiguzi: you didn't collect the parcel at ${delivery.pickupName} in time. It went to another rider.`,
+      }).catch(() => {});
+      notifications.notify(delivery.vendor, {
+        type: "DELIVERY", title: "A new rider is being found",
+        message: "The rider didn't come in time. Ikiguzi is offering your parcel to other riders.", link: "/vendor/orders",
+      }).catch(() => {});
+      counts.reassigned += 1;
+    } else if (now >= dueAt && !delivery.lateAt) {
+      delivery.lateAt = now;
+      delivery.history = withHistory(delivery, "ASSIGNED", `Not collected by ${kigaliTime(dueAt)}: late pickup`);
+      await delivery.save();
+      notifications.notify(riderId, {
+        type: "DELIVERY", title: "Late pickup",
+        message: `Collect the parcel at ${delivery.pickupName} now. At ${kigaliTime(reassignAt)} it goes to another rider.`,
+        link: "/delivery/trip", sms: `Ikiguzi: collect the parcel at ${delivery.pickupName} now. At ${kigaliTime(reassignAt)} it goes to another rider.`,
+      }).catch(() => {});
+      notifications.adminAlert({
+        title: "Late pickup",
+        message: `A rider hasn't collected a parcel at ${delivery.pickupName}. It is re-offered at ${kigaliTime(reassignAt)}, or hand it back now.`,
+        link: "/admin/deliveries",
+      }).catch(() => {});
+      counts.flagged += 1;
+    } else if (now >= new Date(dueAt.getTime() - minutes(s.pickupWarnMinutes)) && !delivery.pickupWarnedAt && !delivery.lateAt) {
+      delivery.pickupWarnedAt = now;
+      await delivery.save();
+      const left = Math.max(1, Math.ceil((dueAt - now) / 60000));
+      notifications.notify(riderId, {
+        type: "DELIVERY", title: `${left} minute${left === 1 ? "" : "s"} left to collect`,
+        message: `Collect the parcel at ${delivery.pickupName} by ${kigaliTime(dueAt)}.`,
+        link: "/delivery/trip", sms: `Ikiguzi: collect the parcel at ${delivery.pickupName} by ${kigaliTime(dueAt)}.`,
+      }).catch(() => {});
+      counts.warned += 1;
+    }
+  }
+  return counts;
+}
+
+/** Admin: takes a parcel back from a rider who hasn't collected it and offers it to others. */
+async function adminRelease(deliveryId, { note } = {}) {
+  const delivery = await Delivery.findById(deliveryId);
+  if (!delivery) throw httpError(404, "This delivery no longer exists.");
+  if (delivery.status !== "ASSIGNED") {
+    throw httpError(409, delivery.status === "READY_FOR_PICKUP" ? "No rider has this parcel yet." : "The rider already collected this parcel; it can't be handed to someone else now.");
+  }
+  const reason = String(note || "").trim().slice(0, 200);
+  const riderId = await handBack(delivery, `Ikiguzi gave the parcel to another rider${reason ? `: ${reason}` : ""}`);
+  notifications.notify(riderId, {
+    type: "DELIVERY", title: "Delivery given to another rider",
+    message: `Ikiguzi gave the parcel at ${delivery.pickupName} to another rider${reason ? `: ${reason}` : "."} Don't collect it.`,
+    link: "/delivery", sms: `Ikiguzi: the parcel at ${delivery.pickupName} went to another rider. Don't collect it.`,
+  }).catch(() => {});
+  return { released: true };
+}
+
 /* -------------------------------- sellers ------------------------------- */
 
 /** Parcels of an order cancelled before delivery are withdrawn from riders. */
@@ -478,7 +581,7 @@ async function reviewRider(riderId, { status, note } = {}) {
 }
 
 module.exports = {
-  createForOrder, dispatch, expireStaleOffers, cancelForOrder, isRiderParcel,
+  createForOrder, dispatch, expireStaleOffers, checkLatePickups, cancelForOrder, isRiderParcel,
   register, profile, updateLocation, setAvailability, listAvailable, active, accept, reject, updateStatus, confirm, history, stats, wallet,
-  listRiders, reviewRider,
+  listRiders, reviewRider, adminRelease,
 };

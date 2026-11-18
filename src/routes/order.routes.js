@@ -56,6 +56,7 @@ router.get("/vendor/orders", authorize("vendor", "supplier"), supplierSeller(), 
 // Seller records an order taken outside the online checkout (staff need the orders permission).
 router.post("/vendor/manual", authorize("vendor"), checkStaffPermission("canManageOrders"), limits.checkout, require("../controllers/manualOrder.controller").createManualOrder);
 router.get("/:id", getOrderById);
+router.get("/:id/live", require("../controllers/rider.controller").orderLive);
 router.post("/:id/cancel", protect, cancelOrderByBuyer);
 // Vendor fulfilment updates (excluding delivery payout triggers). Staff need
 // the order permission; the handler also checks the order has their items.

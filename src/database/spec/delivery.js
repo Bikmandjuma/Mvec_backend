@@ -15,6 +15,10 @@ module.exports = [
       lat: num(),
       lng: num(),
       locationAt: date(),
+      // From the phone's GPS with each fix, when it has them.
+      heading: num(),
+      speedMps: num(),
+      accuracyM: num(),
     },
   },
   {
@@ -43,6 +47,9 @@ module.exports = [
       // [{ status, at, note }]
       history: json([]),
       assignedAt: date(),
+      // Late pickup: reminded shortly before the deadline, flagged at it.
+      pickupWarnedAt: date(),
+      lateAt: date(),
       pickedUpAt: date(),
       deliveredAt: date(),
     },

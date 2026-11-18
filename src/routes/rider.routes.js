@@ -19,6 +19,7 @@ router.post("/deliveries/:id/accept", rider.accept);
 router.post("/deliveries/:id/reject", rider.reject);
 router.patch("/deliveries/:id/status", rider.status);
 router.post("/deliveries/:id/confirm", limits.verifyCode, rider.confirm);
+router.get("/deliveries/:id/navigation", rider.navigation);
 
 // Earnings wallet: withdrawals and their history work as for sellers.
 const payouts = require("../controllers/payout.controller");

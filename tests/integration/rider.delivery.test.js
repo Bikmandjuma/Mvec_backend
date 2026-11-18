@@ -203,4 +203,85 @@ describe("Ikiguzi riders deliver sellers' parcels", () => {
     expect((await request(app).patch("/api/orders/vendor/status").set(as("vendor")).send({ orderId: id, status: "CANCELLED" })).status).toBe(200);
     expect((await Delivery.findOne({ order: id })).status).toBe("CANCELLED");
   });
+  const acceptedParcel = async () => {
+    await goOnline("riderA", NEAR_STORE);
+    const id = await paidOrder();
+    await request(app).patch("/api/orders/vendor/status").set(as("vendor")).send({ orderId: id, status: "READY_FOR_SHIPMENT" });
+    const [offer] = (await request(app).get("/api/rider/deliveries/available").set(as("riderA"))).body.deliveries;
+    expect((await request(app).post(`/api/rider/deliveries/${offer.id}/accept`).set(as("riderA"))).status).toBe(200);
+    return { id, deliveryId: offer.id };
+  };
+
+  test("the buyer and the seller follow the rider live; others can't", async () => {
+    const { id, deliveryId } = await acceptedParcel();
+    await request(app).patch("/api/rider/location").set(as("riderA")).send({ ...NEAR_STORE, heading: 90, speedMps: 8, accuracyM: 12 });
+
+    const live = await request(app).get(`/api/orders/${id}/live`).set(as("buyer"));
+    expect(live.status).toBe(200);
+    const [parcel] = live.body.parcels;
+    expect([parcel.active, parcel.phase, parcel.target]).toEqual([true, "to_store", "store"]);
+    expect(parcel.rider.name).toBe("Rider Alpha");
+    expect(parcel.rider.plateNumber).toBe("RAB123A");
+    expect(parcel.rider.location.heading).toBe(90);
+    expect(parcel.route.distanceM).toBeGreaterThan(0);
+    expect(new Date(parcel.route.etaAt).getTime()).toBeGreaterThan(Date.now());
+    expect(parcel.route.steps).toBeUndefined();
+
+    expect((await request(app).get(`/api/orders/${id}/live`).set(as("vendor"))).body.parcels).toHaveLength(1);
+    expect((await request(app).get(`/api/orders/${id}/live`).set(as("riderB"))).status).toBe(403);
+
+    // The rider's own view has turn-by-turn steps; after pickup it leads to the buyer.
+    const nav = await request(app).get(`/api/rider/deliveries/${deliveryId}/navigation`).set(as("riderA"));
+    expect(nav.body.route.steps.length).toBeGreaterThan(0);
+    expect((await request(app).get(`/api/rider/deliveries/${deliveryId}/navigation`).set(as("riderB"))).status).toBe(404);
+    await request(app).patch(`/api/rider/deliveries/${deliveryId}/status`).set(as("riderA")).send({ status: "PICKED_UP" });
+    const after = (await request(app).get(`/api/orders/${id}/live`).set(as("buyer"))).body.parcels[0];
+    expect([after.phase, after.target]).toEqual(["to_buyer", "buyer"]);
+  });
+
+  test("a parcel not collected in time: reminder, then late, then another rider gets it", async () => {
+    const { deliveryId } = await acceptedParcel();
+    const assignedAt = new Date((await Delivery.findById(deliveryId)).assignedAt).getTime();
+    const at = (minutes) => new Date(assignedAt + minutes * 60 * 1000);
+
+    expect(await deliveryService.checkLatePickups(at(10))).toEqual({ warned: 0, flagged: 0, reassigned: 0 });
+    expect(await deliveryService.checkLatePickups(at(26))).toEqual({ warned: 1, flagged: 0, reassigned: 0 });
+    expect(await deliveryService.checkLatePickups(at(27))).toEqual({ warned: 0, flagged: 0, reassigned: 0 });
+    expect(await deliveryService.checkLatePickups(at(31))).toEqual({ warned: 0, flagged: 1, reassigned: 0 });
+    expect((await Delivery.findById(deliveryId)).lateAt).toBeTruthy();
+    expect(await deliveryService.checkLatePickups(at(46))).toEqual({ warned: 0, flagged: 0, reassigned: 1 });
+
+    const back = await Delivery.findById(deliveryId);
+    expect([back.status, back.rider]).toEqual(["READY_FOR_PICKUP", null]);
+    expect(back.rejectedBy.map(String)).toContain(String(riderA._id));
+  });
+
+  test("an admin sees parcels on the way and can hand one back before pickup", async () => {
+    const { deliveryId } = await acceptedParcel();
+    const list = await request(app).get("/api/admin/deliveries").set(as("admin"));
+    expect(list.status).toBe(200);
+    expect(list.body.deliveries.map((d) => d.deliveryId)).toEqual([deliveryId]);
+    expect(list.body.deliveries[0].rider.location).toBeTruthy();
+
+    expect((await request(app).post(`/api/admin/deliveries/${deliveryId}/release`).set(as("admin")).send({ note: "Rider unreachable" })).status).toBe(200);
+    expect((await Delivery.findById(deliveryId)).status).toBe("READY_FOR_PICKUP");
+    expect((await request(app).post(`/api/admin/deliveries/${deliveryId}/release`).set(as("admin"))).status).toBe(409);
+    expect((await request(app).post(`/api/admin/deliveries/${deliveryId}/release`).set(as("riderA"))).status).toBe(403);
+  });
+
+  test("a rider withdraws what they earned to mobile money", async () => {
+    const { id, deliveryId } = await acceptedParcel();
+    for (const status of ["PICKED_UP", "OUT_FOR_DELIVERY"]) await request(app).patch(`/api/rider/deliveries/${deliveryId}/status`).set(as("riderA")).send({ status });
+    const { deliveryOtp } = await Order.findById(id);
+    const earned = (await request(app).post(`/api/rider/deliveries/${deliveryId}/confirm`).set(as("riderA")).send({ code: deliveryOtp })).body.earned;
+    expect(earned).toBeGreaterThanOrEqual(1000);
+
+    const tooMuch = await request(app).post("/api/rider/wallet/withdrawals").set(as("riderA")).send({ amount: earned + 1, payoutDetails: { accountName: "Rider Alpha", accountNumber: "0788000603" } });
+    expect(tooMuch.status).toBe(400);
+    const paid = await request(app).post("/api/rider/wallet/withdrawals").set(as("riderA")).send({ amount: 1000, payoutDetails: { accountName: "Rider Alpha", accountNumber: "0788000603" } });
+    expect(paid.status).toBeLessThan(300);
+    const { wallet } = (await request(app).get("/api/rider/wallet").set(as("riderA"))).body;
+    expect(wallet.available).toBe(earned - 1000);
+    expect((await request(app).get("/api/rider/wallet/withdrawals").set(as("riderA"))).body.payouts).toHaveLength(1);
+  });
 });

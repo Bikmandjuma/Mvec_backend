@@ -51,6 +51,14 @@ describe("startup report", () => {
     }
   });
 
+  it("until SMS is set up, SHOW_RIDER_CODES lets a live server start, with warnings", () => {
+    const { errors, warnings } = startupReport({ ...safe, SMS_PROVIDER: "", SHOW_RIDER_CODES: "true" });
+    assert.deepEqual(errors, []);
+    assert.ok(warnings.some((w) => w.includes("SMS gateway")));
+    assert.ok(warnings.some((w) => w.includes("SHOW_RIDER_CODES")));
+    assert.ok(startupReport({ ...safe, SMS_PROVIDER: "" }).errors.some((e) => e.includes("SMS gateway")));
+  });
+
   it("missing payments and email are warnings, not errors", () => {
     const { errors, warnings } = startupReport({ ...safe, MOMO_BASE_URL: "", EMAIL_USER: "", ALLOW_UNSIGNED_WEBHOOKS: "true" });
     assert.deepEqual(errors, []);
