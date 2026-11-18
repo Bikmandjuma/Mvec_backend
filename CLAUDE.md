@@ -57,7 +57,9 @@ This is KitchenLink's delivery-worker model, with one job per seller parcel.
 - Free-delivery coupons never cover rider parcels.
 
 **A job's life**
-- When a seller marks its part READY_FOR_SHIPMENT, `createForOrder` creates a `Delivery` for each rider parcel and offers it.
+- Early dispatch, as in KitchenLink: when the buyer pays, `orderPaid` creates a `Delivery` for each rider parcel with `readyAt: null` and offers it straight away, so a rider can head over while the seller prepares it. When the seller marks its part READY_FOR_SHIPMENT, `createForOrder` sets `readyAt` (`markReady`), or creates the job if none exists (cash on delivery, older orders).
+- A rider who accepted early follows the seller's steps. `sellerStepped` tells them about each one, and `markReady` tells them to collect, by SMS too. `serialize` returns `ready`, `waitingForSeller` and `progress`, a timeline from order placed to delivered. Picking up is refused until `readyAt` (`PARCEL_NOT_READY`). The late-pickup clock counts from the later of accepting and ready.
+- Before pickup a rider can hand a parcel back (`POST /api/rider/deliveries/:id/release`). A seller's parcel can take hours to be ready, so a rider is never stuck holding one.
 - Offers go to approved, online riders with a fresh position within the radius, nearest first.
 - First to accept wins. A decline is never offered to that rider again, and unanswered offers re-dispatch every minute (`workers/slaWorker.js`).
 - Steps are ASSIGNED → PICKED_UP → OUT_FOR_DELIVERY, then `confirm` with the buyer's code.

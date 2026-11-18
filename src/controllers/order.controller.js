@@ -400,6 +400,8 @@ async function advanceFulfilment({ order, status, actor, sellerIds = handover.ve
   socketService.emitOrderStatusUpdate(order);
   notifications.orderStatusChanged(order, actor).catch(() => {});
   if (next === "READY_FOR_SHIPMENT" && riderParcels.length) await deliveryService.createForOrder(order, riderParcels);
+  // A rider who accepted early follows the seller's steps.
+  else if (riderParcels.length) await deliveryService.sellerStepped(order, riderParcels, next).catch(() => {});
   return order;
 }
 

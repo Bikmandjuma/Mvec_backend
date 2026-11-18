@@ -69,6 +69,7 @@ exports.stats = run((req) => deliveryService.stats(req.user));
 exports.wallet = run((req) => deliveryService.wallet(req.user));
 exports.accept = run((req) => deliveryService.accept(req.user, req.params.id));
 exports.reject = run((req) => deliveryService.reject(req.user, req.params.id));
+exports.release = run((req) => deliveryService.release(req.user, req.params.id));
 exports.status = run((req) => deliveryService.updateStatus(req.user, req.params.id, req.body));
 exports.confirm = run((req) => deliveryService.confirm(req.user, req.params.id, req.body));
 exports.navigation = run((req) => trackingService.riderNavigation(req.user, req.params.id));

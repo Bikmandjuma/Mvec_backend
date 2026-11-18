@@ -284,4 +284,50 @@ describe("Ikiguzi riders deliver sellers' parcels", () => {
     expect(wallet.available).toBe(earned - 1000);
     expect((await request(app).get("/api/rider/wallet/withdrawals").set(as("riderA"))).body.payouts).toHaveLength(1);
   });
+  test("early dispatch: offered once paid, the rider follows the seller's steps and collects only once ready", async () => {
+    const Notification = require("../../src/models/Notification");
+    const titlesFor = async (user) => (await Notification.find({ recipient: user._id }).lean()).map((n) => n.title);
+    expect((await goOnline("riderA", NEAR_STORE)).status).toBe(200);
+    const id = await paidOrder();
+
+    // Offered as soon as the buyer pays, saying the seller is still preparing it.
+    const offers = (await request(app).get("/api/rider/deliveries/available").set(as("riderA"))).body.deliveries;
+    expect(offers).toHaveLength(1);
+    expect([offers[0].ready, offers[0].waitingForSeller]).toEqual([false, true]);
+    const accepted = await request(app).post(`/api/rider/deliveries/${offers[0].id}/accept`).set(as("riderA"));
+    expect(accepted.status).toBe(200);
+    expect(accepted.body.message).toMatch(/still preparing/);
+    expect(accepted.body.delivery.allowedNextStatuses).toEqual([]);
+    const steps = accepted.body.delivery.progress.map((p) => [p.key, p.done]);
+    expect(steps.slice(0, 4)).toEqual([["PLACED", true], ["CONFIRMED", true], ["PROCESSING", true], ["READY_FOR_SHIPMENT", false]]);
+
+    // No pickup, and no late-pickup clock, before the seller has it ready.
+    const early = await request(app).patch(`/api/rider/deliveries/${offers[0].id}/status`).set(as("riderA")).send({ status: "PICKED_UP" });
+    expect([early.status, early.body.code]).toEqual([409, "PARCEL_NOT_READY"]);
+    expect((await deliveryService.checkLatePickups(new Date(Date.now() + 3 * 3600 * 1000))).reassigned).toBe(0);
+
+    // The seller's steps reach the rider; ready tells them to collect it.
+    expect((await request(app).patch("/api/orders/vendor/status").set(as("vendor")).send({ orderId: id, status: "READY_FOR_SHIPMENT" })).status).toBe(200);
+    expect(await titlesFor(riderA)).toContain("Parcel ready: collect it now");
+    const trip = (await request(app).get("/api/rider/deliveries/active").set(as("riderA"))).body.delivery;
+    expect([trip.ready, trip.allowedNextStatuses]).toEqual([true, ["PICKED_UP"]]);
+    expect(trip.progress.find((p) => p.key === "READY_FOR_SHIPMENT").done).toBe(true);
+    // The buyer's live view sees the rider heading to the store.
+    const live = (await request(app).get(`/api/orders/${id}/live`).set(as("buyer"))).body.parcels[0];
+    expect([live.active, live.ready, live.phase]).toEqual([true, true, "to_store"]);
+    expect((await request(app).patch(`/api/rider/deliveries/${offers[0].id}/status`).set(as("riderA")).send({ status: "PICKED_UP" })).status).toBe(200);
+  });
+
+  test("a rider who accepted early can hand the parcel back before pickup", async () => {
+    expect((await goOnline("riderA", NEAR_STORE)).status).toBe(200);
+    await paidOrder();
+    const [offer] = (await request(app).get("/api/rider/deliveries/available").set(as("riderA"))).body.deliveries;
+    await request(app).post(`/api/rider/deliveries/${offer.id}/accept`).set(as("riderA"));
+    expect((await request(app).post(`/api/rider/deliveries/${offer.id}/release`).set(as("riderA"))).status).toBe(200);
+    const back = await Delivery.findById(offer.id);
+    expect([back.status, back.rider]).toEqual(["READY_FOR_PICKUP", null]);
+    // Never offered to that rider again.
+    expect((await request(app).get("/api/rider/deliveries/available").set(as("riderA"))).body.deliveries).toHaveLength(0);
+    expect((await request(app).post(`/api/rider/deliveries/${offer.id}/release`).set(as("riderA"))).status).toBe(404);
+  });
 });

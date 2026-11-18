@@ -47,6 +47,9 @@ module.exports = [
       // [{ status, at, note }]
       history: json([]),
       assignedAt: date(),
+      // When the seller marked the parcel ready. Parcels are offered as soon as
+      // the buyer pays (null until ready), so a rider can head over early.
+      readyAt: date(),
       // Late pickup: reminded shortly before the deadline, flagged at it.
       pickupWarnedAt: date(),
       lateAt: date(),

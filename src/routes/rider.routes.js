@@ -17,6 +17,7 @@ router.get("/deliveries/active", rider.active);
 router.get("/deliveries/history", rider.history);
 router.post("/deliveries/:id/accept", rider.accept);
 router.post("/deliveries/:id/reject", rider.reject);
+router.post("/deliveries/:id/release", rider.release);
 router.patch("/deliveries/:id/status", rider.status);
 router.post("/deliveries/:id/confirm", limits.verifyCode, rider.confirm);
 router.get("/deliveries/:id/navigation", rider.navigation);

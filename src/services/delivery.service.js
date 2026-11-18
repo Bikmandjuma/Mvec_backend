@@ -1,10 +1,12 @@
 // Ikiguzi riders deliver sellers' parcels, the way KitchenLink's delivery
 // workers deliver kitchens' orders:
 //
-//   seller marks its part ready → a delivery job per rider parcel
-//   → offered to the nearest approved, online riders (first to accept wins)
-//   → rider picks it up → heads to the buyer → confirms with the buyer's code
-//   → the seller's money is released and the rider earns the parcel's fee.
+//   buyer pays → a delivery job per rider parcel, offered straight away to
+//   the nearest approved, online riders (first to accept wins), so a rider
+//   can head over while the seller prepares it (KitchenLink's early dispatch)
+//   → the rider follows the seller's steps and is told when it's ready
+//   → picks it up (only once ready) → heads to the buyer → confirms with the
+//   buyer's code → the seller's money is released and the rider earns the fee.
 //
 // A rider who declines is never offered that parcel again; unanswered offers
 // expire and the parcel is offered again (dispatch tick). A rider going
@@ -31,13 +33,43 @@ const withHistory = (delivery, status, note) => [...(delivery.history || []), { 
 
 /* ----------------------------- serializing ----------------------------- */
 
+const SELLER_FLOW = ["CONFIRMED", "PROCESSING", "READY_FOR_SHIPMENT", "SHIPPED", "OUT_FOR_DELIVERY", "DELIVERED"];
+const SELLER_STEP_TEXT = { CONFIRMED: "confirmed the order", PROCESSING: "is preparing the parcel" };
+
+/**
+ * The parcel's whole story for the rider, from order placed to delivered:
+ * [{ key, label, done, at }]. The seller's steps come from the order; ready
+ * is this seller's own parcel.
+ */
+function progressOf(delivery, order) {
+  const reached = SELLER_FLOW.indexOf(order?.orderStatus);
+  const ready = Boolean(delivery.readyAt);
+  const past = (step) => ready || reached >= SELLER_FLOW.indexOf(step);
+  const steps = [
+    { key: "PLACED", label: "Order placed", done: true, at: order?.createdAt || delivery.createdAt },
+    { key: "CONFIRMED", label: "Paid and confirmed", done: Boolean(order?.paidAt) || past("CONFIRMED"), at: order?.paidAt || null },
+    { key: "PROCESSING", label: "Seller preparing it", done: past("PROCESSING"), at: null },
+    { key: "READY_FOR_SHIPMENT", label: "Ready for pickup", done: ready, at: delivery.readyAt || null },
+    { key: "PICKED_UP", label: "Picked up", done: Boolean(delivery.pickedUpAt), at: delivery.pickedUpAt || null },
+    { key: "OUT_FOR_DELIVERY", label: "On the way to the buyer", done: ["OUT_FOR_DELIVERY", "DELIVERED"].includes(delivery.status), at: null },
+    { key: "DELIVERED", label: "Delivered", done: delivery.status === "DELIVERED", at: delivery.deliveredAt || null },
+  ];
+  // Times for steps the history recorded.
+  for (const h of delivery.history || []) {
+    const step = steps.find((x) => x.key === h.status && !x.at);
+    if (step) step.at = h.at;
+  }
+  return steps;
+}
+
 /**
  * What a rider sees. Before accepting, only the pickup area and the fee: the
  * buyer's name, phone and exact address appear once the parcel is theirs.
  */
 async function serialize(delivery, { rider = null, reveal = false, order = null } = {}) {
-  const o = order || (await Order.findById(delivery.order).select("orderNumber recipient customer items").lean());
+  const o = order || (await Order.findById(delivery.order).select("orderNumber recipient customer items createdAt paidAt orderStatus").lean());
   const mine = reveal && rider && idOf(delivery.rider) === idOf(rider.user);
+  const ready = Boolean(delivery.readyAt);
   const items = (o?.items || []).filter((i) => idOf(i.vendor) === idOf(delivery.vendor));
   const here = rider?.lat != null ? { lat: rider.lat, lng: rider.lng } : null;
   return {
@@ -46,7 +78,12 @@ async function serialize(delivery, { rider = null, reveal = false, order = null 
     orderNumber: o?.orderNumber || "",
     status: delivery.status,
     statusLabel: cfg.LABELS[delivery.status],
-    allowedNextStatuses: mine ? cfg.RIDER_STEPS[delivery.status] || [] : [],
+    // Collecting waits for the seller to mark the parcel ready.
+    allowedNextStatuses: mine ? (cfg.RIDER_STEPS[delivery.status] || []).filter((step) => step !== "PICKED_UP" || ready) : [],
+    ready,
+    readyAt: delivery.readyAt || null,
+    waitingForSeller: !ready && ["READY_FOR_PICKUP", "ASSIGNED"].includes(delivery.status),
+    progress: progressOf(delivery, o),
     canConfirm: mine && delivery.status === "OUT_FOR_DELIVERY",
     fee: Number(delivery.fee) || 0,
     distanceKm: Number(delivery.distanceKm) || 0,
@@ -83,14 +120,19 @@ const riderAccount = (rider, user) => ({
 
 /**
  * Turns the rider parcels of `vendorIds` into delivery jobs and offers them.
- * Called when a seller marks its part of a paid order ready.
+ * Called when the buyer pays (`ready: false`: the seller is still preparing)
+ * and when a seller marks its part ready (a job made at payment becomes ready).
  */
-async function createForOrder(order, vendorIds) {
+async function createForOrder(order, vendorIds, { ready = true } = {}) {
   const created = [];
   const drop = order.shippingAddress?.lat != null ? { lat: order.shippingAddress.lat, lng: order.shippingAddress.lng } : null;
   for (const parcel of order.shippingBreakdown || []) {
     if (parcel.method !== "RIDER" || !vendorIds.includes(idOf(parcel.vendor)) || !drop) continue;
-    if (await Delivery.findOne({ order: order._id, vendor: idOf(parcel.vendor) }).lean()) continue;
+    const existing = await Delivery.findOne({ order: order._id, vendor: idOf(parcel.vendor), status: { $ne: "CANCELLED" } });
+    if (existing) {
+      if (ready && !existing.readyAt) await markReady(existing);
+      continue;
+    }
     const store = parcel.store ? await Store.findById(parcel.store).lean() : null;
     if (store?.pickupLat == null) continue;
     const { km } = cfg.quote({ lat: store.pickupLat, lng: store.pickupLng }, drop);
@@ -107,12 +149,66 @@ async function createForOrder(order, vendorIds) {
       dropAddress: addressLine(order.shippingAddress),
       distanceKm: km,
       fee: Number(parcel.fee) || 0,
-      history: [{ status: "READY_FOR_PICKUP", at: new Date(), note: "Ready at the store" }],
+      readyAt: ready ? new Date() : null,
+      history: [ready
+        ? { status: "READY_FOR_SHIPMENT", at: new Date(), note: "Ready at the store" }
+        : { status: "READY_FOR_PICKUP", at: new Date(), note: "Order paid: offered to riders while the seller prepares it" }],
     });
     created.push(delivery);
     await dispatch(delivery._id);
   }
   return created;
+}
+
+/** The buyer paid: every rider parcel is offered now, before the seller has it ready. */
+async function orderPaid(order) {
+  const vendorIds = (order.shippingBreakdown || []).filter((p) => p.method === "RIDER" && p.vendor).map((p) => idOf(p.vendor));
+  if (!vendorIds.length) return [];
+  return createForOrder(order, vendorIds, { ready: false });
+}
+
+/**
+ * The seller marked the parcel ready. The rider who accepted early is told to
+ * collect it, and their pickup time counts from now; with no rider yet, the
+ * offer goes out again (riders who came into range meanwhile included).
+ */
+async function markReady(delivery) {
+  const now = new Date();
+  delivery.readyAt = now;
+  delivery.history = withHistory(delivery, "READY_FOR_SHIPMENT", "The seller marked the parcel ready");
+  await delivery.save();
+  if (delivery.rider && delivery.status === "ASSIGNED") {
+    const due = new Date(now.getTime() + cfg.settings().pickupMinutes * 60 * 1000);
+    notifications.notify(delivery.rider, {
+      type: "DELIVERY",
+      title: "Parcel ready: collect it now",
+      message: `${delivery.pickupName} has your parcel ready. Collect it by ${kigaliTime(due)}.`,
+      link: "/delivery/trip",
+      sms: `Ikiguzi: your parcel at ${delivery.pickupName} is ready. Collect it by ${kigaliTime(due)}.`,
+    }).catch(() => {});
+  } else if (!delivery.rider) {
+    await dispatch(delivery._id);
+  }
+  return delivery;
+}
+
+/** A seller moved the order on: riders holding its parcels hear about it. */
+async function sellerStepped(order, vendorIds, step) {
+  const text = SELLER_STEP_TEXT[step];
+  if (!text) return 0;
+  const held = await Delivery.find({ order: order._id, vendor: { $in: vendorIds.map(String) }, status: "ASSIGNED", rider: { $ne: null } });
+  for (const delivery of held) {
+    if (delivery.readyAt) continue;
+    delivery.history = withHistory(delivery, step, `The seller ${text}`);
+    await delivery.save();
+    notifications.notify(delivery.rider, {
+      type: "DELIVERY",
+      title: `${delivery.pickupName} ${text}`,
+      message: "You'll get a message the moment the parcel is ready to collect.",
+      link: "/delivery/trip",
+    }).catch(() => {});
+  }
+  return held.length;
 }
 
 /** Riders who may be offered a job at `pickup` right now, nearest first. */
@@ -148,7 +244,7 @@ async function dispatch(deliveryId) {
     notifications.notify(c.rider.user, {
       type: "DELIVERY",
       title: `New delivery: ${money(delivery.fee)}`,
-      message: `Pick up at ${delivery.pickupName}, ${Math.round(c.km * 10) / 10} km from you. Answer within ${s.offerTimeoutSeconds} seconds.`,
+      message: `Pick up at ${delivery.pickupName}, ${Math.round(c.km * 10) / 10} km from you${delivery.readyAt ? "" : " (the seller is still preparing it)"}. Answer within ${s.offerTimeoutSeconds} seconds.`,
       link: "/delivery",
       sms: `Ikiguzi: new delivery at ${delivery.pickupName} (${money(delivery.fee)}). Open the app to accept.`,
     }).catch(() => {});
@@ -311,9 +407,12 @@ async function accept(user, deliveryId) {
     type: "DELIVERY", title: `${name} is coming for your parcel`, message: "Have the parcel ready for the Ikiguzi rider.", link: "/vendor/orders",
   }).catch(() => {});
   const due = new Date(now.getTime() + cfg.settings().pickupMinutes * 60 * 1000);
+  const away = km != null ? ` (${Math.round(km * 10) / 10} km away)` : "";
   return {
     delivery: await serialize(delivery, { rider, reveal: true }),
-    message: `Head to ${delivery.pickupName}${km != null ? ` (${Math.round(km * 10) / 10} km away)` : ""} and collect it by ${kigaliTime(due)}.`,
+    message: delivery.readyAt
+      ? `Head to ${delivery.pickupName}${away} and collect it by ${kigaliTime(due)}.`
+      : `${delivery.pickupName}${away} is still preparing the parcel. You'll get a message the moment it's ready to collect.`,
   };
 }
 
@@ -331,6 +430,20 @@ async function reject(user, deliveryId) {
   return { declined: true };
 }
 
+/** The rider can't come after all: before pickup, they hand the parcel back to other riders. */
+async function release(user, deliveryId) {
+  await approvedRider(user);
+  const delivery = await Delivery.findOne({ _id: deliveryId, rider: idOf(user) });
+  if (!delivery) throw httpError(404, "This delivery isn't assigned to you.");
+  if (delivery.status !== "ASSIGNED") throw httpError(409, "You already collected this parcel. Deliver it and confirm with the buyer's code.");
+  await handBack(delivery, "The rider handed it back; offered to others");
+  notifications.notify(delivery.vendor, {
+    type: "DELIVERY", title: "A new rider is being found",
+    message: "The rider can't come after all. Ikiguzi is offering your parcel to other riders.", link: "/vendor/orders",
+  }).catch(() => {});
+  return { released: true };
+}
+
 /** picked_up, then out for delivery: each step only from the one before it. */
 async function updateStatus(user, deliveryId, body = {}) {
   const rider = await approvedRider(user);
@@ -339,6 +452,9 @@ async function updateStatus(user, deliveryId, body = {}) {
   const next = String(body.status || "").toUpperCase();
   if (!(cfg.RIDER_STEPS[delivery.status] || []).includes(next)) {
     throw httpError(409, `This delivery is ${cfg.LABELS[delivery.status].toLowerCase()}; that step isn't possible now.`, "INVALID_STEP");
+  }
+  if (next === "PICKED_UP" && !delivery.readyAt) {
+    throw httpError(409, "The seller hasn't marked this parcel ready yet. Wait nearby: you'll get a message the moment it is.", "PARCEL_NOT_READY");
   }
   const now = new Date();
   delivery.status = next;
@@ -474,8 +590,11 @@ async function checkLatePickups(now = new Date()) {
   const counts = { warned: 0, flagged: 0, reassigned: 0 };
   const waitingPickup = await Delivery.find({ status: "ASSIGNED", rider: { $ne: null } });
   for (const delivery of waitingPickup) {
-    if (!delivery.assignedAt) continue;
-    const dueAt = new Date(new Date(delivery.assignedAt).getTime() + minutes(s.pickupMinutes));
+    // The pickup time counts from when the rider accepted, or from when the
+    // parcel became ready if they accepted while the seller was preparing it.
+    if (!delivery.assignedAt || !delivery.readyAt) continue;
+    const from = Math.max(new Date(delivery.assignedAt).getTime(), new Date(delivery.readyAt).getTime());
+    const dueAt = new Date(from + minutes(s.pickupMinutes));
     const reassignAt = new Date(dueAt.getTime() + minutes(s.reassignAfterMinutes));
     const riderId = idOf(delivery.rider);
     if (now >= reassignAt) {
@@ -581,7 +700,7 @@ async function reviewRider(riderId, { status, note } = {}) {
 }
 
 module.exports = {
-  createForOrder, dispatch, expireStaleOffers, checkLatePickups, cancelForOrder, isRiderParcel,
-  register, profile, updateLocation, setAvailability, listAvailable, active, accept, reject, updateStatus, confirm, history, stats, wallet,
+  createForOrder, orderPaid, markReady, sellerStepped, dispatch, expireStaleOffers, checkLatePickups, cancelForOrder, isRiderParcel,
+  register, profile, updateLocation, setAvailability, listAvailable, active, accept, reject, release, updateStatus, confirm, history, stats, wallet,
   listRiders, reviewRider, adminRelease,
 };

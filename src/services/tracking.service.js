@@ -95,6 +95,8 @@ async function view(delivery, { withSteps = false, withRoute = true } = {}) {
     orderNumber: order?.orderNumber || "",
     status: delivery.status,
     statusLabel: cfg.LABELS[delivery.status],
+    // False while the seller is still preparing the parcel (the rider may already be on the way).
+    ready: Boolean(delivery.readyAt),
     phase,
     phaseLabel: PHASE_LABELS[phase],
     rider: {

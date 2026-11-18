@@ -467,6 +467,8 @@ exports.confirmPayment = async (req, res) => {
     session.endSession();
 
     socketService.emitOrderStatusUpdate(order);
+    // Rider parcels are offered now, so a rider can head over while the seller prepares them.
+    await require("../services/delivery.service").orderPaid(order).catch((err) => console.error("Rider offer failed:", err.message));
 
     return res.status(200).json({
       message: "Payment confirmed successfully",

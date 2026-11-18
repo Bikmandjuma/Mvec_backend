@@ -168,6 +168,8 @@ exports.processPaymentWebhook = async ({ provider, externalTransactionId, orderI
     socketService.emitOrderStatusUpdate(order);
     socketService.emitToRoom(`user:${order.user}`, "payment_confirmed", { orderId: order._id.toString() });
     await require("./notification.service").paymentConfirmed(order).catch((err) => console.error("Payment notification failed:", err.message));
+    // Rider parcels are offered now, so a rider can head over while the seller prepares them.
+    await require("./delivery.service").orderPaid(order).catch((err) => console.error("Rider offer failed:", err.message));
 
     return { status: "SUCCESS", order, webhookLog };
   } catch (error) {
