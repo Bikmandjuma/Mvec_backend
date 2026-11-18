@@ -1059,10 +1059,10 @@ exports.sendOtp = async (req, res) => {
     } catch (sendError) {
       console.error("OTP delivery failed:", sendError.message);
     }
-    // Temporary, until SMS is set up (SHOW_RIDER_CODES=true): riders see their
+    // Temporary, until SMS is set up (on unless SHOW_RIDER_CODES=false): riders see their
     // code on screen instead. Only for rider sign-up on a number with no
     // account, and rider sign-in; buyers, sellers and admins never see one.
-    const riderCode = process.env.SHOW_RIDER_CODES === "true" && (
+    const riderCode = require("../config/env").showRiderCodes() && (
       (purpose === "registration" && req.body.role === "delivery" && !account) ||
       (purpose === "login" && account?.role === "delivery")
     );

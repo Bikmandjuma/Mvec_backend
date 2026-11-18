@@ -2,6 +2,9 @@ const Product = require("../models/Product");
 const Category = require("../models/Category");
 const orm = require("../database/orm");
 const { resolveOwnedStore } = require("../utils/vendorStore.util");
+const listingApproval = require("../services/listingApproval.service");
+
+const WAITING_NOTE = "Buyers will see it once Ikiguzi approves your store.";
 
 // http(s)://<host>/uploads/<file> — the upload route used to return an absolute
 // URL built from the request host, so the host that happened to serve the
@@ -159,14 +162,18 @@ exports.createProduct = async (req, res) => {
     }
     const storeCheck = await checkProductStore(vendorId, payload.store);
     if (storeCheck.error) return res.status(400).json({ message: storeCheck.error });
+    // Until Ikiguzi approves the seller, a product meant to go live waits.
+    const approved = await listingApproval.sellerApproved(vendorId);
     const product = new Product({
       ...payload,
+      status: listingApproval.statusFor(approved, payload.status || "ACTIVE"),
       store: storeCheck.store ?? null,
       vendor: vendorId,
     });
 
     await product.save();
-    return res.status(201).json({ message: "Product created successfully", product });
+    const waiting = product.status === listingApproval.PENDING;
+    return res.status(201).json({ message: waiting ? `Product saved. ${WAITING_NOTE}` : "Product created successfully", product, waitingForApproval: waiting });
   } catch (error) {
     if (error.code === 11000) {
       const field = Object.keys(error.keyPattern || {})[0] || "field";
@@ -257,13 +264,21 @@ exports.updateProduct = async (req, res) => {
         updates.status = "ACTIVE"; // Auto-reactivate when re-stocked
       }
     }
+    // A product waiting for approval keeps waiting, whatever its stock.
+    if (updates.status !== undefined || product.status === listingApproval.PENDING) {
+      const wanted = updates.status ?? product.status;
+      const approved = await listingApproval.sellerApproved(product.vendor);
+      updates.status = wanted === listingApproval.PENDING
+        ? (approved ? ((updates.stockQuantity ?? product.stockQuantity) > 0 ? "ACTIVE" : "OUT_OF_STOCK") : wanted)
+        : listingApproval.statusFor(approved, wanted);
+    }
     // 3. Apply updates and save
     Object.assign(product, updates);
     await product.save();
 
     return res
       .status(200)
-      .json({ message: "Product updated successfully", product });
+      .json({ message: product.status === listingApproval.PENDING ? `Product saved. ${WAITING_NOTE}` : "Product updated successfully", product, waitingForApproval: product.status === listingApproval.PENDING });
   } catch (error) {
     return res.status(400).json({ message: error.message });
   }

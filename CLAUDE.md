@@ -20,8 +20,9 @@ Tests need MySQL. `tests/helpers/mysql.js` creates and migrates the `_test` data
 ## Development or live (`src/config/env.js`)
 
 - `isLive()` is the only switch. Only `NODE_ENV=development` or `test` is a development server. Anything else, including no `NODE_ENV`, is live. Never compare `NODE_ENV` to `"production"`.
-- On a live server, `startupReport()` refuses to start with unsafe settings: a weak `JWT_SECRET`, no database password, a localhost `FRONTEND_URL`, example webhook secrets or admin password, or no SMS gateway. A development server only warns.
+- On a live server, `startupReport()` refuses to start with unsafe settings: a weak `JWT_SECRET`, no database password, a localhost `FRONTEND_URL`, example webhook secrets or admin password, or no SMS gateway while `SHOW_RIDER_CODES=false`. A development server only warns.
 - A live server never simulates payments, never prints SMS codes, and never accepts unsigned webhooks.
+- The one exception, until SMS works: riders (sign-up and sign-in only) see their code on screen when no text can be sent. It is on by default, live servers included (`showRiderCodes()` in `config/env.js`). `SHOW_RIDER_CODES=false` turns it off. Keep it on until the owner says otherwise.
 - Requiring `src/config/env.js` loads `.env`, so `server.js` requires it first.
 
 ## Data layer
@@ -31,6 +32,12 @@ Tests need MySQL. `tests/helpers/mysql.js` creates and migrates the `_test` data
 - A new field needs a migration in `src/database/migrations/` plus the spec. Hand-written models also need their `mongoose-compat/registry.js` entry.
 - `updateOne` / `findOneAndUpdate` re-check the filter inside the UPDATE. Use a conditional update for anything two people can race on, as in "first rider to accept wins" and the code-attempt counters.
 - Ids are 24-character hex strings.
+
+## Sellers before approval (`services/listingApproval.service.js`)
+
+- Vendors and suppliers can do everything from sign-up: add products, stock, stores and prices. Buyers see their products only once an admin sets the seller's `verificationStatus` to VERIFIED.
+- Until then, a product meant to go live is stored as `PENDING_APPROVAL`, which no buyer-facing query shows (they all read `ACTIVE`/`OUT_OF_STOCK`). Create, update and supplier publish apply `statusFor()`. Stock changes never move a waiting product to `OUT_OF_STOCK`.
+- The admin's verify decision calls `followDecision()`. VERIFIED puts waiting products live, and REJECTED takes live ones back to waiting. Drafts and hidden products stay as the seller left them.
 
 ## Money
 

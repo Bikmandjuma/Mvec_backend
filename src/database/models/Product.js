@@ -82,7 +82,8 @@ module.exports = (sequelize) => {
         }
         if (!p.sku) p.sku = `SKU-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
         if (p.changed("stockQuantity")) {
-          if (p.stockQuantity <= 0) { p.stockQuantity = 0; p.status = "OUT_OF_STOCK"; }
+          // A product waiting for the seller's approval stays hidden at any stock.
+          if (p.stockQuantity <= 0) { p.stockQuantity = 0; if (p.status !== "PENDING_APPROVAL") p.status = "OUT_OF_STOCK"; }
           else if (p.status === "OUT_OF_STOCK") p.status = "ACTIVE";
         }
       },

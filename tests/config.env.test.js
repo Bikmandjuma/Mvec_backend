@@ -44,6 +44,7 @@ describe("startup report", () => {
       MOMO_WEBHOOK_SECRET: "change_me_momo_webhook_secret",
       ADMIN_PASSWORD: "your_admin_password_here",
       SMS_PROVIDER: "log",
+      SHOW_RIDER_CODES: "false",
     });
     assert.equal(errors.length, 6);
     for (const key of ["JWT_SECRET", "DB_PASSWORD", "FRONTEND_URL", "MOMO_WEBHOOK_SECRET", "ADMIN_PASSWORD", "SMS gateway"]) {
@@ -51,12 +52,14 @@ describe("startup report", () => {
     }
   });
 
-  it("until SMS is set up, SHOW_RIDER_CODES lets a live server start, with warnings", () => {
-    const { errors, warnings } = startupReport({ ...safe, SMS_PROVIDER: "", SHOW_RIDER_CODES: "true" });
-    assert.deepEqual(errors, []);
-    assert.ok(warnings.some((w) => w.includes("SMS gateway")));
-    assert.ok(warnings.some((w) => w.includes("SHOW_RIDER_CODES")));
-    assert.ok(startupReport({ ...safe, SMS_PROVIDER: "" }).errors.some((e) => e.includes("SMS gateway")));
+  it("until SMS is set up, riders see codes on screen by default, so a live server starts, with warnings", () => {
+    for (const flag of [undefined, "", "true"]) {
+      const { errors, warnings } = startupReport({ ...safe, SMS_PROVIDER: "", SHOW_RIDER_CODES: flag });
+      assert.deepEqual(errors, []);
+      assert.ok(warnings.some((w) => w.includes("SMS gateway")));
+      assert.ok(warnings.some((w) => w.includes("SHOW_RIDER_CODES=false")));
+    }
+    assert.ok(startupReport({ ...safe, SMS_PROVIDER: "", SHOW_RIDER_CODES: "false" }).errors.some((e) => e.includes("SMS gateway")));
   });
 
   it("missing payments and email are warnings, not errors", () => {

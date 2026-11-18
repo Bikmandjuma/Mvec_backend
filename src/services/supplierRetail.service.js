@@ -93,7 +93,9 @@ async function record({ supplier, wholesale, listing, units, toMarketplace, perf
  * `units` from wholesale stock onto it. { price, units }
  */
 async function publish(supplier, productId, { price, units: rawUnits, performedBy } = {}) {
-  if (supplier.status !== "ACTIVE" || supplier.verificationStatus !== "VERIFIED") throw httpError(403, "Ikiguzi must verify your supplier profile before you sell to buyers.");
+  if (supplier.status !== "ACTIVE") throw httpError(403, "Your supplier account is paused, so you can't put products on the marketplace.");
+  // Before Ikiguzi verifies the supplier the listing is made but waits (listingApproval.service).
+  const live = (stockAfter) => (supplier.verificationStatus === "VERIFIED" ? (stockAfter > 0 ? "ACTIVE" : "OUT_OF_STOCK") : "PENDING_APPROVAL");
   const wholesale = await ownedProduct(supplier, productId);
   if (wholesale.status === "ARCHIVED") throw httpError(400, "Restore this product before publishing it.");
   const buyerPrice = Math.round(Number(price));
@@ -110,7 +112,7 @@ async function publish(supplier, productId, { price, units: rawUnits, performedB
       const stockAfter = Number(listing.stockQuantity) + units;
       listing = await Product.findByIdAndUpdate(listing._id, {
         $inc: { stockQuantity: units },
-        $set: { price: buyerPrice, costPrice: unitCost, status: stockAfter > 0 ? "ACTIVE" : "OUT_OF_STOCK", discountType: null, discountValue: null, discountPrice: null },
+        $set: { price: buyerPrice, costPrice: unitCost, status: live(stockAfter), discountType: null, discountValue: null, discountPrice: null },
       }, { new: true });
     } else {
       const category = await stock.categoryFor([wholesale.category]);
@@ -127,7 +129,7 @@ async function publish(supplier, productId, { price, units: rawUnits, performedB
         price: buyerPrice,
         costPrice: unitCost,
         stockQuantity: units,
-        status: "ACTIVE",
+        status: live(units),
         media: { mainImage: wholesale.media?.mainImage || "", gallery: wholesale.media?.gallery || [] },
       });
       await WholesaleProduct.updateOne({ _id: wholesale._id }, { $set: { retailProduct: listing._id } });

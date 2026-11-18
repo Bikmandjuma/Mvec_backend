@@ -447,10 +447,12 @@ exports.adminVerifyVendor = async (req, res) => {
     vendor.verificationStatus = decision;
     vendor.verificationNote = decision === "REJECTED" ? reason : "";
     await vendor.save();
+    // Approval puts the seller's waiting products in front of buyers; rejection takes them off.
+    const listed = await require("../services/listingApproval.service").followDecision(vendor.user, decision);
     await User.findByIdAndUpdate(vendor.user, { verificationStatus: decision });
     await require("../services/notification.service").verificationDecision(vendor.user, { kind: "seller", name: vendor.businessName, decision, reason });
 
-    return res.status(200).json({ message: `Vendor ${decision.toLowerCase()}`, vendor });
+    return res.status(200).json({ message: `Vendor ${decision.toLowerCase()}`, vendor, productsChanged: listed });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }

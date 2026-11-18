@@ -309,10 +309,12 @@ exports.adminVerifySupplier = async (req, res) => {
     supplier.verificationStatus = decision;
     supplier.verificationNote = decision === "REJECTED" ? reason : "";
     await supplier.save();
+    // Approval puts the seller's waiting products in front of buyers; rejection takes them off.
+    const listed = await require("../services/listingApproval.service").followDecision(supplier.user, decision);
     await require("../models/User").findByIdAndUpdate(supplier.user, { verificationStatus: decision });
     await require("../services/notification.service").verificationDecision(supplier.user, { kind: "supplier", name: supplier.businessName, decision, reason });
 
-    return res.status(200).json({ message: `Supplier ${decision.toLowerCase()}`, supplier });
+    return res.status(200).json({ message: `Supplier ${decision.toLowerCase()}`, supplier, productsChanged: listed });
   } catch (error) {
     return res.status(500).json({ message: error.message });
   }
@@ -519,7 +521,15 @@ exports.moveProductsToStore = storeAction((supplier, req) => supplierStores.move
 // @access  Private (supplier owner, or team roles with "catalog")
 exports.publishToMarketplace = storeAction(async (supplier, req) => {
   const result = await supplierRetail.publish(supplier, req.params.productId, { ...(req.body || {}), performedBy: req.user._id });
-  return { message: `${result.listing.name} is on the marketplace: ${result.listing.stockQuantity} units at ${Math.round(result.listing.price).toLocaleString("en-RW")} RWF.`, ...result };
+  const price = `${result.listing.stockQuantity} units at ${Math.round(result.listing.price).toLocaleString("en-RW")} RWF`;
+  const waiting = result.listing.status === "PENDING_APPROVAL";
+  return {
+    message: waiting
+      ? `${result.listing.name} is ready for the marketplace (${price}). Buyers will see it once Ikiguzi verifies your supplier profile.`
+      : `${result.listing.name} is on the marketplace: ${price}.`,
+    waitingForApproval: waiting,
+    ...result,
+  };
 });
 exports.moveListingStock = storeAction(async (supplier, req) => {
   const result = await supplierRetail.moveListingStock(supplier, req.params.productId, { ...(req.body || {}), performedBy: req.user._id });
